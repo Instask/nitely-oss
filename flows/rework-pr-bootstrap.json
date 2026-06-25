@@ -1,0 +1,60 @@
+{
+  "apiVersion": "nitely.dev/v1alpha1",
+  "kind": "Flow",
+  "metadata": {
+    "name": "rework-pr-bootstrap"
+  },
+  "spec": {
+    "maxAttempts": 2,
+    "stages": [
+      {
+        "id": "implement",
+        "type": "agent",
+        "runtimes": [
+          { "runtime": "claude" },
+          { "runtime": "codex" }
+        ],
+        "prompt": "Implement the supplied Nitely rework specification and technical design on the existing pull request branch. Use TDD, keep the change scoped, update docs when behavior changes, and avoid weakening existing tests. Produce a concise one-line pr-title artifact that describes the rework.",
+        "inputs": ["spec", "tech-design"],
+        "outputs": ["implementation", "pr-title"]
+      },
+      {
+        "id": "test",
+        "type": "command",
+        "command": "pnpm exec vitest run && pnpm run check && pnpm run build",
+        "inputs": ["implementation"],
+        "outputs": ["test-report"]
+      },
+      {
+        "id": "review",
+        "type": "gate",
+        "mode": "review",
+        "runtimes": [
+          { "runtime": "claude" },
+          { "runtime": "codex" }
+        ],
+        "prompt": "Review the reworked pull request branch against the specification and technical design. Check for missing tests, broken CLI contracts, unsafe filesystem behavior, weak event semantics, and incomplete documentation. Do not modify files during review. Write `Review verdict: pass` when there are no P0/P1/blocking findings. Write `Review verdict: fail` when any P0/P1/blocking issue exists, and list P0/P1 findings first.",
+        "inputs": ["spec", "tech-design", "implementation", "test-report"],
+        "outputs": ["review"]
+      },
+      {
+        "id": "update",
+        "type": "update-change",
+        "provider": "github-cli",
+        "inputs": ["implementation", "test-report", "review", "pr-title"],
+        "outputs": ["change-request"]
+      },
+      {
+        "id": "reflect",
+        "type": "agent",
+        "runtimes": [
+          { "runtime": "claude" },
+          { "runtime": "codex" }
+        ],
+        "prompt": "Reflect on this issue execution after the change request has been updated. Review the source issue/spec, technical design, implementation summary, test report, review output, and change request result. Identify actionable improvements across specs, prompts, tests, workflow policy, run observability, deployment, and product behavior. Search existing GitHub issues before creating follow-ups. Create GitHub issues only for actionable non-duplicate improvements, include source issue, PR, run id, and relevant artifact/log links when available, and apply appropriate priority labels. Write a concise reflection artifact listing created issue URLs, duplicates found, non-actions/observations, or a clean result when no actionable improvement remains.",
+        "inputs": ["spec", "tech-design", "implementation", "test-report", "review", "change-request"],
+        "outputs": ["reflection"]
+      }
+    ]
+  }
+}

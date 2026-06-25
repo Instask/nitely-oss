@@ -1,0 +1,27 @@
+{
+  "apiVersion": "nitely.dev/v1alpha1",
+  "kind": "Flow",
+  "metadata": {
+    "name": "implement-spec"
+  },
+  "spec": {
+    "maxAttempts": 2,
+    "stages": [
+      {
+        "id": "implement",
+        "type": "agent",
+        "runtime": "mock",
+        "prompt": "Implement the supplied specification.",
+        "inputs": ["spec"],
+        "outputs": ["implementation"]
+      },
+      {
+        "id": "test",
+        "type": "command",
+        "command": "npm test",
+        "inputs": ["implementation"],
+        "outputs": ["test-report"]
+      }
+    ]
+  }
+}

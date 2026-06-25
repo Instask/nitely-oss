@@ -1,0 +1,17 @@
+{
+  "apiVersion": "nitely.dev/v1alpha1",
+  "kind": "Flow",
+  "metadata": {
+    "name": "invalid"
+  },
+  "spec": {
+    "stages": [
+      {
+        "id": "implement",
+        "type": "agent",
+        "inputs": [],
+        "outputs": []
+      }
+    ]
+  }
+}

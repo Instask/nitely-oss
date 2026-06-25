@@ -1,0 +1,8 @@
+.worktrees/
+node_modules/
+dist/
+.nitely/
+.nightly/
+.pnpm-store/
+coverage/
+*.log

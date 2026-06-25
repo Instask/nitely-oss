@@ -1,0 +1,2335 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="/support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#fafafa; --panel:#ffffff; --panel-2:#fbfbfc; --ink:#18181b; --muted:#71717a; --faint:#a1a1aa;
+    --line:#e8e8ec; --line-soft:#f2f2f4; --accent:#5b50e8; --accent-soft:rgba(91,80,232,.10);
+    --sidebar:#fcfcfd; --code-bg:#0f0f12; --code-ink:#e7e7ea; --rpad:13px;
+  }
+  [data-theme="dark"]{
+    --bg:#0a0a0b; --panel:#141416; --panel-2:#161618; --ink:#fafafa; --muted:#a1a1aa; --faint:#6b6b73;
+    --line:#272729; --line-soft:#1c1c1f; --sidebar:#0e0e10; --accent-soft:rgba(124,116,245,.16); --code-bg:#000000; --code-ink:#e7e7ea;
+  }
+  [data-density="compact"]{ --rpad:8px; }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; padding:0; }
+  body{ background:var(--bg); font-family:"Geist", ui-sans-serif, system-ui, sans-serif; }
+  ::selection{ background:var(--accent-soft); }
+  @keyframes nitely-pulse{ 0%,100%{ opacity:1; } 50%{ opacity:.3; } }
+  @keyframes nitely-spin{ to{ transform:rotate(360deg); } }
+  @keyframes nitely-fade{ from{ opacity:0; transform:translateY(6px); } to{ opacity:1; transform:none; } }
+  @keyframes nitely-slide{ from{ transform:translateX(100%); } to{ transform:none; } }
+  ::-webkit-scrollbar{ width:11px; height:11px; }
+  ::-webkit-scrollbar-thumb{ background:var(--line); border-radius:10px; border:3px solid transparent; background-clip:padding-box; }
+  ::-webkit-scrollbar-thumb:hover{ background:var(--faint); background-clip:padding-box; border:3px solid transparent; }
+  .console-shell{ overflow-x:clip; }
+  .console-content,.mobile-card-list,.mobile-grid-row,.mobile-detail-layout,.mobile-flow-editor,.mobile-provider-grid{ min-width:0; }
+  .mobile-scroll{ max-width:100%; overflow:auto; }
+  @media (max-width: 860px){
+    .console-shell{ display:block !important; min-width:0 !important; width:100% !important; }
+    .console-sidebar{ position:sticky !important; top:0 !important; z-index:30 !important; height:auto !important; border-right:0 !important; border-bottom:1px solid var(--line) !important; padding:10px 12px !important; }
+    .console-sidebar > div:first-child{ padding:2px 2px 10px !important; }
+    .console-sidebar nav{ flex-direction:row !important; gap:6px !important; overflow-x:auto !important; padding-bottom:2px !important; scrollbar-width:none; }
+    .console-sidebar nav::-webkit-scrollbar{ display:none; }
+    .console-sidebar nav button{ min-width:44px !important; min-height:44px !important; flex:1 0 auto !important; justify-content:center !important; }
+    .console-sidebar > div:last-child{ display:none !important; }
+    .console-main{ min-width:0 !important; }
+    .console-content{ max-width:none !important; padding:18px 12px 72px !important; }
+    .mobile-page-head{ flex-direction:column !important; align-items:stretch !important; gap:12px !important; margin-bottom:16px !important; }
+    .mobile-actions{ width:100% !important; flex-wrap:wrap !important; align-items:stretch !important; flex:none !important; }
+    .mobile-actions > *{ min-height:44px !important; flex:1 1 150px !important; justify-content:center !important; }
+    .mobile-form{ grid-template-columns:1fr !important; }
+    .mobile-form label{ grid-column:auto !important; }
+    .mobile-card-list{ border-radius:10px !important; }
+    .mobile-grid-head{ display:none !important; }
+    .mobile-grid-row{ grid-template-columns:1fr !important; gap:9px !important; padding:14px !important; align-items:start !important; }
+    .mobile-grid-row > *{ min-width:0 !important; text-align:left !important; }
+    .mobile-grid-row [style*="text-align:right"]{ text-align:left !important; }
+    .mobile-grid-row [style*="white-space:nowrap"]{ white-space:normal !important; overflow-wrap:anywhere !important; }
+    .mobile-inline-meta{ flex-wrap:wrap !important; align-items:flex-start !important; }
+    .mobile-detail-layout,.mobile-flow-editor,.mobile-provider-grid{ grid-template-columns:1fr !important; gap:16px !important; }
+    .mobile-rail{ position:static !important; top:auto !important; }
+    .mobile-stage-summary{ align-items:flex-start !important; }
+    .mobile-stage-summary > span[style*="margin-left:auto"]{ margin-left:0 !important; width:100% !important; }
+    .mobile-context-row,.mobile-evidence-row{ grid-template-columns:1fr !important; gap:7px !important; }
+    .mobile-slide-panel{ width:100vw !important; max-width:100vw !important; }
+    input,select,textarea,button,a{ min-height:44px; }
+    pre,textarea{ max-width:100%; }
+  }
+  @media (max-width: 460px){
+    .console-sidebar nav button span:last-child{ display:none; }
+    .console-content{ padding-left:10px !important; padding-right:10px !important; }
+    h1{ font-size:22px !important; line-height:1.18 !important; }
+  }
+</style>
+</helmet>
+
+<div class="console-shell" data-theme="{{ themeAttr }}" data-density="{{ densityAttr }}" style="{{ rootStyle }}">
+
+  <sc-if value="{{ showLogin }}" hint-placeholder-val="{{ false }}">
+  <section data-screen-label="Login" style="width:min(380px,calc(100vw - 40px));">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:24px;">
+      <div style="width:30px;height:30px;border-radius:7px;background:var(--accent);display:flex;align-items:center;justify-content:center;flex:none;box-shadow:0 1px 2px rgba(0,0,0,.18);">
+        <div style="width:10px;height:10px;border-radius:50%;background:#fff;"></div>
+      </div>
+      <div style="font-size:16px;font-weight:600;color:var(--ink);">Nitely</div>
+    </div>
+    <form ref="{{ loginForm }}" style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px;display:flex;flex-direction:column;gap:14px;box-shadow:0 16px 40px rgba(0,0,0,.08);">
+      <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">Email
+        <input name="email" type="email" autocomplete="username" style="{{ inputStyle }}">
+      </label>
+      <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">Password
+        <input name="password" type="password" autocomplete="current-password" style="{{ inputStyle }}">
+      </label>
+      <sc-if value="{{ hasLoginError }}" hint-placeholder-val="{{ false }}">
+        <div style="font-size:12.5px;color:#dc2626;background:rgba(220,38,38,.08);border:1px solid rgba(220,38,38,.18);border-radius:8px;padding:9px 10px;">{{ loginError }}</div>
+      </sc-if>
+      <button onClick="{{ signIn }}" style="border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:8px;padding:9px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;">Sign in</button>
+    </form>
+  </section>
+  </sc-if>
+
+  <sc-if value="{{ showConsole }}" hint-placeholder-val="{{ true }}">
+  <aside class="console-sidebar" style="background:var(--sidebar);border-right:1px solid var(--line);padding:20px 16px;display:flex;flex-direction:column;height:100vh;position:sticky;top:0;align-self:start;">
+    <div style="display:flex;align-items:center;gap:10px;padding:4px 8px 22px;">
+      <div style="width:26px;height:26px;border-radius:7px;background:var(--accent);display:flex;align-items:center;justify-content:center;flex:none;box-shadow:0 1px 2px rgba(0,0,0,.18);">
+        <div style="width:9px;height:9px;border-radius:50%;background:#fff;box-shadow:5px -1px 0 -2px rgba(255,255,255,.55);"></div>
+      </div>
+      <div style="font-size:15px;font-weight:600;letter-spacing:-.01em;color:var(--ink);">Nitely</div>
+      <div style="margin-left:auto;font-family:'Geist Mono',monospace;font-size:10px;font-weight:500;color:var(--faint);border:1px solid var(--line);border-radius:5px;padding:1px 5px;">v1α</div>
+    </div>
+
+    <nav style="display:flex;flex-direction:column;gap:3px;">
+      <button data-view="dashboard" onClick="{{ navTo }}" style="{{ nav.dashboard }}">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12V7"/><path d="M8 12V4"/><path d="M13 12V9"/><path d="M2.5 13.5h11"/></svg>
+        <span>Dashboard</span>
+      </button>
+      <button data-view="tasks" onClick="{{ navTo }}" style="{{ nav.tasks }}">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 4h11M2.5 8h11M2.5 12h7"/></svg>
+        <span>Tasks</span>
+        <span style="margin-left:auto;font-family:'Geist Mono',monospace;font-size:11px;color:var(--faint);font-weight:500;">{{ taskCount }}</span>
+      </button>
+      <button data-view="flows" onClick="{{ navTo }}" style="{{ nav.flows }}">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="8" r="2"/><circle cx="4" cy="12" r="2"/><path d="M6 4.5h3.5a1.5 1.5 0 0 1 1.5 1.5M6 11.5h3.5a1.5 1.5 0 0 0 1.5-1.5"/></svg>
+        <span>Flows</span>
+        <span style="margin-left:auto;font-family:'Geist Mono',monospace;font-size:11px;color:var(--faint);font-weight:500;">{{ flowCount }}</span>
+      </button>
+      <button data-view="providers" onClick="{{ navTo }}" style="{{ nav.providers }}">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><circle cx="4" cy="4" r="1.7"/><circle cx="12" cy="4" r="1.7"/><circle cx="4" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/></svg>
+        <span>Providers</span>
+      </button>
+    </nav>
+
+    <div style="margin-top:auto;display:flex;flex-direction:column;gap:12px;">
+      <button data-view="providers" onClick="{{ navTo }}" style="text-align:left;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:11px 12px;cursor:pointer;font:inherit;">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px;">
+          <span style="font-size:12px;font-weight:600;color:var(--ink);">Providers</span>
+          <span style="font-family:'Geist Mono',monospace;font-size:11px;color:var(--muted);">{{ providersSummary }}</span>
+        </div>
+        <div style="height:4px;border-radius:3px;background:var(--line-soft);overflow:hidden;">
+          <div style="{{ providersBar }}"></div>
+        </div>
+      </button>
+      <div style="display:flex;align-items:center;gap:8px;padding:0 6px;">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="var(--faint)" stroke-width="1.5"><path d="M2 5.5 8 2.5l6 3v5L8 13.5 2 10.5z" stroke-linejoin="round"/><path d="M2 5.5 8 8.5l6-3M8 8.5v5"/></svg>
+        <span style="font-family:'Geist Mono',monospace;font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ currentUser }}</span>
+        <sc-if value="{{ canSignOut }}" hint-placeholder-val="{{ false }}"><button onClick="{{ signOut }}" style="margin-left:auto;background:transparent;border:1px solid var(--line);border-radius:7px;padding:4px 7px;font:inherit;font-size:11px;color:var(--muted);cursor:pointer;">Sign out</button></sc-if>
+        <sc-if value="{{ cannotSignOut }}" hint-placeholder-val="{{ true }}"><span style="margin-left:auto;width:6px;height:6px;border-radius:50%;background:#16a34a;flex:none;"></span></sc-if>
+      </div>
+    </div>
+  </aside>
+
+  <main class="console-main" style="min-width:0;">
+    <div class="console-content" style="max-width:1080px;margin:0 auto;padding:34px clamp(20px,4vw,52px) 80px;">
+
+      <!-- ============ DASHBOARD ============ -->
+      <sc-if value="{{ isDashboard }}" hint-placeholder-val="{{ false }}">
+      <section data-screen-label="Manager dashboard">
+        <div style="margin-bottom:24px;">
+          <h1 style="margin:0 0 5px;font-size:25px;font-weight:600;letter-spacing:-.02em;color:var(--ink);">Dashboard</h1>
+          <p style="margin:0;font-size:13.5px;color:var(--muted);">Team workflow visibility across repositories: throughput, blockers, token usage, and outcomes.</p>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:16px;" class="mobile-form">
+          <sc-for list="{{ dashboard.metricCards }}" as="m" hint-placeholder-count="4">
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:15px;min-width:0;">
+              <div style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">{{ m.label }}</div>
+              <div style="font-family:'Geist Mono',monospace;font-size:24px;font-weight:600;color:var(--ink);margin-top:7px;">{{ m.value }}</div>
+              <div style="font-size:12px;color:var(--muted);margin-top:4px;overflow-wrap:anywhere;">{{ m.sub }}</div>
+            </div>
+          </sc-for>
+        </div>
+        <div class="mobile-detail-layout" style="display:grid;grid-template-columns:minmax(0,1.1fr) minmax(320px,.9fr);gap:16px;align-items:start;">
+          <div style="display:flex;flex-direction:column;gap:16px;min-width:0;">
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;">
+                <h2 style="margin:0;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Blocked aging</h2>
+                <span style="font-size:12px;color:var(--muted);">{{ dashboard.blockedCountLabel }}</span>
+              </div>
+              <sc-if value="{{ dashboard.hasBlocked }}" hint-placeholder-val="{{ true }}">
+                <div style="display:flex;flex-direction:column;gap:9px;">
+                  <sc-for list="{{ dashboard.blocked }}" as="b" hint-placeholder-count="3">
+                    <div style="border:1px solid var(--line-soft);border-radius:9px;padding:11px 12px;display:grid;grid-template-columns:minmax(0,1fr) 74px;gap:10px;align-items:start;">
+                      <div style="min-width:0;">
+                        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                          <span style="{{ b.badge.style }}"><span style="{{ b.badge.dotStyle }}"></span>{{ b.badge.label }}</span>
+                          <span style="font-size:13px;font-weight:600;color:var(--ink);overflow-wrap:anywhere;">{{ b.title }}</span>
+                        </div>
+                        <div style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--muted);overflow-wrap:anywhere;margin-top:4px;">{{ b.meta }}</div>
+                        <sc-if value="{{ b.hasReason }}" hint-placeholder-val="{{ false }}"><div style="font-size:12px;color:#b45309;overflow-wrap:anywhere;margin-top:4px;">{{ b.reason }}</div></sc-if>
+                      </div>
+                      <div style="font-family:'Geist Mono',monospace;font-size:13px;color:var(--ink);text-align:right;">{{ b.ageLabel }}</div>
+                    </div>
+                  </sc-for>
+                </div>
+              </sc-if>
+              <sc-if value="{{ dashboard.noBlocked }}" hint-placeholder-val="{{ false }}">
+                <div style="border:1px dashed var(--line);border-radius:10px;padding:18px;text-align:center;font-size:12.5px;color:var(--muted);">No blocked tasks or runs are visible.</div>
+              </sc-if>
+            </div>
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;">
+              <h2 style="margin:0 0 12px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Repository attribution</h2>
+              <div class="mobile-card-list" style="border:1px solid var(--line);border-radius:10px;overflow:hidden;">
+                <div class="mobile-grid-head" style="display:grid;grid-template-columns:minmax(0,1.4fr) 80px 80px 94px minmax(120px,.9fr);gap:10px;padding:10px 12px;background:var(--panel-2);border-bottom:1px solid var(--line);">
+                  <span style="font-size:11px;font-weight:600;color:var(--faint);text-transform:uppercase;">Repo</span>
+                  <span style="font-size:11px;font-weight:600;color:var(--faint);text-transform:uppercase;">Tasks</span>
+                  <span style="font-size:11px;font-weight:600;color:var(--faint);text-transform:uppercase;">Runs</span>
+                  <span style="font-size:11px;font-weight:600;color:var(--faint);text-transform:uppercase;">Blocked</span>
+                  <span style="font-size:11px;font-weight:600;color:var(--faint);text-transform:uppercase;text-align:right;">Tokens</span>
+                </div>
+                <sc-for list="{{ dashboard.repositories }}" as="repo" hint-placeholder-count="3">
+                  <div class="mobile-grid-row" style="display:grid;grid-template-columns:minmax(0,1.4fr) 80px 80px 94px minmax(120px,.9fr);gap:10px;padding:11px 12px;border-bottom:1px solid var(--line-soft);align-items:center;">
+                    <div style="min-width:0;">
+                      <div style="font-size:13px;font-weight:600;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ repo.repoName }}</div>
+                      <div style="font-family:'Geist Mono',monospace;font-size:11px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ repo.repoId }}</div>
+                    </div>
+                    <div style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--muted);">{{ repo.taskCount }}</div>
+                    <div style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--muted);">{{ repo.runCount }}</div>
+                    <div style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--muted);">{{ repo.blockedCount }}</div>
+                    <div style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--muted);text-align:right;">{{ repo.tokenLabel }}</div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+          <aside style="display:flex;flex-direction:column;gap:16px;min-width:0;">
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;">
+              <h2 style="margin:0 0 12px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Cost attribution</h2>
+              <div style="display:flex;flex-direction:column;gap:11px;">
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Runtime tokens</span><span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);">{{ dashboard.runtimeTokensLabel }}</span></div>
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Context tokens</span><span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);">{{ dashboard.contextTokensLabel }}</span></div>
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Estimated cost</span><span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);">{{ dashboard.estimatedCostLabel }}</span></div>
+                <div style="height:1px;background:var(--line-soft);"></div>
+                <div style="font-size:12px;color:var(--muted);">{{ dashboard.usageCoverageLabel }}</div>
+              </div>
+            </div>
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;">
+              <h2 style="margin:0 0 12px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Outcome quality</h2>
+              <div style="display:flex;flex-direction:column;gap:11px;">
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Completion rate</span><span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);">{{ dashboard.completionRateLabel }}</span></div>
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Rework ratio</span><span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);">{{ dashboard.reworkRatioLabel }}</span></div>
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Review-gate pass rate</span><span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);">{{ dashboard.reviewGateRateLabel }}</span></div>
+                <div style="height:1px;background:var(--line-soft);"></div>
+                <div style="font-size:12px;color:var(--muted);">{{ dashboard.outcomeSummaryLabel }}</div>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </section>
+      </sc-if>
+
+      <!-- ============ TASKS ============ -->
+      <sc-if value="{{ isTasks }}" hint-placeholder-val="{{ true }}">
+      <section data-screen-label="Tasks">
+        <div class="mobile-page-head" style="display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:26px;">
+          <div>
+            <h1 style="margin:0 0 5px;font-size:25px;font-weight:600;letter-spacing:-.02em;color:var(--ink);">Tasks</h1>
+            <p style="margin:0;font-size:13.5px;color:var(--muted);">Specifications staged for Nitely to implement, reworked into reviewed pull requests.</p>
+          </div>
+          <div class="mobile-actions" style="display:flex;align-items:center;gap:9px;">
+            <sc-if value="{{ canManageRepositories }}" hint-placeholder-val="{{ true }}">
+              <button onClick="{{ toggleNewRepo }}" style="display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:9px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;" style-hover="border-color:var(--accent);color:var(--accent);">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5h10M3 8h10M3 11.5h6"/><path d="M12 10v4M10 12h4"/></svg>
+                Add repository
+              </button>
+            </sc-if>
+            <button onClick="{{ toggleNewTask }}" style="display:inline-flex;align-items:center;gap:7px;border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:8px;padding:9px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;box-shadow:0 1px 2px rgba(0,0,0,.12);">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>
+              New task
+            </button>
+          </div>
+        </div>
+
+        <div style="background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:16px;margin-bottom:14px;">
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:14px;">
+            <div>
+              <h2 style="margin:0 0 4px;font-size:14px;font-weight:600;color:var(--ink);">Plan work</h2>
+              <p style="margin:0;font-size:12.5px;color:var(--muted);">Planner Agent drafts a spec from a GitHub issue or prompt.</p>
+            </div>
+          </div>
+          <form class="mobile-form" ref="{{ plannerForm }}" style="display:grid;grid-template-columns:150px minmax(0,1fr) minmax(160px,.55fr) 132px;gap:10px;align-items:end;">
+            <label style="display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:600;color:var(--ink);">Source
+              <select name="sourceType" style="{{ inputStyle }}">
+                <option value="github-issue">GitHub issue</option>
+                <option value="prompt">Prompt</option>
+              </select>
+            </label>
+            <label style="display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:600;color:var(--ink);">Issue URL or prompt
+              <input name="intake" autocomplete="off" placeholder="https://github.com/owner/repo/issues/123 or rough prompt" style="{{ inputStyle }}">
+            </label>
+            <label style="display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:600;color:var(--ink);">Repository
+              <select name="repoId" style="{{ inputStyle }}">
+                <sc-for list="{{ repositories }}" as="repo" hint-placeholder-count="1">
+                  <option value="{{ repo.id }}">{{ repo.name }}</option>
+                </sc-for>
+              </select>
+            </label>
+            <button onClick="{{ planWork }}" style="display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:8px;padding:9px 13px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;">
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.5v11M2.5 8h11"/><path d="M11.5 4.5 13.5 2.5M11.5 11.5l2 2"/></svg>
+              Plan
+            </button>
+            <label style="display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:600;color:var(--ink);">Title <span style="font-weight:400;color:var(--faint);">optional</span>
+              <input name="title" autocomplete="off" placeholder="Generated when empty" style="{{ inputStyle }}">
+            </label>
+            <label style="display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:600;color:var(--ink);grid-column:span 2;">Flow
+              <select name="flowPath" style="{{ inputStyle }}">
+                <option value="flows/implement-spec-bootstrap.json">implement-spec-bootstrap</option>
+                <option value="flows/rework-pr-bootstrap.json">rework-pr-bootstrap</option>
+                <option value="flows/resolve-conflicts-bootstrap.json">resolve-conflicts-bootstrap</option>
+              </select>
+            </label>
+          </form>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:14px;">
+          <sc-for list="{{ repositories }}" as="repo" hint-placeholder-count="1">
+            <div style="border:1px solid var(--line);background:var(--panel);border-radius:10px;padding:10px 12px;min-width:0;">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+                <span style="font-size:13px;font-weight:600;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ repo.name }}</span>
+                <span style="font-family:'Geist Mono',monospace;font-size:10.5px;color:var(--faint);border:1px solid var(--line);border-radius:5px;padding:1px 5px;">{{ repo.id }}</span>
+              </div>
+              <div style="font-family:'Geist Mono',monospace;font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:4px;">{{ repo.path }}</div>
+            </div>
+          </sc-for>
+        </div>
+
+        <div class="mobile-card-list" style="background:var(--panel);border:1px solid var(--line);border-radius:13px;overflow:hidden;">
+          <div class="mobile-grid-head" style="display:grid;grid-template-columns:minmax(0,2.1fr) 118px minmax(180px,1.55fr) 112px;gap:14px;padding:11px 18px;border-bottom:1px solid var(--line);background:var(--panel-2);">
+            <span style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Task</span>
+            <span style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Status</span>
+            <span style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Execution</span>
+            <span style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);text-align:right;">Updated</span>
+          </div>
+          <sc-for list="{{ tasks }}" as="t" hint-placeholder-count="5">
+            <div class="mobile-grid-row" data-id="{{ t.id }}" onClick="{{ openTask }}" style="display:grid;grid-template-columns:minmax(0,2.1fr) 118px minmax(180px,1.55fr) 112px;gap:14px;padding:var(--rpad) 18px;border-bottom:1px solid var(--line-soft);align-items:center;cursor:pointer;" style-hover="background:var(--panel-2);">
+              <div style="min-width:0;">
+                <div style="font-size:14px;font-weight:600;color:var(--ink);letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ t.title }}</div>
+                <div style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;">{{ t.subline }}</div>
+                <div style="font-family:'Geist Mono',monospace;font-size:11px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;">{{ t.repoName }}</div>
+              </div>
+              <div><span style="{{ t.badge.style }}"><span style="{{ t.badge.dotStyle }}"></span>{{ t.badge.label }}</span></div>
+              <div style="min-width:0;">
+                <sc-if value="{{ t.hasRun }}" hint-placeholder-val="{{ true }}">
+                  <div class="mobile-inline-meta" style="display:flex;align-items:center;gap:8px;min-width:0;margin-bottom:3px;">
+                    <span style="{{ t.runBadge.style }}"><span style="{{ t.runBadge.dotStyle }}"></span>{{ t.runBadge.label }}</span>
+                    <button data-id="{{ t.latestRunId }}" data-task="{{ t.id }}" onClick="{{ openRun }}" style="display:inline-flex;align-items:center;gap:5px;background:transparent;border:none;padding:0;cursor:pointer;font:inherit;font-family:'Geist Mono',monospace;font-size:12px;color:var(--accent);font-weight:500;min-width:0;">
+                      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ t.latestRunShort }}</span>
+                    </button>
+                    <sc-if value="{{ t.hasChange }}" hint-placeholder-val="{{ false }}"><a href="{{ t.changeUrl }}" onClick="{{ stop }}" style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--accent);font-weight:500;white-space:nowrap;">{{ t.cr }}</a></sc-if>
+                  </div>
+                  <div style="font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ t.runStagesLabel }}</div>
+                  <sc-if value="{{ t.hasLogSummary }}" hint-placeholder-val="{{ false }}"><div style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;">{{ t.recentLogSummary }}</div></sc-if>
+                </sc-if>
+                <sc-if value="{{ t.noRun }}" hint-placeholder-val="{{ false }}">
+                  <button data-id="{{ t.id }}" onClick="{{ startRun }}" style="display:inline-flex;align-items:center;gap:6px;background:transparent;border:1px solid var(--line);border-radius:7px;padding:5px 10px;cursor:pointer;font:inherit;font-size:12px;font-weight:600;color:var(--ink);" style-hover="border-color:var(--accent);color:var(--accent);">
+                    <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 3.2 12.5 8l-8 4.8z"/></svg>Start run
+                  </button>
+                </sc-if>
+              </div>
+              <div style="font-size:12.5px;color:var(--muted);text-align:right;white-space:nowrap;">{{ t.updated }}</div>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+      </sc-if>
+
+      <!-- ============ FLOWS ============ -->
+      <sc-if value="{{ isFlows }}" hint-placeholder-val="{{ false }}">
+      <section data-screen-label="Flows">
+        <div class="mobile-page-head" style="display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:26px;">
+          <div>
+            <h1 style="margin:0 0 5px;font-size:25px;font-weight:600;letter-spacing:-.02em;color:var(--ink);">Flows</h1>
+            <p style="margin:0;font-size:13.5px;color:var(--muted);">Built-in repository flows and your custom flows. Create a flow type, then run a work item from it.</p>
+          </div>
+          <button onClick="{{ newFlow }}" style="display:inline-flex;align-items:center;gap:7px;border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:8px;padding:9px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;box-shadow:0 1px 2px rgba(0,0,0,.12);">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>
+            New flow
+          </button>
+        </div>
+        <div class="mobile-card-list" style="background:var(--panel);border:1px solid var(--line);border-radius:13px;overflow:hidden;">
+          <div class="mobile-grid-head" style="display:grid;grid-template-columns:minmax(0,2fr) 150px 90px 110px;gap:14px;padding:11px 18px;border-bottom:1px solid var(--line);background:var(--panel-2);">
+            <span style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Flow</span>
+            <span style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Type</span>
+            <span style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Stages</span>
+            <span style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Source</span>
+          </div>
+          <sc-for list="{{ flows }}" as="f" hint-placeholder-count="4">
+            <div class="mobile-grid-row" data-id="{{ f.id }}" onClick="{{ openFlow }}" style="display:grid;grid-template-columns:minmax(0,2fr) 150px 90px 110px;gap:14px;padding:var(--rpad) 18px;border-bottom:1px solid var(--line-soft);align-items:center;cursor:pointer;" style-hover="background:var(--panel-2);">
+              <div style="min-width:0;">
+                <div style="font-size:14px;font-weight:600;color:var(--ink);letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ f.name }}</div>
+                <div style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;">{{ f.id }}</div>
+              </div>
+              <div><span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);background:var(--panel-2);border:1px solid var(--line);border-radius:6px;padding:2px 7px;">{{ f.workItemTypeLabel }}</span></div>
+              <div style="font-family:'Geist Mono',monospace;font-size:13px;color:var(--muted);">{{ f.stageCount }}</div>
+              <div><span style="{{ f.sourceBadge.style }}">{{ f.sourceBadge.label }}</span></div>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+      </sc-if>
+
+      <!-- ============ FLOW EDITOR (new / detail) ============ -->
+      <sc-if value="{{ isFlowEditor }}" hint-placeholder-val="{{ false }}">
+      <section data-screen-label="Flow editor">
+        <button data-view="flows" onClick="{{ navTo }}" style="display:inline-flex;align-items:center;gap:6px;background:transparent;border:none;padding:0;margin-bottom:18px;cursor:pointer;font:inherit;font-size:13px;color:var(--muted);" style-hover="color:var(--ink);">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3 5 8l5 5"/></svg>Flows
+        </button>
+        <div class="mobile-page-head" style="display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:18px;">
+          <div>
+            <h1 style="margin:0 0 5px;font-size:23px;font-weight:600;letter-spacing:-.02em;color:var(--ink);">{{ flowEditorTitle }}</h1>
+            <p style="margin:0;font-size:13px;color:var(--muted);">Edit JSON with schema-aware validation, then save and run.</p>
+          </div>
+          <div class="mobile-actions" style="display:flex;gap:8px;align-items:center;">
+            <span style="font-size:12px;color:var(--muted);">{{ flowDraftStatus }}</span>
+            <sc-if value="{{ flowEditorEditable }}" hint-placeholder-val="{{ true }}"><button onClick="{{ saveFlow }}" style="border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:8px;padding:8px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;">Save flow</button></sc-if>
+            <sc-if value="{{ flowEditorRunnable }}" hint-placeholder-val="{{ false }}"><button data-id="{{ selectedFlowId }}" onClick="{{ runFromFlow }}" style="border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:8px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;">Run</button></sc-if>
+          </div>
+        </div>
+        <sc-if value="{{ flowEditorHasTemplates }}" hint-placeholder-val="{{ true }}">
+          <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;">
+            <span style="font-size:12px;color:var(--muted);align-self:center;">Templates:</span>
+            <sc-for list="{{ flowTemplates }}" as="t" hint-placeholder-count="3">
+              <button data-id="{{ t.id }}" onClick="{{ pickTemplate }}" style="border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:7px;padding:5px 10px;font:inherit;font-size:12px;cursor:pointer;" style-hover="border-color:var(--accent);color:var(--accent);">{{ t.name }}</button>
+            </sc-for>
+          </div>
+        </sc-if>
+        <div class="mobile-flow-editor" style="display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:18px;">
+          <div>
+            <textarea onChange="{{ editFlowDraft }}" value="{{ flowDraftDocument }}" spellcheck="false" style="width:100%;min-height:420px;border:1px solid var(--line);border-radius:10px;background:var(--code-bg);color:var(--code-ink);padding:14px;font-family:'Geist Mono',monospace;font-size:12.5px;line-height:1.6;outline:none;resize:vertical;"></textarea>
+          </div>
+          <div>
+            <h2 style="margin:0 0 11px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Validation</h2>
+            <sc-if value="{{ flowDraftValid }}" hint-placeholder-val="{{ false }}"><div style="border:1px solid #16a34a40;background:#16a34a14;border-radius:10px;padding:13px;font-size:13px;color:var(--ink);">Flow is valid and runnable.</div></sc-if>
+            <sc-if value="{{ flowDraftHasErrors }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;flex-direction:column;gap:7px;">
+                <sc-for list="{{ flowDraftErrors }}" as="err" hint-placeholder-count="2">
+                  <div style="border:1px solid #dc262640;background:#dc262614;border-radius:9px;padding:10px 12px;font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);overflow-wrap:anywhere;">{{ err }}</div>
+                </sc-for>
+              </div>
+            </sc-if>
+            <sc-if value="{{ flowDraftUnchecked }}" hint-placeholder-val="{{ true }}"><div style="border:1px dashed var(--line);border-radius:10px;padding:18px;text-align:center;font-size:12.5px;color:var(--muted);">Edit the document to validate.</div></sc-if>
+          </div>
+        </div>
+      </section>
+      </sc-if>
+
+      <!-- ============ TASK DETAIL ============ -->
+      <sc-if value="{{ isTaskDetail }}" hint-placeholder-val="{{ false }}">
+      <section data-screen-label="Task detail">
+        <button data-view="tasks" onClick="{{ navTo }}" style="display:inline-flex;align-items:center;gap:6px;background:transparent;border:none;padding:0;margin-bottom:18px;cursor:pointer;font:inherit;font-size:13px;color:var(--muted);" style-hover="color:var(--ink);">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 3.5 5 8l4.5 4.5"/></svg>Tasks
+        </button>
+        <div class="mobile-page-head" style="display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:24px;">
+          <div style="min-width:0;">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:7px;flex-wrap:wrap;">
+              <h1 style="margin:0;font-size:24px;font-weight:600;letter-spacing:-.02em;color:var(--ink);">{{ selectedTask.title }}</h1>
+              <span style="{{ selectedTask.badge.style }}"><span style="{{ selectedTask.badge.dotStyle }}"></span>{{ selectedTask.badge.label }}</span>
+            </div>
+            <div style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--muted);">{{ selectedTask.id }}</div>
+          </div>
+          <div class="mobile-actions" style="display:flex;gap:9px;flex:none;">
+            <sc-if value="{{ selectedTask.canApproveSpec }}" hint-placeholder-val="{{ false }}">
+              <button data-id="{{ selectedTask.id }}" onClick="{{ approveSpec }}" style="display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:9px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;" style-hover="border-color:var(--accent);color:var(--accent);">Approve spec</button>
+            </sc-if>
+            <sc-if value="{{ selectedTask.canDraftTechDesign }}" hint-placeholder-val="{{ false }}">
+              <button data-id="{{ selectedTask.id }}" onClick="{{ draftTechnicalDesign }}" style="display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:9px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;" style-hover="border-color:var(--accent);color:var(--accent);">Draft tech design</button>
+            </sc-if>
+            <sc-if value="{{ selectedTask.canApproveTechDesign }}" hint-placeholder-val="{{ false }}">
+              <button data-id="{{ selectedTask.id }}" onClick="{{ approveTechDesign }}" style="display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:9px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;" style-hover="border-color:var(--accent);color:var(--accent);">Approve tech design</button>
+            </sc-if>
+            <sc-if value="{{ selectedTask.canStartRun }}" hint-placeholder-val="{{ true }}">
+              <button data-id="{{ selectedTask.id }}" onClick="{{ startRun }}" style="display:inline-flex;align-items:center;gap:7px;border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:8px;padding:9px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;">
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 3.2 12.5 8l-8 4.8z"/></svg>{{ selectedTask.startLabel }}
+              </button>
+            </sc-if>
+            <sc-if value="{{ selectedTask.isRunning }}" hint-placeholder-val="{{ false }}">
+              <span style="{{ selectedTask.runningBadge.style }}"><span style="{{ selectedTask.runningBadge.dotStyle }}"></span>{{ selectedTask.runningBadge.label }}</span>
+            </sc-if>
+            <sc-if value="{{ selectedTask.hasRun }}" hint-placeholder-val="{{ false }}">
+              <button data-id="{{ selectedTask.latestRunId }}" data-task="{{ selectedTask.id }}" onClick="{{ openRun }}" style="display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:9px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;" style-hover="border-color:var(--accent);color:var(--accent);">View latest run</button>
+            </sc-if>
+          </div>
+        </div>
+
+        <div class="mobile-detail-layout" style="display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:20px;align-items:start;">
+          <div style="min-width:0;display:flex;flex-direction:column;gap:22px;">
+            <div>
+              <h2 style="margin:0 0 11px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Specification</h2>
+              <pre style="{{ docPre }}">{{ selectedTask.specText }}</pre>
+            </div>
+            <div>
+              <h2 style="margin:0 0 11px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Technical design</h2>
+              <pre style="{{ docPre }}">{{ selectedTask.techText }}</pre>
+            </div>
+          </div>
+
+          <aside class="mobile-rail" style="display:flex;flex-direction:column;gap:16px;position:sticky;top:0;">
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;">
+              <h2 style="margin:0 0 13px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Planning</h2>
+              <div style="display:flex;flex-direction:column;gap:11px;">
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Spec approval</span><span style="{{ selectedTask.specApprovalBadge.style }}"><span style="{{ selectedTask.specApprovalBadge.dotStyle }}"></span>{{ selectedTask.specApprovalBadge.label }}</span></div>
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Design approval</span><span style="{{ selectedTask.techApprovalBadge.style }}"><span style="{{ selectedTask.techApprovalBadge.dotStyle }}"></span>{{ selectedTask.techApprovalBadge.label }}</span></div>
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Source</span><span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--ink);text-align:right;overflow-wrap:anywhere;">{{ selectedTask.planningSourceLabel }}</span></div>
+                <sc-if value="{{ selectedTask.hasOpenQuestions }}" hint-placeholder-val="{{ false }}">
+                  <div style="height:1px;background:var(--line-soft);"></div>
+                  <div style="display:flex;flex-direction:column;gap:7px;">
+                    <sc-for list="{{ selectedTask.openQuestions }}" as="question" hint-placeholder-count="2">
+                      <div style="border:1px solid var(--line-soft);border-radius:8px;padding:8px 10px;font-size:12px;color:var(--ink);line-height:1.45;">{{ question }}</div>
+                    </sc-for>
+                  </div>
+                </sc-if>
+                <sc-if value="{{ selectedTask.noOpenQuestions }}" hint-placeholder-val="{{ true }}">
+                  <div style="border:1px dashed var(--line);border-radius:9px;padding:12px;text-align:center;font-size:12.5px;color:var(--muted);">No open planning questions.</div>
+                </sc-if>
+              </div>
+            </div>
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;">
+              <h2 style="margin:0 0 13px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Metadata</h2>
+              <div style="display:flex;flex-direction:column;gap:11px;">
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Flow</span><span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--ink);text-align:right;overflow-wrap:anywhere;">{{ selectedTask.flow }}</span></div>
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Repository</span><span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--ink);text-align:right;overflow-wrap:anywhere;">{{ selectedTask.repoName }}</span></div>
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Type</span><span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--ink);text-align:right;overflow-wrap:anywhere;">{{ selectedTask.workItemType }}</span></div>
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Spec file</span><span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--ink);text-align:right;overflow-wrap:anywhere;">{{ selectedTask.specPath }}</span></div>
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Design file</span><span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--ink);text-align:right;overflow-wrap:anywhere;">{{ selectedTask.techPath }}</span></div>
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Issue</span><span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--accent);text-align:right;">{{ selectedTask.issue }}</span></div>
+                <div style="height:1px;background:var(--line-soft);"></div>
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Created</span><span style="font-size:12.5px;color:var(--ink);">{{ selectedTask.created }}</span></div>
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Updated</span><span style="font-size:12.5px;color:var(--ink);">{{ selectedTask.updated }}</span></div>
+              </div>
+            </div>
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;">
+              <h2 style="margin:0 0 13px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Input sources</h2>
+              <sc-if value="{{ selectedTask.hasInputSources }}" hint-placeholder-val="{{ true }}">
+                <div style="display:flex;flex-direction:column;gap:9px;">
+                  <sc-for list="{{ selectedTask.inputSources }}" as="src" hint-placeholder-count="3">
+                    <div style="border:1px solid var(--line-soft);border-radius:8px;padding:9px 10px;">
+                      <div style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--ink);overflow-wrap:anywhere;">{{ src.id }}</div>
+                      <div style="font-family:'Geist Mono',monospace;font-size:11px;color:var(--muted);overflow-wrap:anywhere;margin-top:3px;">{{ src.uri }}</div>
+                    </div>
+                  </sc-for>
+                </div>
+              </sc-if>
+              <sc-if value="{{ selectedTask.noInputSources }}" hint-placeholder-val="{{ false }}"><div style="border:1px dashed var(--line);border-radius:9px;padding:14px;text-align:center;font-size:12.5px;color:var(--muted);">No input sources recorded.</div></sc-if>
+            </div>
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;">
+              <h2 style="margin:0 0 13px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Artifacts</h2>
+              <sc-if value="{{ selectedTask.hasArtifacts }}" hint-placeholder-val="{{ true }}">
+                <div style="display:flex;flex-wrap:wrap;gap:6px;">
+                  <sc-for list="{{ selectedTask.artifactGroups }}" as="g" hint-placeholder-count="3">
+                    <span style="font-family:'Geist Mono',monospace;font-size:11px;color:var(--accent);background:var(--accent-soft);border-radius:6px;padding:3px 8px;white-space:nowrap;">{{ g.label }}</span>
+                  </sc-for>
+                </div>
+              </sc-if>
+              <sc-if value="{{ selectedTask.noArtifacts }}" hint-placeholder-val="{{ false }}"><div style="border:1px dashed var(--line);border-radius:9px;padding:14px;text-align:center;font-size:12.5px;color:var(--muted);">No artifacts published yet.</div></sc-if>
+            </div>
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;">
+              <h2 style="margin:0 0 13px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Latest execution</h2>
+              <sc-if value="{{ selectedTask.hasRun }}" hint-placeholder-val="{{ true }}">
+                <button data-id="{{ selectedTask.latestRunId }}" data-task="{{ selectedTask.id }}" onClick="{{ openRun }}" style="width:100%;text-align:left;background:var(--panel-2);border:1px solid var(--line);border-radius:9px;padding:12px;cursor:pointer;font:inherit;" style-hover="border-color:var(--accent);">
+                  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;">
+                    <span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ selectedTask.latestRunShort }}</span>
+                    <span style="{{ selectedTask.runBadge.style }}"><span style="{{ selectedTask.runBadge.dotStyle }}"></span>{{ selectedTask.runBadge.label }}</span>
+                  </div>
+                  <div style="font-size:12px;color:var(--muted);">{{ selectedTask.runStagesLabel }}</div>
+                  <sc-if value="{{ selectedTask.hasLogSummary }}" hint-placeholder-val="{{ false }}"><div style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:5px;">{{ selectedTask.recentLogSummary }}</div></sc-if>
+                </button>
+              </sc-if>
+              <sc-if value="{{ selectedTask.noRun }}" hint-placeholder-val="{{ false }}">
+                <div style="border:1px dashed var(--line);border-radius:9px;padding:16px;text-align:center;font-size:12.5px;color:var(--muted);">No run started yet.</div>
+              </sc-if>
+            </div>
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;">
+              <h2 style="margin:0 0 13px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Run history</h2>
+              <sc-if value="{{ selectedTask.hasHistory }}" hint-placeholder-val="{{ true }}">
+                <div style="display:flex;flex-direction:column;gap:9px;">
+                  <sc-for list="{{ selectedTask.runs }}" as="r" hint-placeholder-count="3">
+                    <button data-id="{{ r.runId }}" data-task="{{ selectedTask.id }}" onClick="{{ openRun }}" style="width:100%;text-align:left;background:var(--panel-2);border:1px solid var(--line);border-radius:9px;padding:11px;cursor:pointer;font:inherit;" style-hover="border-color:var(--accent);">
+                      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">
+                        <span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ r.runId }}</span>
+                        <span style="{{ r.badge.style }}"><span style="{{ r.badge.dotStyle }}"></span>{{ r.badge.label }}</span>
+                      </div>
+                      <div style="font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ r.summaryLine }}</div>
+                      <sc-if value="{{ r.hasLogSummary }}" hint-placeholder-val="{{ false }}"><div style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:4px;">{{ r.recentLogSummary }}</div></sc-if>
+                    </button>
+                  </sc-for>
+                </div>
+              </sc-if>
+              <sc-if value="{{ selectedTask.noHistory }}" hint-placeholder-val="{{ false }}">
+                <div style="border:1px dashed var(--line);border-radius:9px;padding:14px;text-align:center;font-size:12.5px;color:var(--muted);">No execution attempts yet.</div>
+              </sc-if>
+            </div>
+          </aside>
+        </div>
+      </section>
+      </sc-if>
+
+      <!-- ============ RUNS ============ -->
+      <sc-if value="{{ isRuns }}" hint-placeholder-val="{{ false }}">
+      <section data-screen-label="Sessions">
+        <div style="margin-bottom:20px;">
+          <h1 style="margin:0 0 5px;font-size:25px;font-weight:600;letter-spacing:-.02em;color:var(--ink);">Sessions</h1>
+          <p style="margin:0;font-size:13.5px;color:var(--muted);">Agent worktree sessions projected from the persisted event log and <span style="font-family:'Geist Mono',monospace;font-size:12.5px;">.nitely/runs</span>.</p>
+        </div>
+        <div class="mobile-form" style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:14px;">
+          <input data-filter="session-pr" data-filter-key="pr" onChange="{{ setSessionFilter }}" placeholder="PR number or URL" style="{{ inputStyle }}">
+          <select data-filter="session-status" data-filter-key="status" onChange="{{ setSessionFilter }}" style="{{ inputStyle }}">
+            <option value="">Any status</option>
+            <option value="completed">Completed</option>
+            <option value="running">Running</option>
+            <option value="failed">Failed</option>
+            <option value="blocked">Blocked</option>
+            <option value="interrupted">Interrupted</option>
+            <option value="incomplete">Incomplete</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
+          <input data-filter="session-flow" data-filter-key="flow" onChange="{{ setSessionFilter }}" placeholder="Flow" style="{{ inputStyle }}">
+          <input data-filter="session-task" data-filter-key="task" onChange="{{ setSessionFilter }}" placeholder="Task id" style="{{ inputStyle }}">
+          <sc-if value="{{ hasSessionOwners }}" hint-placeholder-val="{{ true }}"><input data-filter="session-owner" data-filter-key="owner" onChange="{{ setSessionFilter }}" placeholder="Owner id" style="{{ inputStyle }}"></sc-if>
+        </div>
+        <div class="mobile-card-list" style="background:var(--panel);border:1px solid var(--line);border-radius:13px;overflow:hidden;">
+          <div class="mobile-grid-head" style="display:grid;grid-template-columns:minmax(0,2fr) 132px 96px minmax(0,1.7fr) 122px;gap:14px;padding:11px 18px;border-bottom:1px solid var(--line);background:var(--panel-2);">
+            <span style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Session</span>
+            <span style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Status</span>
+            <span style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Stages</span>
+            <span style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Branch</span>
+            <span style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);text-align:right;">Change</span>
+          </div>
+          <sc-for list="{{ filteredRuns }}" as="r" hint-placeholder-count="4">
+            <div class="mobile-grid-row" data-id="{{ r.runId }}" onClick="{{ openRun }}" style="display:grid;grid-template-columns:minmax(0,2fr) 132px 96px minmax(0,1.7fr) 122px;gap:14px;padding:var(--rpad) 18px;border-bottom:1px solid var(--line-soft);align-items:center;cursor:pointer;" style-hover="background:var(--panel-2);">
+              <div style="min-width:0;">
+                <div style="font-family:'Geist Mono',monospace;font-size:13px;font-weight:500;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ r.runId }}</div>
+                <div style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;">{{ r.repoFlow }}</div>
+                <div style="font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;">{{ r.currentStageLabel }}</div>
+                <sc-if value="{{ r.hasLatestOutput }}" hint-placeholder-val="{{ false }}"><div style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;">{{ r.latestOutputSummary }}</div></sc-if>
+              </div>
+              <div><span style="{{ r.badge.style }}"><span style="{{ r.badge.dotStyle }}"></span>{{ r.badge.label }}</span></div>
+              <div style="font-family:'Geist Mono',monospace;font-size:12.5px;color:var(--muted);">{{ r.stagesLabel }}</div>
+              <div style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;">{{ r.branchName }}</div>
+              <div style="text-align:right;min-width:0;">
+                <sc-if value="{{ r.hasChange }}" hint-placeholder-val="{{ true }}">
+                  <span style="display:inline-flex;align-items:center;gap:5px;font-family:'Geist Mono',monospace;font-size:12px;color:var(--accent);font-weight:500;">{{ r.cr }}</span>
+                </sc-if>
+                <sc-if value="{{ r.noChange }}" hint-placeholder-val="{{ false }}">
+                  <span style="font-size:12px;color:var(--faint);">—</span>
+                </sc-if>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+      </sc-if>
+
+      <!-- ============ RUN DETAIL ============ -->
+      <sc-if value="{{ isRunDetail }}" hint-placeholder-val="{{ false }}">
+      <section data-screen-label="Run detail">
+        <button onClick="{{ backFromRun }}" style="display:inline-flex;align-items:center;gap:6px;background:transparent;border:none;padding:0;margin-bottom:18px;cursor:pointer;font:inherit;font-size:13px;color:var(--muted);" style-hover="color:var(--ink);">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 3.5 5 8l4.5 4.5"/></svg>{{ selectedRun.backLabel }}
+        </button>
+        <div class="mobile-page-head" style="display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:24px;">
+          <div style="min-width:0;">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:7px;flex-wrap:wrap;">
+              <span style="font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Agent session</span>
+              <h1 style="margin:0;font-family:'Geist Mono',monospace;font-size:21px;font-weight:600;letter-spacing:-.01em;color:var(--ink);">{{ selectedRun.runId }}</h1>
+              <span style="{{ selectedRun.badge.style }}"><span style="{{ selectedRun.badge.dotStyle }}"></span>{{ selectedRun.badge.label }}</span>
+            </div>
+            <div style="font-size:13px;color:var(--muted);">{{ selectedRun.flowName }} · {{ selectedRun.stagesLabel }} · {{ selectedRun.duration }}</div>
+            <sc-if value="{{ selectedRun.hasContextUsageLabel }}" hint-placeholder-val="{{ false }}"><div style="font-size:12.5px;color:var(--muted);margin-top:3px;">{{ selectedRun.contextUsageLabel }}</div></sc-if>
+            <sc-if value="{{ selectedRun.hasRuntimeUsageLabel }}" hint-placeholder-val="{{ false }}"><div style="font-size:12.5px;color:var(--muted);margin-top:3px;">{{ selectedRun.runtimeUsageLabel }}</div></sc-if>
+            <sc-if value="{{ selectedRun.hasBudgetSummaryLabel }}" hint-placeholder-val="{{ false }}"><div style="font-size:12.5px;color:var(--muted);margin-top:3px;">{{ selectedRun.budgetSummaryLabel }}</div></sc-if>
+            <sc-if value="{{ selectedRun.hasBudgetConsumersLabel }}" hint-placeholder-val="{{ false }}"><div style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:3px;max-width:780px;">{{ selectedRun.budgetConsumersLabel }}</div></sc-if>
+            <div style="font-size:12.5px;color:var(--muted);margin-top:5px;">{{ selectedRun.currentStageLabel }}</div>
+            <sc-if value="{{ selectedRun.hasLatestOutput }}" hint-placeholder-val="{{ false }}">
+              <div style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:4px;max-width:780px;">{{ selectedRun.latestOutputSummary }}</div>
+            </sc-if>
+            <sc-if value="{{ selectedRun.hasBlocker }}" hint-placeholder-val="{{ false }}">
+              <div style="font-family:'Geist Mono',monospace;font-size:12px;color:#b45309;overflow-wrap:anywhere;margin-top:4px;max-width:780px;">{{ selectedRun.blockerLabel }}</div>
+            </sc-if>
+          </div>
+          <div class="mobile-actions" style="display:flex;gap:9px;flex:none;">
+            <sc-if value="{{ selectedRun.hasChange }}" hint-placeholder-val="{{ false }}">
+              <a href="{{ selectedRun.changeUrl }}" target="_blank" rel="noopener noreferrer" onClick="{{ stop }}" style="display:inline-flex;align-items:center;gap:7px;border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:8px;padding:9px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;text-decoration:none;">View {{ selectedRun.cr }}</a>
+            </sc-if>
+            <sc-if value="{{ selectedRun.isFailed }}" hint-placeholder-val="{{ false }}">
+              <button onClick="{{ noop }}" style="display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:9px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;" style-hover="border-color:var(--accent);color:var(--accent);">
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5V5h-2.5"/></svg>Resume run
+              </button>
+            </sc-if>
+          </div>
+        </div>
+
+        <div class="mobile-detail-layout" style="display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:20px;align-items:start;">
+          <div style="min-width:0;display:flex;flex-direction:column;gap:22px;">
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;">
+                <h2 style="margin:0;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Pipeline</h2>
+                <span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--muted);">{{ selectedRun.progressLabel }}</span>
+              </div>
+              <sc-for list="{{ selectedRun.stages }}" as="s" hint-placeholder-count="3">
+                <div style="display:flex;gap:15px;">
+                  <div style="display:flex;flex-direction:column;align-items:center;flex:none;">
+                    <div style="{{ s.dotStyle }}">{{ s.dotLabel }}</div>
+                    <sc-if value="{{ s.notLast }}" hint-placeholder-val="{{ true }}"><div style="width:2px;flex:1;min-height:20px;background:var(--line);margin:5px 0;"></div></sc-if>
+                  </div>
+                  <div style="flex:1;min-width:0;padding-bottom:18px;">
+                    <div class="mobile-stage-summary" data-stage="{{ s.openKey }}" onClick="{{ toggleStage }}" style="display:flex;align-items:center;gap:10px;cursor:pointer;flex-wrap:wrap;">
+                      <span style="font-family:'Geist Mono',monospace;font-size:14px;font-weight:600;color:var(--ink);">{{ s.id }}</span>
+                      <span style="font-family:'Geist Mono',monospace;font-size:11px;color:var(--muted);background:var(--line-soft);border-radius:5px;padding:2px 7px;">{{ s.type }}</span>
+                      <span style="{{ s.stateBadge.style }}"><span style="{{ s.stateBadge.dotStyle }}"></span>{{ s.stateBadge.label }}</span>
+                      <sc-if value="{{ s.hasGate }}" hint-placeholder-val="{{ false }}"><span style="font-family:'Geist Mono',monospace;font-size:11px;color:var(--ink);background:rgba(30,64,175,.10);border:1px solid rgba(30,64,175,.20);border-radius:5px;padding:2px 7px;">{{ s.gateLabel }}</span></sc-if>
+                      <sc-if value="{{ s.hasRuntime }}" hint-placeholder-val="{{ false }}"><span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--muted);">{{ s.runtimeLabel }}</span></sc-if>
+                      <span style="margin-left:auto;font-size:12px;color:var(--muted);white-space:nowrap;">{{ s.metaLabel }}</span>
+                      <sc-if value="{{ s.hasDetails }}" hint-placeholder-val="{{ true }}">
+                        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="var(--faint)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="{{ s.chevronStyle }}"><path d="M4 6l4 4 4-4"/></svg>
+                      </sc-if>
+                    </div>
+                    <sc-if value="{{ s.showDetails }}" hint-placeholder-val="{{ false }}">
+                      <div style="margin-top:11px;border:1px solid var(--line);background:var(--panel-2);border-radius:9px;padding:12px;">
+                        <sc-if value="{{ s.hasDetailFields }}" hint-placeholder-val="{{ true }}">
+                          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:9px;margin-bottom:11px;">
+                            <sc-for list="{{ s.detailFields }}" as="f" hint-placeholder-count="4">
+                              <div style="min-width:0;">
+                                <div style="font-size:11px;color:var(--faint);margin-bottom:3px;">{{ f.label }}</div>
+                                <sc-if value="{{ f.hasHref }}" hint-placeholder-val="{{ false }}"><a href="{{ f.href }}" target="_blank" rel="noopener noreferrer" onClick="{{ stop }}" style="{{ f.valueStyle }}">{{ f.value }}</a></sc-if>
+                                <sc-if value="{{ f.noHref }}" hint-placeholder-val="{{ true }}"><div style="{{ f.valueStyle }}">{{ f.value }}</div></sc-if>
+                              </div>
+                            </sc-for>
+                          </div>
+                        </sc-if>
+                        <sc-if value="{{ s.hasPrompt }}" hint-placeholder-val="{{ false }}">
+                          <div style="font-size:11px;color:var(--faint);margin:0 0 5px;">Rendered prompt</div>
+                          <pre style="{{ docPre }}">{{ s.prompt }}</pre>
+                        </sc-if>
+                        <sc-if value="{{ s.hasStdout }}" hint-placeholder-val="{{ true }}"><pre style="{{ termPre }}">{{ s.stdout }}</pre></sc-if>
+                        <sc-if value="{{ s.hasStderr }}" hint-placeholder-val="{{ false }}"><pre style="white-space:pre-wrap;overflow-wrap:anywhere;font-family:'Geist Mono',monospace;font-size:12px;line-height:1.6;background:rgba(220,38,38,.07);color:#ef6b6b;border:1px solid rgba(220,38,38,.25);border-radius:9px;padding:13px 15px;margin:9px 0 0;overflow:auto;max-height:240px;">{{ s.stderr }}</pre></sc-if>
+                        <sc-if value="{{ s.hasArtifacts }}" hint-placeholder-val="{{ false }}">
+                          <div style="font-size:11px;color:var(--faint);margin:11px 0 5px;">Artifacts</div>
+                          <div style="display:flex;flex-direction:column;gap:5px;">
+                            <sc-for list="{{ s.artifacts }}" as="a" hint-placeholder-count="2">
+                              <div style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--muted);overflow-wrap:anywhere;">{{ a.label }}</div>
+                            </sc-for>
+                          </div>
+                        </sc-if>
+                        <sc-if value="{{ s.hasEvents }}" hint-placeholder-val="{{ false }}">
+                          <div style="font-size:11px;color:var(--faint);margin:11px 0 5px;">Events</div>
+                          <div style="display:flex;flex-direction:column;gap:5px;">
+                            <sc-for list="{{ s.events }}" as="ev" hint-placeholder-count="2">
+                              <div style="font-size:12px;color:var(--muted);overflow-wrap:anywhere;"><span style="font-family:'Geist Mono',monospace;color:var(--ink);">{{ ev.type }}</span> · {{ ev.at }} · {{ ev.summary }}</div>
+                            </sc-for>
+                          </div>
+                        </sc-if>
+                      </div>
+                    </sc-if>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div>
+              <h2 style="margin:0 0 11px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Context manifest</h2>
+              <sc-if value="{{ selectedRun.hasContext }}" hint-placeholder-val="{{ true }}">
+                <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;">
+                  <sc-for list="{{ selectedRun.contextItems }}" as="c" hint-placeholder-count="2">
+                    <div class="mobile-context-row" style="display:grid;grid-template-columns:150px minmax(0,1fr) 110px;gap:12px;padding:12px 14px;border-bottom:1px solid var(--line-soft);align-items:center;">
+                      <div style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ c.id }}</div>
+                      <div style="min-width:0;">
+                        <div style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ c.sourceUri }}</div>
+                        <div style="font-size:11.5px;color:var(--faint);margin-top:2px;">{{ c.mediaType }}</div>
+                      </div>
+                      <span style="font-size:11.5px;color:var(--muted);text-align:right;">{{ c.kind }}</span>
+                    </div>
+                  </sc-for>
+                </div>
+              </sc-if>
+              <sc-if value="{{ selectedRun.noContext }}" hint-placeholder-val="{{ false }}"><div style="border:1px dashed var(--line);border-radius:10px;padding:18px;text-align:center;font-size:12.5px;color:var(--muted);">No context manifest is available for this session.</div></sc-if>
+            </div>
+
+            <div>
+              <h2 style="margin:0 0 11px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Inputs</h2>
+              <pre style="{{ termPre }}">{{ selectedRun.inputsJson }}</pre>
+            </div>
+
+            <div>
+              <h2 style="margin:0 0 11px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Review findings</h2>
+              <sc-if value="{{ selectedRun.hasReviewFindings }}" hint-placeholder-val="{{ true }}">
+                <div style="display:flex;flex-direction:column;gap:10px;">
+                  <sc-for list="{{ selectedRun.reviewFindings }}" as="f" hint-placeholder-count="1">
+                    <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;">
+                      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;">
+                        <span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);">{{ f.path }}</span>
+                        <span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--muted);">{{ f.severityLabel }}</span>
+                      </div>
+                      <pre style="{{ docPre }}">{{ f.content }}</pre>
+                    </div>
+                  </sc-for>
+                </div>
+              </sc-if>
+              <sc-if value="{{ selectedRun.noReviewFindings }}" hint-placeholder-val="{{ false }}"><div style="border:1px dashed var(--line);border-radius:10px;padding:18px;text-align:center;font-size:12.5px;color:var(--muted);">No review artifacts were published for this session.</div></sc-if>
+            </div>
+
+            <div>
+              <h2 style="margin:0 0 11px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Evidence timeline</h2>
+              <sc-if value="{{ selectedRun.hasEvidenceTimeline }}" hint-placeholder-val="{{ true }}">
+                <div style="display:flex;flex-direction:column;gap:0;">
+                  <sc-for list="{{ selectedRun.evidenceTimeline }}" as="ev" hint-placeholder-count="4">
+                    <div class="mobile-evidence-row" style="display:grid;grid-template-columns:118px minmax(0,1fr);gap:14px;padding:10px 0;border-bottom:1px solid var(--line-soft);align-items:start;">
+                      <span style="font-family:'Geist Mono',monospace;font-size:11px;color:var(--accent);background:var(--accent-soft);border-radius:6px;padding:2px 7px;justify-self:start;white-space:nowrap;">{{ ev.kind }}</span>
+                      <div style="min-width:0;">
+                        <div style="font-size:13px;font-weight:600;color:var(--ink);overflow-wrap:anywhere;">{{ ev.label }}</div>
+                        <div style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--muted);overflow-wrap:anywhere;margin-top:2px;">{{ ev.summary }}</div>
+                      </div>
+                    </div>
+                  </sc-for>
+                </div>
+              </sc-if>
+              <sc-if value="{{ selectedRun.noEvidenceTimeline }}" hint-placeholder-val="{{ false }}"><div style="border:1px dashed var(--line);border-radius:10px;padding:18px;text-align:center;font-size:12.5px;color:var(--muted);">No evidence has been recorded for this run yet.</div></sc-if>
+            </div>
+
+            <div>
+              <h2 style="margin:0 0 11px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Evidence</h2>
+              <sc-if value="{{ selectedRun.hasEvidence }}" hint-placeholder-val="{{ true }}"><pre style="{{ docPre }}">{{ selectedRun.evidence }}</pre></sc-if>
+              <sc-if value="{{ selectedRun.noEvidence }}" hint-placeholder-val="{{ false }}"><div style="border:1px dashed var(--line);border-radius:10px;padding:18px;text-align:center;font-size:12.5px;color:var(--muted);">Evidence is written once the publish or update stage completes.</div></sc-if>
+            </div>
+          </div>
+
+          <aside class="mobile-rail" style="position:sticky;top:0;display:flex;flex-direction:column;gap:16px;">
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;">
+              <h2 style="margin:0 0 13px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Run metadata</h2>
+              <div style="display:flex;flex-direction:column;gap:11px;">
+                <div style="display:flex;flex-direction:column;gap:3px;"><span style="font-size:12px;color:var(--muted);">Repository</span><span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);overflow-wrap:anywhere;">{{ selectedRun.repo }}</span></div>
+                <div style="display:flex;flex-direction:column;gap:3px;"><span style="font-size:12px;color:var(--muted);">Flow</span><span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);overflow-wrap:anywhere;">{{ selectedRun.flowName }}</span></div>
+                <div style="display:flex;flex-direction:column;gap:3px;"><span style="font-size:12px;color:var(--muted);">Branch</span><span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);overflow-wrap:anywhere;">{{ selectedRun.branchName }}</span></div>
+                <div style="display:flex;flex-direction:column;gap:3px;"><span style="font-size:12px;color:var(--muted);">Worktree</span><span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);overflow-wrap:anywhere;">{{ selectedRun.worktree }}</span></div>
+                <div style="height:1px;background:var(--line-soft);"></div>
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Started</span><span style="font-size:12.5px;color:var(--ink);">{{ selectedRun.started }}</span></div>
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Duration</span><span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);">{{ selectedRun.duration }}</span></div>
+                <div style="display:flex;justify-content:space-between;gap:12px;"><span style="font-size:12.5px;color:var(--muted);">Completed</span><span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);text-align:right;overflow-wrap:anywhere;">{{ selectedRun.completedLabel }}</span></div>
+              </div>
+            </div>
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;">
+              <h2 style="margin:0 0 13px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Session chain</h2>
+              <div style="display:flex;flex-direction:column;gap:10px;">
+                <sc-if value="{{ selectedRun.hasParentRun }}" hint-placeholder-val="{{ false }}">
+                  <button data-id="{{ selectedRun.parentRunId }}" onClick="{{ openRun }}" style="width:100%;text-align:left;background:var(--panel-2);border:1px solid var(--line);border-radius:9px;padding:11px;cursor:pointer;font:inherit;" style-hover="border-color:var(--accent);">
+                    <div style="font-size:11.5px;color:var(--muted);margin-bottom:4px;">Parent</div>
+                    <div style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ selectedRun.parentRunId }}</div>
+                  </button>
+                </sc-if>
+                <sc-if value="{{ selectedRun.hasChildRuns }}" hint-placeholder-val="{{ true }}">
+                  <sc-for list="{{ selectedRun.childRuns }}" as="child" hint-placeholder-count="2">
+                    <button data-id="{{ child.runId }}" onClick="{{ openRun }}" style="width:100%;text-align:left;background:var(--panel-2);border:1px solid var(--line);border-radius:9px;padding:11px;cursor:pointer;font:inherit;" style-hover="border-color:var(--accent);">
+                      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                        <span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ child.runId }}</span>
+                        <span style="{{ child.badge.style }}"><span style="{{ child.badge.dotStyle }}"></span>{{ child.badge.label }}</span>
+                      </div>
+                    </button>
+                  </sc-for>
+                </sc-if>
+                <sc-if value="{{ selectedRun.noChain }}" hint-placeholder-val="{{ false }}"><div style="border:1px dashed var(--line);border-radius:9px;padding:14px;text-align:center;font-size:12.5px;color:var(--muted);">No parent or child sessions.</div></sc-if>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </section>
+      </sc-if>
+
+      <!-- ============ PROVIDERS ============ -->
+      <sc-if value="{{ isProviders }}" hint-placeholder-val="{{ false }}">
+      <section data-screen-label="Providers">
+        <div style="margin-bottom:26px;">
+          <h1 style="margin:0 0 5px;font-size:25px;font-weight:600;letter-spacing:-.02em;color:var(--ink);">Providers</h1>
+          <p style="margin:0;font-size:13.5px;color:var(--muted);">Configure credentials below. Secret values are stored by the active Web Console credential store and are never returned by the API.</p>
+        </div>
+        <div class="mobile-provider-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+          <sc-for list="{{ providers }}" as="p" hint-placeholder-count="5">
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:17px;display:flex;flex-direction:column;gap:12px;">
+              <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">
+                <div>
+                  <div style="font-size:15px;font-weight:600;color:var(--ink);letter-spacing:-.01em;">{{ p.name }}</div>
+                  <div style="font-family:'Geist Mono',monospace;font-size:11px;color:var(--faint);margin-top:2px;">{{ p.id }}</div>
+                </div>
+                <span style="{{ p.badge.style }}"><span style="{{ p.badge.dotStyle }}"></span>{{ p.badge.label }}</span>
+              </div>
+              <p style="margin:0;font-size:12.5px;line-height:1.55;color:var(--muted);">{{ p.message }}</p>
+              <div style="display:flex;flex-wrap:wrap;gap:6px;">
+                <sc-for list="{{ p.hints }}" as="h" hint-placeholder-count="2">
+                  <span style="font-family:'Geist Mono',monospace;font-size:11px;color:var(--muted);background:var(--line-soft);border:1px solid var(--line);border-radius:6px;padding:3px 8px;">{{ h }}</span>
+                </sc-for>
+              </div>
+              <sc-if value="{{ p.writable }}" hint-placeholder-val="{{ true }}">
+                <div style="display:flex;gap:8px;align-items:center;">
+                  <input data-provider="{{ p.id }}" data-action="value" type="password" autocomplete="off" placeholder="Enter {{ p.id }} credential…" style="{{ p.inputStyle }}">
+                  <button data-provider="{{ p.id }}" onClick="{{ saveConnection }}" style="border:none;background:var(--accent);color:#fff;border-radius:7px;padding:7px 13px;font:inherit;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;flex:none;">Save</button>
+                  <sc-if value="{{ p.configured }}" hint-placeholder-val="{{ false }}">
+                    <button data-provider="{{ p.id }}" onClick="{{ clearConnection }}" style="border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:7px;padding:7px 13px;font:inherit;font-size:12px;font-weight:500;cursor:pointer;white-space:nowrap;flex:none;" style-hover="color:var(--ink);border-color:var(--faint);">Clear</button>
+                  </sc-if>
+                </div>
+              </sc-if>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+      </sc-if>
+
+    </div>
+  </main>
+
+  <!-- ============ NEW TASK SLIDE-OVER ============ -->
+  <sc-if value="{{ showNewTask }}" hint-placeholder-val="{{ false }}">
+  <div style="position:fixed;inset:0;z-index:40;">
+    <div onClick="{{ toggleNewTask }}" style="position:absolute;inset:0;background:rgba(9,9,11,.42);backdrop-filter:blur(1px);"></div>
+    <div class="mobile-slide-panel" style="position:absolute;top:0;right:0;height:100vh;width:min(480px,92vw);background:var(--panel);border-left:1px solid var(--line);box-shadow:-12px 0 40px rgba(0,0,0,.18);display:flex;flex-direction:column;animation:nitely-slide .28s cubic-bezier(.22,1,.36,1) both;">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:20px 22px;border-bottom:1px solid var(--line);">
+        <div>
+          <div style="font-size:16px;font-weight:600;color:var(--ink);letter-spacing:-.01em;">New task</div>
+          <div style="font-size:12.5px;color:var(--muted);margin-top:2px;">Materialized as local files, then run as inputs.</div>
+        </div>
+        <button onClick="{{ toggleNewTask }}" style="background:transparent;border:1px solid var(--line);border-radius:7px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--muted);" style-hover="color:var(--ink);border-color:var(--faint);">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </div>
+      <form ref="{{ newTaskForm }}" style="padding:22px;display:flex;flex-direction:column;gap:16px;overflow-y:auto;">
+        <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">Title
+          <input name="title" autocomplete="off" placeholder="Short, descriptive task title" style="{{ inputStyle }}">
+        </label>
+        <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">Repository
+          <select name="repoId" style="{{ inputStyle }}">
+            <sc-for list="{{ repositories }}" as="repo" hint-placeholder-count="1">
+              <option value="{{ repo.id }}">{{ repo.name }}</option>
+            </sc-for>
+          </select>
+        </label>
+        <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">GitHub issue URL <span style="font-weight:400;color:var(--faint);">optional</span>
+          <input name="issueUrl" autocomplete="off" placeholder="https://github.com/owner/repo/issues/…" style="{{ inputStyle }}">
+        </label>
+        <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">Specification
+          <textarea name="spec" placeholder="What should change, and the acceptance criteria…" style="{{ textareaStyle }}"></textarea>
+        </label>
+        <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">Technical design
+          <textarea name="techDesign" placeholder="How it will be implemented…" style="{{ textareaStyle }}"></textarea>
+        </label>
+        <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">Flow
+          <select name="flowPath" style="{{ inputStyle }}">
+            <option value="flows/implement-spec-bootstrap.json">implement-spec-bootstrap</option>
+            <option value="flows/rework-pr-bootstrap.json">rework-pr-bootstrap</option>
+            <option value="flows/resolve-conflicts-bootstrap.json">resolve-conflicts-bootstrap</option>
+          </select>
+        </label>
+      </form>
+      <div style="margin-top:auto;display:flex;gap:10px;justify-content:flex-end;padding:18px 22px;border-top:1px solid var(--line);">
+        <button onClick="{{ toggleNewTask }}" style="background:transparent;border:1px solid var(--line);border-radius:8px;padding:9px 16px;font:inherit;font-size:13px;font-weight:600;color:var(--ink);cursor:pointer;">Cancel</button>
+        <button onClick="{{ createTask }}" style="border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:8px;padding:9px 16px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;">Create task</button>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+  <!-- ============ NEW REPOSITORY SLIDE-OVER ============ -->
+  <sc-if value="{{ showNewRepo }}" hint-placeholder-val="{{ false }}">
+  <div style="position:fixed;inset:0;z-index:41;">
+    <div onClick="{{ toggleNewRepo }}" style="position:absolute;inset:0;background:rgba(9,9,11,.42);backdrop-filter:blur(1px);"></div>
+    <div class="mobile-slide-panel" style="position:absolute;top:0;right:0;height:100vh;width:min(440px,92vw);background:var(--panel);border-left:1px solid var(--line);box-shadow:-12px 0 40px rgba(0,0,0,.18);display:flex;flex-direction:column;animation:nitely-slide .28s cubic-bezier(.22,1,.36,1) both;">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:20px 22px;border-bottom:1px solid var(--line);">
+        <div>
+          <div style="font-size:16px;font-weight:600;color:var(--ink);letter-spacing:-.01em;">Add repository</div>
+          <div style="font-size:12.5px;color:var(--muted);margin-top:2px;">Paste a GitHub URL; Nitely clones and registers it on this server.</div>
+        </div>
+        <button onClick="{{ toggleNewRepo }}" style="background:transparent;border:1px solid var(--line);border-radius:7px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--muted);" style-hover="color:var(--ink);border-color:var(--faint);">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+        </button>
+      </div>
+      <form ref="{{ newRepoForm }}" style="padding:22px;display:flex;flex-direction:column;gap:16px;overflow-y:auto;">
+        <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">GitHub URL
+          <input name="githubUrl" autocomplete="off" placeholder="https://github.com/Instask/nitely" style="{{ inputStyle }}">
+        </label>
+        <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">Repository ID <span style="font-weight:400;color:var(--faint);">optional</span>
+          <input name="id" autocomplete="off" placeholder="instask-nitely" style="{{ inputStyle }}">
+        </label>
+        <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">Name <span style="font-weight:400;color:var(--faint);">optional</span>
+          <input name="name" autocomplete="off" placeholder="Instask/nitely" style="{{ inputStyle }}">
+        </label>
+        <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">Existing server path <span style="font-weight:400;color:var(--faint);">optional advanced</span>
+          <input name="path" autocomplete="off" placeholder="/home/jerry/repos/nitely" style="{{ inputStyle }}">
+        </label>
+        <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">Default branch <span style="font-weight:400;color:var(--faint);">optional</span>
+          <input name="defaultBranch" autocomplete="off" placeholder="master" style="{{ inputStyle }}">
+        </label>
+        <sc-if value="{{ repoStatus }}" hint-placeholder-val="{{ false }}">
+          <div style="font-size:12.5px;color:var(--muted);background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;">{{ repoStatus }}</div>
+        </sc-if>
+      </form>
+      <div style="margin-top:auto;display:flex;gap:10px;justify-content:flex-end;padding:18px 22px;border-top:1px solid var(--line);">
+        <button onClick="{{ toggleNewRepo }}" style="background:transparent;border:1px solid var(--line);border-radius:8px;padding:9px 16px;font:inherit;font-size:13px;font-weight:600;color:var(--ink);cursor:pointer;">Cancel</button>
+        <button onClick="{{ createRepository }}" style="border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:8px;padding:9px 16px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;">Add repository</button>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+  </sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{
+  "$preview": { "width": 1440, "height": 940 },
+  "theme": { "editor": "enum", "options": ["light", "dark"], "default": "light", "tsType": "string" },
+  "accent": { "editor": "color", "default": "#5b50e8", "tsType": "string" },
+  "density": { "editor": "enum", "options": ["comfortable", "compact"], "default": "comfortable", "tsType": "string" }
+}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.plannerForm = React.createRef();
+    this.newTaskForm = React.createRef();
+    this.newRepoForm = React.createRef();
+    this.loginForm = React.createRef();
+    this.liveRefreshTimer = null;
+    this.liveRefreshInFlight = false;
+    this.state = {
+      view: "tasks",
+      selectedTaskId: null,
+      selectedRunId: null,
+      showNewTask: false,
+      showNewRepo: false,
+      openStages: {},
+      tasks: [],
+      repositories: [],
+      dashboard: null,
+      flows: [],
+      flowTemplates: [],
+      selectedFlowId: null,
+      flowDraftDocument: "",
+      flowDraftReport: null,
+      flowDraftStatus: "",
+      runs: [],
+      providers: [],
+      taskDetails: {},
+      flowDetails: {},
+      runDetails: {},
+      configValues: {},
+      savingProvider: null,
+      sessionLoaded: false,
+      authRequired: false,
+      user: null,
+      loginError: "",
+      repoStatus: "",
+      sessionFilters: {
+        pr: "",
+        status: "",
+        flow: "",
+        task: "",
+        owner: "",
+      },
+    };
+  }
+
+  componentDidMount() {
+    this.applyRoute(this.routeFromPath(window.location.pathname), { replace: true });
+    this.fetchSession();
+    this.onPopState = () => this.applyRoute(this.routeFromPath(window.location.pathname), { replace: true });
+    this.onVisibilityChange = () => this.syncLiveRefresh();
+    window.addEventListener("popstate", this.onPopState);
+    document.addEventListener("visibilitychange", this.onVisibilityChange);
+  }
+
+  componentDidUpdate() {
+    this.syncLiveRefresh();
+  }
+
+  componentWillUnmount() {
+    if (this.onPopState) window.removeEventListener("popstate", this.onPopState);
+    if (this.onVisibilityChange) document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    this.stopLiveRefresh();
+  }
+
+  async api(path, options) {
+    const res = await fetch(path, Object.assign({ credentials: "same-origin" }, options || {}));
+    if (res.status === 401) {
+      this.setState({ authRequired: true, user: null, sessionLoaded: true, loginError: "" });
+      return null;
+    }
+    if (!res.ok) {
+      console.error("[console] API error:", path, res.status);
+      return null;
+    }
+    return res.json();
+  }
+
+  async fetchSession() {
+    const res = await fetch("/api/session", { credentials: "same-origin" });
+    if (!res.ok) {
+      this.setState({ sessionLoaded: true, authRequired: true, user: null });
+      return;
+    }
+    const session = await res.json();
+    this.setState({
+      sessionLoaded: true,
+      authRequired: !!session.authRequired,
+      user: session.user || null,
+      loginError: "",
+    });
+    if (session.user) {
+      await this.fetchData();
+    }
+  }
+
+  async fetchData() {
+    const [tasksRes, reposRes, dashboardRes, flowsRes, templatesRes, runsRes, provRes] = await Promise.all([
+      this.api("/api/tasks"),
+      this.api("/api/repositories"),
+      this.api("/api/dashboard"),
+      this.api("/api/flows"),
+      this.api("/api/flows/templates"),
+      this.api("/api/runs"),
+      this.api("/api/providers"),
+    ]);
+    this.setState({
+      tasks: tasksRes?.tasks ?? [],
+      repositories: reposRes?.repositories ?? [],
+      dashboard: dashboardRes?.dashboard ?? null,
+      flows: flowsRes?.flows ?? [],
+      flowTemplates: templatesRes?.templates ?? [],
+      runs: runsRes?.runs ?? [],
+      providers: provRes?.providers ?? [],
+    });
+  }
+
+  async refresh() {
+    this.setState({ taskDetails: {}, runDetails: {}, selectedTaskId: null, selectedRunId: null });
+    await this.fetchData();
+  }
+
+  routeFromPath(pathname) {
+    const path = pathname || "/";
+    if (path === "/" || path === "/tasks") return { view: "tasks" };
+    if (path === "/dashboard") return { view: "dashboard" };
+    if (path === "/work-items") return { view: "tasks" };
+    if (path === "/flows") return { view: "flows" };
+    if (path === "/flows/new") return { view: "flow-new" };
+    if (path === "/providers") return { view: "providers" };
+    if (path === "/runs") return { view: "runs" };
+    const flowMatch = path.match(/^\/flows\/(.+)$/);
+    if (flowMatch) return { view: "flow-detail", flowId: decodeURIComponent(flowMatch[1]) };
+    const taskMatch = path.match(/^\/tasks\/([^/]+)$/);
+    if (taskMatch) return { view: "task-detail", taskId: decodeURIComponent(taskMatch[1]) };
+    const runMatch = path.match(/^\/runs\/([^/]+)$/);
+    if (runMatch) return { view: "run-detail", runId: decodeURIComponent(runMatch[1]) };
+    return { view: "tasks" };
+  }
+
+  pathForRoute(route) {
+    if (route.view === "work-items") return "/tasks";
+    if (route.view === "dashboard") return "/dashboard";
+    if (route.view === "flows") return "/flows";
+    if (route.view === "flow-new") return "/flows/new";
+    if (route.view === "flow-detail" && route.flowId) return "/flows/" + encodeURIComponent(route.flowId);
+    if (route.view === "providers") return "/providers";
+    if (route.view === "task-detail" && route.taskId) return "/tasks/" + encodeURIComponent(route.taskId);
+    if (route.view === "run-detail" && route.runId) return "/runs/" + encodeURIComponent(route.runId);
+    return "/tasks";
+  }
+
+  applyRoute(route, options) {
+    const patch = { view: route.view, showNewTask: false };
+    if (route.view === "task-detail") {
+      patch.selectedTaskId = route.taskId;
+      patch.selectedRunId = null;
+      this.fetchTaskDetail(route.taskId);
+    } else if (route.view === "run-detail") {
+      patch.selectedRunId = route.runId;
+      this.fetchRunDetail(route.runId);
+    } else if (route.view === "flow-detail") {
+      patch.selectedFlowId = route.flowId;
+      this.fetchFlowDetail(route.flowId);
+    } else if (route.view === "flow-new") {
+      patch.selectedFlowId = null;
+      patch.flowDraftDocument = "";
+      patch.flowDraftReport = null;
+      patch.flowDraftStatus = "";
+    } else {
+      patch.selectedRunId = null;
+      if (route.view === "tasks" || route.view === "dashboard") patch.selectedTaskId = null;
+    }
+    this.setState(patch);
+    const path = this.pathForRoute(route);
+    if (!options?.replace && window.location.pathname !== path) {
+      window.history.pushState({}, "", path);
+    } else if (options?.replace && window.location.pathname !== path) {
+      window.history.replaceState({}, "", path);
+    }
+  }
+
+  navigate(route) {
+    this.applyRoute(route);
+  }
+
+  async fetchTaskDetail(taskId) {
+    if (this.state.taskDetails[taskId]) return;
+    const res = await this.api("/api/tasks/" + encodeURIComponent(taskId));
+    if (res) {
+      this.setState((s) => ({
+        taskDetails: Object.assign({}, s.taskDetails, { [taskId]: res }),
+      }));
+    }
+  }
+
+  async fetchFlowDetail(flowId) {
+    const res = await this.api("/api/flows/" + encodeURIComponent(flowId));
+    if (res?.flow) {
+      this.setState((s) => ({
+        flowDetails: Object.assign({}, s.flowDetails, { [flowId]: res.flow }),
+        flowDraftDocument: res.flow.document,
+        flowDraftReport: null,
+        flowDraftStatus: "",
+      }));
+    }
+  }
+
+  openFlow = (e) => {
+    const id = e.currentTarget.dataset.id;
+    this.navigate({ view: "flow-detail", flowId: id });
+  };
+
+  newFlow = () => {
+    this.navigate({ view: "flow-new" });
+  };
+
+  pickTemplate = (e) => {
+    const id = e.currentTarget.dataset.id;
+    const template = (this.state.flowTemplates || []).find((t) => t.id === id);
+    if (template) {
+      this.setState({ flowDraftDocument: template.document, flowDraftReport: null, flowDraftStatus: "" });
+      this.validateFlowDraft();
+    }
+  };
+
+  editFlowDraft = (e) => {
+    const document = e.currentTarget.value;
+    this.setState({ flowDraftDocument: document });
+    clearTimeout(this._flowValidateTimer);
+    this._flowValidateTimer = setTimeout(() => this.validateFlowDraft(), 400);
+  };
+
+  async validateFlowDraft() {
+    const document = this.state.flowDraftDocument;
+    const res = await this.api("/api/flows/validate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ document }),
+    });
+    if (res?.report) this.setState({ flowDraftReport: res.report });
+  }
+
+  saveFlow = async () => {
+    const document = this.state.flowDraftDocument;
+    const editingId = this.state.selectedFlowId;
+    const isUserEdit = editingId && !editingId.startsWith("flows/");
+    this.setState({ flowDraftStatus: "Saving..." });
+    const path = isUserEdit ? "/api/flows/" + encodeURIComponent(editingId) : "/api/flows";
+    const res = await fetch(path, {
+      method: isUserEdit ? "PUT" : "POST",
+      headers: { "content-type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ document }),
+    });
+    if (res.status === 422) {
+      const body = await res.json().catch(() => ({}));
+      this.setState({ flowDraftReport: body.report, flowDraftStatus: "Validation failed" });
+      return;
+    }
+    if (!res.ok) {
+      this.setState({ flowDraftStatus: "Save failed" });
+      return;
+    }
+    const body = await res.json();
+    await this.fetchData();
+    this.navigate({ view: "flow-detail", flowId: body.flow.id });
+  };
+
+  runFromFlow = async (e) => {
+    const flowId = e.currentTarget.dataset.id;
+    const detail = this.state.flowDetails[flowId];
+    const inputs = {};
+    for (const input of (detail?.inputs || [])) {
+      inputs[input.id] = { connector: "local-file", uri: "" };
+    }
+    const body = flowId.startsWith("flows/")
+      ? { title: detail?.name || flowId, flowPath: flowId, inputs }
+      : { title: detail?.name || flowId, flowId, inputs };
+    const res = await fetch("/api/work-items", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(body),
+    });
+    if (res.ok) {
+      const created = await res.json();
+      await this.fetchData();
+      this.navigate({ view: "task-detail", taskId: created.workItem.id });
+    }
+  };
+
+  async fetchRunDetail(runId, options) {
+    if (this.state.runDetails[runId] && !options?.force) return;
+    const res = await this.api("/api/runs/" + encodeURIComponent(runId));
+    if (res) {
+      this.setState((s) => ({
+        runDetails: Object.assign({}, s.runDetails, { [runId]: res.run }),
+      }));
+    }
+  }
+
+  timeAgo(iso) {
+    if (!iso) return "";
+    const diff = Date.now() - new Date(iso).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return mins + "m ago";
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return hrs + "h ago";
+    const days = Math.floor(hrs / 24);
+    return days + "d ago";
+  }
+
+  statusMeta(status) {
+    const map = {
+      completed: { label: "Completed", color: "#16a34a", bg: "rgba(22,163,74,.12)" },
+      running: { label: "Running", color: "#2563eb", bg: "rgba(37,99,235,.12)" },
+      failed: { label: "Failed", color: "#dc2626", bg: "rgba(220,38,38,.12)" },
+      blocked: { label: "Blocked", color: "#b45309", bg: "rgba(180,83,9,.14)" },
+      incomplete: { label: "Incomplete", color: "#d97706", bg: "rgba(217,119,6,.14)" },
+      interrupted: { label: "Interrupted", color: "#d97706", bg: "rgba(217,119,6,.14)" },
+      cancelled: { label: "Cancelled", color: "#71717a", bg: "rgba(113,113,122,.13)" },
+      "gate-checking": { label: "Gate checking", color: "#1d4ed8", bg: "rgba(29,78,216,.12)" },
+      "awaiting-orchestrator": { label: "Awaiting orchestrator", color: "#d97706", bg: "rgba(217,119,6,.14)" },
+      retrying: { label: "Retrying", color: "#7c3aed", bg: "rgba(124,58,237,.12)" },
+      reworking: { label: "Reworking", color: "#0891b2", bg: "rgba(8,145,178,.12)" },
+      escalated: { label: "Escalated", color: "#be123c", bg: "rgba(190,18,60,.12)" },
+      ready: { label: "Ready", color: "var(--accent)", bg: "var(--accent-soft)" },
+      draft: { label: "Draft", color: "#71717a", bg: "rgba(113,113,122,.13)" },
+      pending: { label: "Pending", color: "#9ca3af", bg: "rgba(148,163,184,.14)" },
+    };
+    return map[status] || map.pending;
+  }
+
+  badge(status, labelOverride) {
+    const m = this.statusMeta(status);
+    const active = ["running", "gate-checking", "awaiting-orchestrator", "retrying", "reworking"].includes(status);
+    return {
+      label: labelOverride || m.label,
+      style: { display: "inline-flex", alignItems: "center", gap: "6px", padding: "3px 9px 3px 8px", borderRadius: "999px", fontSize: "11.5px", fontWeight: 600, letterSpacing: ".01em", color: m.color, background: m.bg, whiteSpace: "nowrap", width: "fit-content", lineHeight: 1.4 },
+      dotStyle: Object.assign({ width: "6px", height: "6px", borderRadius: "50%", background: m.color, flex: "none" }, active ? { animation: "nitely-pulse 1.4s ease-in-out infinite" } : {}),
+    };
+  }
+
+  taskDisplayStatus(t) {
+    return t.latestRunStatus || t.displayStatus || t.status;
+  }
+
+  formatContextUsage(u) {
+    if (!u) return "";
+    const tok = u.approxTokens >= 1000 ? Math.round(u.approxTokens / 100) / 10 + "k" : String(u.approxTokens || 0);
+    const savedKb = Math.round((u.inputBytesSaved || 0) / 1024);
+    return "~" + tok + " tok" + (savedKb > 0 ? " · " + savedKb + "KB saved" : "");
+  }
+
+  formatRuntimeUsage(u) {
+    if (!u) return "";
+    const fmt = (n) => n >= 1000 ? Math.round(n / 100) / 10 + "k" : String(n);
+    const unknown = u.unknownAttempts || 0;
+    const known = u.knownAttempts || 0;
+    if (!known && unknown) return "runtime tokens unknown";
+    const parts = [];
+    if (typeof u.totalTokens === "number") {
+      parts.push(fmt(u.totalTokens) + " runtime tok");
+    } else {
+      const io = [];
+      if (typeof u.inputTokens === "number") io.push(fmt(u.inputTokens) + " in");
+      if (typeof u.outputTokens === "number") io.push(fmt(u.outputTokens) + " out");
+      if (io.length) parts.push(io.join(" / "));
+    }
+    if (typeof u.estimatedCostUsd === "number") parts.push("$" + u.estimatedCostUsd.toFixed(4));
+    if (!parts.length && known) parts.push("runtime tokens recorded");
+    if (unknown) parts.push(unknown + " unknown");
+    return parts.join(" · ");
+  }
+
+  compactNumber(n) {
+    if (typeof n !== "number") return "—";
+    if (n >= 1000000) return Math.round(n / 100000) / 10 + "m";
+    if (n >= 1000) return Math.round(n / 100) / 10 + "k";
+    return String(n);
+  }
+
+  percentLabel(value) {
+    return Math.round((value || 0) * 100) + "%";
+  }
+
+  costLabel(value) {
+    return typeof value === "number" ? "$" + value.toFixed(value >= 1 ? 2 : 4) : "unknown";
+  }
+
+  formatBudget(b) {
+    if (!b) return "";
+    if (b.status === "exceeded") return "budget exceeded";
+    return "budget: trimmed (" + (b.approxTokensBefore || 0) + "→" + (b.approxTokensAfter || 0) + " tok)";
+  }
+
+  formatBudgetSummary(summary) {
+    if (!summary) return "";
+    const fmt = (n) => n >= 1000 ? Math.round(n / 100) / 10 + "k" : String(n);
+    const parts = [];
+    if (summary.contextApproxTokens) parts.push(fmt(summary.contextApproxTokens) + " context tok");
+    if (summary.runtimeTokens) parts.push(fmt(summary.runtimeTokens) + " runtime tok");
+    if (summary.trimmedEvents) parts.push(summary.trimmedEvents + " trim" + (summary.trimmedEvents === 1 ? "" : "s"));
+    if (summary.exceededEvents) parts.push(summary.exceededEvents + " exceed" + (summary.exceededEvents === 1 ? "" : "s"));
+    if (!parts.length) return "";
+    return "budget summary: " + parts.join(" · ");
+  }
+
+  formatBudgetConsumers(summary) {
+    const consumers = summary?.topConsumers || [];
+    if (!consumers.length) return "";
+    const fmt = (n) => n >= 1000 ? Math.round(n / 100) / 10 + "k" : String(n);
+    const kindLabel = (kind) => kind === "tool-output" ? "tool" : kind === "budget-exceeded" ? "exceeded" : kind;
+    return "top token consumers: " + consumers.map((c) => c.stageId + "#" + c.attempt + " " + kindLabel(c.kind) + " " + fmt(c.approxTokens) + " tok").join(" · ");
+  }
+
+  stageStateLabel(state) {
+    return this.statusMeta(state || "pending").label;
+  }
+
+  currentStageLabel(run) {
+    if (!run?.currentStage) return "No current stage";
+    const attempt = run.currentAttempt ? " · attempt " + run.currentAttempt : "";
+    const state = run.currentStageState ? " · " + this.stageStateLabel(run.currentStageState) : "";
+    return run.currentStage + attempt + state;
+  }
+
+  blockerLabel(blocker) {
+    if (!blocker) return "";
+    const parts = [];
+    if (blocker.stageId) parts.push("Stage " + blocker.stageId);
+    if (blocker.reason) parts.push(blocker.reason);
+    if (blocker.runtime) parts.push("runtime " + blocker.runtime);
+    if (blocker.retryAfter) parts.push("retry after " + blocker.retryAfter);
+    const message = blocker.message ? " · " + blocker.message : "";
+    return parts.join(" · ") + message;
+  }
+
+  evidenceSummary(ev) {
+    const d = ev.detail || {};
+    const parts = [];
+    if (ev.kind === "input" || ev.kind === "artifact") {
+      if (d.type) parts.push(d.type);
+      if (d.producer) parts.push("by " + d.producer);
+      if (d.sha256) parts.push("sha256 " + String(d.sha256).slice(0, 12));
+      if (typeof d.size === "number") parts.push(d.size + "B");
+    } else if (ev.kind === "stage") {
+      if (d.stageType) parts.push(d.stageType);
+      if (d.status) parts.push(d.status);
+      if (typeof d.durationMs === "number") parts.push(d.durationMs + "ms");
+    } else if (ev.kind === "gate") {
+      if (d.state) parts.push(d.state);
+      if (d.actor) parts.push("by " + d.actor);
+      if (d.reason) parts.push(d.reason);
+    } else if (ev.kind === "external-effect") {
+      if (d.prUrl || d.changeRequestUrl) parts.push(d.prUrl || d.changeRequestUrl);
+      if (d.branchName) parts.push(d.branchName);
+    }
+    return parts.join("  ·  ");
+  }
+
+  navStyle(active) {
+    return { display: "flex", alignItems: "center", gap: "11px", padding: "8px 11px", borderRadius: "8px", border: "1px solid " + (active ? "var(--line)" : "transparent"), font: "inherit", fontSize: "14px", fontWeight: active ? 600 : 500, cursor: "pointer", textAlign: "left", width: "100%", color: active ? "var(--ink)" : "var(--muted)", background: active ? "var(--panel)" : "transparent" };
+  }
+
+  isStageOpen(key, status) {
+    const v = this.state.openStages[key];
+    if (v === undefined) return status === "running" || status === "failed" || status === "gate-checking" || status === "awaiting-orchestrator";
+    return v;
+  }
+
+  decorateStage(run, s, i, total) {
+    const key = run.runId + ":" + s.id;
+    const displayState = s.state || s.status;
+    const open = this.isStageOpen(key, displayState);
+    const m = this.statusMeta(displayState);
+    const dotLabel = displayState === "completed" ? "✓" : displayState === "failed" ? "✕" : String(i + 1);
+    const hasLogs = !!(s.stdout || s.stderr);
+    const details = s.details || {};
+    const detailFields = (details.fields || []).map((field) => ({
+      label: field.label,
+      value: field.value,
+      href: field.href || "",
+      hasHref: !!field.href,
+      noHref: !field.href,
+      valueStyle: {
+        fontFamily: field.mono ? "'Geist Mono',monospace" : "inherit",
+        fontSize: field.mono ? "12px" : "12.5px",
+        color: field.href ? "var(--accent)" : "var(--ink)",
+        overflowWrap: "anywhere",
+      },
+    }));
+    const artifacts = (details.artifacts || []).map((artifact) => ({
+      label: [artifact.id, artifact.path].filter(Boolean).join(" · "),
+    }));
+    const events = (details.events || []).map((event) => ({
+      type: event.type,
+      at: event.at,
+      summary: event.summary || (event.attempt ? "attempt " + event.attempt : ""),
+    }));
+    const hasDetails = s.hasDetails !== false && (
+      detailFields.length > 0 ||
+      !!details.prompt ||
+      hasLogs ||
+      artifacts.length > 0 ||
+      events.length > 0
+    );
+    const attempts = s.maxAttempts ? (s.attempts || 0) + "/" + s.maxAttempts + " attempt" + (s.maxAttempts > 1 ? "s" : "") : "";
+    const usageLabel = this.formatContextUsage(s.contextUsage);
+    const runtimeUsageLabel = this.formatRuntimeUsage(s.runtimeUsage);
+    const budgetLabel = this.formatBudget(s.budget);
+    const metaLabel = [s.duration, attempts, runtimeUsageLabel, usageLabel, budgetLabel].filter(Boolean).join(" · ") || (displayState === "pending" ? "queued" : "");
+    const gate = s.gate || null;
+    return Object.assign({}, s, {
+      openKey: key,
+      notLast: i < total - 1,
+      dotLabel,
+      dotStyle: Object.assign({ width: "26px", height: "26px", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12px", fontWeight: 700, flex: "none", color: "#fff", background: m.color, boxShadow: "0 0 0 4px var(--panel)" }, displayState === "running" || displayState === "gate-checking" ? { animation: "nitely-pulse 1.4s ease-in-out infinite" } : {}),
+      stateBadge: this.badge(displayState),
+      hasRuntime: !!s.runtime,
+      runtimeLabel: s.runtime ? (s.model ? s.runtime + " · " + s.model : s.runtime) : "",
+      hasGate: !!gate,
+      gateLabel: gate ? gate.mode + " · " + gate.status : "",
+      metaLabel,
+      hasLogs,
+      hasDetails,
+      showDetails: open && hasDetails,
+      detailFields,
+      hasDetailFields: detailFields.length > 0,
+      prompt: details.prompt || "",
+      hasPrompt: !!details.prompt,
+      artifacts,
+      hasArtifacts: artifacts.length > 0,
+      events,
+      hasEvents: events.length > 0,
+      hasStdout: !!s.stdout,
+      hasStderr: !!s.stderr,
+      chevronStyle: { transform: open ? "rotate(180deg)" : "none", transition: "transform .18s ease", flex: "none" },
+    });
+  }
+
+  completedStages(run) {
+    return (run.stages || []).filter((s) => s.status === "completed").map((s) => s.id);
+  }
+
+  buildStagesFromLogs(runId, completedIds, logs) {
+    if (!completedIds || completedIds.length === 0) {
+      return [{ id: "implement", type: "agent", status: "pending", attempts: 0, maxAttempts: 1, duration: "", stdout: "", stderr: "" }];
+    }
+    const stageMap = {};
+    for (const log of logs || []) {
+      if (!stageMap[log.stageId]) {
+        const done = completedIds.includes(log.stageId);
+        stageMap[log.stageId] = { id: log.stageId, type: "agent", status: done ? "completed" : "running", attempts: 1, maxAttempts: 3, duration: "", stdout: log.stdout || "", stderr: log.stderr || "" };
+      } else {
+        if (log.stdout) stageMap[log.stageId].stdout = (stageMap[log.stageId].stdout || "") + "\n" + log.stdout;
+        if (log.stderr) stageMap[log.stageId].stderr = (stageMap[log.stageId].stderr || "") + "\n" + log.stderr;
+        stageMap[log.stageId].attempts = (stageMap[log.stageId].attempts || 1) + 1;
+      }
+    }
+    for (const id of completedIds) {
+      if (!stageMap[id]) {
+        stageMap[id] = { id, type: "agent", status: "completed", attempts: 1, maxAttempts: 3, duration: "", stdout: "", stderr: "" };
+      }
+    }
+    return Object.values(stageMap);
+  }
+
+  // ---------- navigation / actions ----------
+  navTo = (e) => {
+    const view = e.currentTarget.dataset.view;
+    this.navigate({ view });
+  };
+
+  openTask = (e) => {
+    const id = e.currentTarget.dataset.id;
+    this.navigate({ view: "task-detail", taskId: id });
+  };
+
+  openRun = (e) => {
+    e.stopPropagation();
+    const id = e.currentTarget.dataset.id;
+    const taskId = e.currentTarget.dataset.task;
+    this.setState((s) => ({ selectedTaskId: taskId || s.selectedTaskId }));
+    this.navigate({ view: "run-detail", runId: id });
+  };
+
+  toggleNewTask = () => this.setState((s) => ({ showNewTask: !s.showNewTask }));
+  toggleNewRepo = () => this.setState((s) => ({
+    showNewRepo: !s.showNewRepo,
+    repoStatus: "",
+  }));
+  noop = (e) => { e.preventDefault(); };
+  stop = (e) => { e.stopPropagation(); };
+
+  setSessionFilter = (e) => {
+    const key = e.currentTarget.dataset.filterKey;
+    const value = e.currentTarget.value;
+    this.setState((s) => ({
+      sessionFilters: Object.assign({}, s.sessionFilters, { [key]: value }),
+    }));
+  };
+
+  associatedTaskIdForRun(runId) {
+    const detailMatch = Object.entries(this.state.taskDetails).find(([, detail]) =>
+      (detail.runs || []).some((run) => run.runId === runId)
+    );
+    if (detailMatch) return detailMatch[0];
+    const task = this.state.tasks.find((t) =>
+      t.latestRunId === runId || t.latestRun?.runId === runId
+    );
+    return task?.id || this.state.selectedTaskId;
+  }
+
+  backFromRun = () => {
+    const taskId = this.associatedTaskIdForRun(this.state.selectedRunId);
+    if (taskId) {
+      this.navigate({ view: "task-detail", taskId });
+      return;
+    }
+    this.navigate({ view: "tasks" });
+  };
+
+  toggleStage = (e) => {
+    const k = e.currentTarget.dataset.stage;
+    const run = this.state.runDetails[this.state.selectedRunId];
+    const stages = run ? (run.stages || this.buildStagesFromLogs(this.state.selectedRunId, run.completedStages, run.logs)) : [];
+    const stage = stages.find((s) => this.state.selectedRunId + ":" + s.id === k);
+    if (!stage || stage.hasDetails === false) return;
+    const cur = this.isStageOpen(k, stage.status);
+    this.setState((s) => ({ openStages: Object.assign({}, s.openStages, { [k]: !cur }) }));
+  };
+
+  startRun = async (e) => {
+    e.stopPropagation();
+    const id = e.currentTarget.dataset.id;
+    const res = await this.api("/api/tasks/" + encodeURIComponent(id) + "/runs", { method: "POST" });
+    if (res) {
+      this.setState({ taskDetails: {}, runDetails: {} });
+      await this.fetchData();
+      this.navigate({ view: "task-detail", taskId: id });
+    }
+  };
+
+  planWork = async (e) => {
+    e.preventDefault();
+    const form = this.plannerForm.current;
+    if (!form) return;
+    const data = Object.fromEntries(new FormData(form).entries());
+    const sourceType = String(data.sourceType || "github-issue");
+    const intake = String(data.intake || "").trim();
+    if (!intake) { form.querySelector("input[name=intake]").focus(); return; }
+    const payload = {
+      sourceType,
+      repoId: data.repoId,
+      flowPath: data.flowPath,
+    };
+    const title = String(data.title || "").trim();
+    if (title) payload.title = title;
+    if (sourceType === "github-issue") {
+      payload.issue = intake;
+    } else {
+      payload.prompt = intake;
+    }
+    const res = await this.api("/api/draft-specs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (res?.task?.id) {
+      form.querySelector("input[name=intake]").value = "";
+      form.querySelector("input[name=title]").value = "";
+      await this.fetchData();
+      this.navigate({ view: "task-detail", taskId: res.task.id });
+    }
+  };
+
+  approveSpec = async (e) => {
+    e.stopPropagation();
+    const id = e.currentTarget.dataset.id;
+    const res = await this.api("/api/tasks/" + encodeURIComponent(id) + "/approve-spec", { method: "POST" });
+    if (res) {
+      this.setState({ taskDetails: {} });
+      await this.fetchData();
+      await this.fetchTaskDetail(id);
+    }
+  };
+
+  draftTechnicalDesign = async (e) => {
+    e.stopPropagation();
+    const id = e.currentTarget.dataset.id;
+    const res = await this.api("/api/tasks/" + encodeURIComponent(id) + "/draft-tech-design", { method: "POST" });
+    if (res) {
+      this.setState({ taskDetails: {} });
+      await this.fetchData();
+      await this.fetchTaskDetail(id);
+    }
+  };
+
+  approveTechDesign = async (e) => {
+    e.stopPropagation();
+    const id = e.currentTarget.dataset.id;
+    const res = await this.api("/api/tasks/" + encodeURIComponent(id) + "/approve-tech-design", { method: "POST" });
+    if (res) {
+      this.setState({ taskDetails: {} });
+      await this.fetchData();
+      await this.fetchTaskDetail(id);
+    }
+  };
+
+  createTask = async (e) => {
+    e.preventDefault();
+    const form = this.newTaskForm.current;
+    if (!form) return;
+    const data = Object.fromEntries(new FormData(form).entries());
+    if (!String(data.title || "").trim()) { form.querySelector("input[name=title]").focus(); return; }
+    const res = await this.api("/api/tasks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (res) {
+      this.navigate({ view: "tasks" });
+      this.setState({ showNewTask: false });
+      form.querySelector("input[name=title]").value = "";
+      form.querySelector("input[name=issueUrl]").value = "";
+      form.querySelector("textarea[name=spec]").value = "";
+      form.querySelector("textarea[name=techDesign]").value = "";
+      await this.refresh();
+    }
+  };
+
+  createRepository = async (e) => {
+    e.preventDefault();
+    const form = this.newRepoForm.current;
+    if (!form) return;
+    const data = Object.fromEntries(new FormData(form).entries());
+    if (!String(data.githubUrl || "").trim() && !String(data.path || "").trim()) { form.querySelector("input[name=githubUrl]").focus(); return; }
+    if (!String(data.githubUrl || "").trim() && !String(data.id || "").trim()) { form.querySelector("input[name=id]").focus(); return; }
+    this.setState({ repoStatus: String(data.githubUrl || "").trim() ? "Cloning repository..." : "Adding repository..." });
+    const res = await fetch("/api/repositories", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      const message = body && body.error && body.error.message ? body.error.message : "Could not add repository";
+      this.setState({ repoStatus: message });
+      return;
+    }
+    form.reset();
+    this.setState({ showNewRepo: false, repoStatus: "" });
+    await this.fetchData();
+  };
+
+  saveConnection = async (e) => {
+    const id = e.currentTarget.dataset.provider;
+    const input = document.querySelector('input[data-provider="' + id + '"][data-action="value"]');
+    if (!input || !String(input.value || "").trim()) return;
+    this.setState({ savingProvider: id });
+    const res = await this.api("/api/providers/" + encodeURIComponent(id) + "/connection", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: input.value }),
+    });
+    input.value = "";
+    this.setState({ savingProvider: null });
+    if (res) {
+      await this.fetchData();
+    }
+  };
+
+  clearConnection = async (e) => {
+    const id = e.currentTarget.dataset.provider;
+    this.setState({ savingProvider: id });
+    const res = await this.api("/api/providers/" + encodeURIComponent(id) + "/connection", {
+      method: "DELETE",
+    });
+    this.setState({ savingProvider: null });
+    if (res) {
+      await this.fetchData();
+    }
+  };
+
+  isActiveRun(run) {
+    return !!run && (run.status === "running" || run.status === "interrupted" || run.status === "blocked");
+  }
+
+  visibleRunsForRefresh() {
+    if (this.state.view === "run-detail" && this.state.selectedRunId) {
+      return [
+        this.state.runDetails[this.state.selectedRunId] ||
+          this.state.runs.find((run) => run.runId === this.state.selectedRunId),
+      ].filter(Boolean);
+    }
+    if (this.state.view === "runs") {
+      return this.state.runs.filter((run) =>
+        this.matchesSessionFilters(run, this.state.sessionFilters)
+      );
+    }
+    if (this.state.view === "dashboard") {
+      return this.state.runs;
+    }
+    if (this.state.view === "tasks") {
+      return this.state.tasks
+        .map((task) =>
+          task.latestRun ||
+          (task.latestRunId
+            ? this.state.runs.find((run) => run.runId === task.latestRunId)
+            : null)
+        )
+        .filter(Boolean);
+    }
+    if (this.state.view === "task-detail" && this.state.selectedTaskId) {
+      const detail = this.state.taskDetails[this.state.selectedTaskId];
+      return detail?.runs || [];
+    }
+    return [];
+  }
+
+  hasVisibleActiveRuns() {
+    if (document.visibilityState === "hidden") return false;
+    return this.visibleRunsForRefresh().some((run) => this.isActiveRun(run));
+  }
+
+  startLiveRefresh() {
+    if (this.liveRefreshTimer) return;
+    this.liveRefreshTimer = window.setInterval(() => this.refreshLiveData(), 2000);
+  }
+
+  stopLiveRefresh() {
+    if (!this.liveRefreshTimer) return;
+    window.clearInterval(this.liveRefreshTimer);
+    this.liveRefreshTimer = null;
+  }
+
+  syncLiveRefresh() {
+    if (this.hasVisibleActiveRuns()) {
+      this.startLiveRefresh();
+    } else {
+      this.stopLiveRefresh();
+    }
+  }
+
+  async refreshLiveData() {
+    if (this.liveRefreshInFlight || !this.hasVisibleActiveRuns()) return;
+    this.liveRefreshInFlight = true;
+    try {
+      await this.fetchData();
+      if (this.state.selectedRunId) {
+        await this.fetchRunDetail(this.state.selectedRunId, { force: true });
+      }
+    } finally {
+      this.liveRefreshInFlight = false;
+      this.syncLiveRefresh();
+    }
+  }
+
+  matchesSessionFilters(run, filters) {
+    const prText = String(filters.pr || "").trim().toLowerCase();
+    const flowText = String(filters.flow || "").trim().toLowerCase();
+    const taskText = String(filters.task || "").trim().toLowerCase();
+    const ownerText = String(filters.owner || "").trim().toLowerCase();
+    if (filters.status && run.status !== filters.status) return false;
+    if (flowText && !String(run.flowName || "").toLowerCase().includes(flowText)) return false;
+    if (taskText && !String(run.taskId || "").toLowerCase().includes(taskText)) return false;
+    if (ownerText && !String(run.ownerId || "").toLowerCase().includes(ownerText)) return false;
+    if (prText) {
+      const haystack = [run.prNumber, run.prUrl, run.changeRequestUrl].filter(Boolean).join(" ").toLowerCase();
+      if (!haystack.includes(prText)) return false;
+    }
+    return true;
+  }
+
+  signIn = async (e) => {
+    e.preventDefault();
+    const form = this.loginForm.current;
+    if (!form) return;
+    const data = Object.fromEntries(new FormData(form).entries());
+    const res = await fetch("/api/session", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      this.setState({ loginError: "Invalid email or password." });
+      return;
+    }
+    const session = await res.json();
+    this.setState({ user: session.user || null, authRequired: !!session.authRequired, loginError: "" });
+    await this.fetchData();
+  };
+
+  signOut = async (e) => {
+    e.preventDefault();
+    await fetch("/api/session", { method: "DELETE", credentials: "same-origin" });
+    this.setState({
+      user: null,
+      tasks: [],
+      runs: [],
+      providers: [],
+      dashboard: null,
+      taskDetails: {},
+      runDetails: {},
+      showNewTask: false,
+    });
+  };
+
+  // ---------- render ----------
+  renderVals() {
+    const view = this.state.view;
+    const accent = this.props.accent || "#5b50e8";
+    const density = this.props.density || "comfortable";
+    const theme = this.props.theme || "light";
+
+    const tasks = this.state.tasks.map((t) => {
+      const run = t.latestRun || (t.latestRunId ? this.state.runs.find((r) => r.runId === t.latestRunId) : null);
+      const flowName = t.flowPath ? t.flowPath.split("/").pop().replace(".json", "") : "—";
+      const issueNum = t.issueUrl ? (t.issueUrl.match(/\/issues\/(\d+)/) || [])[1] || "—" : "—";
+      const latestRunId = run?.runId || t.latestRunId;
+      const doneCount = (run?.completedStages || []).length;
+      const stageLabel = run?.currentStage ? this.currentStageLabel(run) : t.currentStage ? "stage " + t.currentStage : doneCount ? doneCount + " stages complete" : "No stages complete";
+      const latestOutputSummary = run?.latestOutputSummary || t.latestOutputSummary || t.recentLogSummary || "";
+      const changeUrl = t.latestChangeRequestUrl || t.changeRequestUrl || run?.changeRequestUrl || "";
+      const crShort = changeUrl ? (changeUrl.match(/\/pull\/(\d+)/) || [])[1] || "PR" : null;
+      const displayStatus = this.taskDisplayStatus(t);
+      const specStatus = t.specStatus || (t.status === "draft" ? "draft" : "approved");
+      const techDesignStatus = t.techDesignStatus || (t.status === "draft" ? "draft" : "approved");
+      const canStartRun = !t.readOnly && t.status !== "running" && t.status !== "draft" && specStatus === "approved" && techDesignStatus === "approved";
+      const repoName = t.repoName || t.repoId || "default";
+      const sublineParts = [
+        t.workItemType || "task",
+        t.flowId || flowName,
+        issueNum !== "—" ? "#" + issueNum : "",
+      ].filter(Boolean);
+      return Object.assign({}, t, {
+        badge: this.badge(displayStatus),
+        repoName,
+        flow: flowName,
+        issue: issueNum,
+        subline: sublineParts.join("  ·  "),
+        hasRun: !!latestRunId,
+        noRun: !latestRunId && canStartRun,
+        latestRunId,
+        latestRunShort: latestRunId ? latestRunId.replace("run-", "") : "",
+        updated: this.timeAgo(t.updatedAt),
+        created: this.timeAgo(t.createdAt),
+        specPath: t.specPath || "—",
+        techPath: t.techDesignPath || "—",
+        runBadge: run ? this.badge(run.status) : this.badge("pending"),
+        runStagesLabel: run ? stageLabel : "",
+        recentLogSummary: latestOutputSummary,
+        hasLogSummary: !!latestOutputSummary,
+        hasChange: !!changeUrl,
+        changeUrl,
+        cr: crShort ? "PR #" + crShort : "Change",
+      });
+    });
+
+    const runs = this.state.runs.map((r) => {
+      const stageCount = r.stages ? r.stages.length : Math.max((r.completedStages || []).length, 1);
+      const doneCount = r.stages ? this.completedStages(r).length : (r.completedStages || []).length;
+      return Object.assign({}, r, {
+        badge: this.badge(r.status),
+        stagesLabel: doneCount + "/" + stageCount,
+        repoFlow: ((r.repoName || r.repoId || r.repo) ? ((r.repoName || r.repoId || r.repo) + "  ·  ") : "") + (r.flowName || ""),
+        currentStageLabel: this.currentStageLabel(r),
+        hasLatestOutput: !!r.latestOutputSummary,
+        hasChange: !!r.changeRequestUrl,
+        noChange: !r.changeRequestUrl,
+        cr: r.changeRequestUrl ? (r.changeRequestUrl.match(/\/pull\/(\d+)/) || [])[1] || "PR" : null,
+        branchName: r.branchName || r.branchName || "—",
+      });
+    });
+    const filteredRuns = runs.filter((r) => this.matchesSessionFilters(r, this.state.sessionFilters));
+    const hasSessionOwners = this.state.runs.some((r) => !!r.ownerId);
+
+    const rawDashboard = this.state.dashboard || {
+      taskCount: this.state.tasks.length,
+      runCount: this.state.runs.length,
+      repositoryCount: this.state.repositories.length,
+      throughput: { activeTasks: 0, activeRuns: 0, queuedTasks: 0, blockedItems: 0 },
+      blocked: [],
+      cost: { knownRuntimeAttempts: 0, unknownRuntimeAttempts: 0 },
+      outcomes: { completionRate: 0, reworkRatio: 0, reviewGatePassRate: 0, completedRuns: 0, failedRuns: 0, blockedRuns: 0, reworkRuns: 0 },
+      repositories: [],
+    };
+    const dashboardBlocked = (rawDashboard.blocked || []).slice(0, 8).map((item) => ({
+      title: item.title || item.id,
+      ageLabel: item.ageLabel || "unknown age",
+      badge: this.badge(item.status || "blocked", item.kind === "run" ? "Run" : "Task"),
+      meta: [item.repoName || item.repoId || "default", item.kind, item.currentStage, item.ownerId ? "owner " + item.ownerId : ""].filter(Boolean).join(" · "),
+      reason: item.blockerReason || "",
+      hasReason: !!item.blockerReason,
+    }));
+    const dashboardRepos = (rawDashboard.repositories || []).map((repo) => ({
+      repoId: repo.repoId,
+      repoName: repo.repoName,
+      taskCount: repo.taskCount || 0,
+      runCount: repo.runCount || 0,
+      blockedCount: repo.blockedCount || 0,
+      tokenLabel: this.compactNumber(repo.runtimeTokens || repo.contextTokens),
+    }));
+    const dashboard = Object.assign({}, rawDashboard, {
+      metricCards: [
+        { label: "Active work", value: this.compactNumber((rawDashboard.throughput?.activeTasks || 0) + (rawDashboard.throughput?.activeRuns || 0)), sub: (rawDashboard.throughput?.queuedTasks || 0) + " queued tasks" },
+        { label: "Blocked", value: this.compactNumber(rawDashboard.throughput?.blockedItems || 0), sub: "oldest first" },
+        { label: "Runtime tokens", value: this.compactNumber(rawDashboard.cost?.runtimeTokens), sub: this.compactNumber(rawDashboard.cost?.contextTokens) + " context tokens" },
+        { label: "Completion", value: this.percentLabel(rawDashboard.outcomes?.completionRate), sub: (rawDashboard.outcomes?.completedRuns || 0) + " completed runs" },
+      ],
+      blocked: dashboardBlocked,
+      hasBlocked: dashboardBlocked.length > 0,
+      noBlocked: dashboardBlocked.length === 0,
+      blockedCountLabel: (rawDashboard.throughput?.blockedItems || 0) + " blocked",
+      repositories: dashboardRepos,
+      runtimeTokensLabel: this.compactNumber(rawDashboard.cost?.runtimeTokens),
+      contextTokensLabel: this.compactNumber(rawDashboard.cost?.contextTokens),
+      estimatedCostLabel: this.costLabel(rawDashboard.cost?.estimatedCostUsd),
+      usageCoverageLabel: (rawDashboard.cost?.knownRuntimeAttempts || 0) + " usage-known attempts · " + (rawDashboard.cost?.unknownRuntimeAttempts || 0) + " unknown",
+      completionRateLabel: this.percentLabel(rawDashboard.outcomes?.completionRate),
+      reworkRatioLabel: this.percentLabel(rawDashboard.outcomes?.reworkRatio),
+      reviewGateRateLabel: this.percentLabel(rawDashboard.outcomes?.reviewGatePassRate),
+      outcomeSummaryLabel: (rawDashboard.outcomes?.failedRuns || 0) + " failed · " + (rawDashboard.outcomes?.blockedRuns || 0) + " blocked · " + (rawDashboard.outcomes?.reworkRuns || 0) + " rework",
+    });
+
+    const repositories = this.state.repositories.map((repo) => ({
+      id: repo.id,
+      name: repo.name || repo.id,
+      path: repo.path || "",
+    }));
+
+    const writableIds = { github: true, anthropic: true, glm: true, "google-drive": true };
+    const providers = this.state.providers.map((p) => Object.assign({}, p, {
+      badge: this.badge(p.configured ? "completed" : "failed", p.configured ? "Configured" : "Not set"),
+      writable: !!writableIds[p.id],
+      inputStyle: { flex: "1", border: "1px solid var(--line)", borderRadius: "7px", background: "var(--panel-2)", color: "var(--ink)", padding: "7px 10px", font: "inherit", fontSize: "12px", outline: "none", minWidth: "0" },
+    }));
+    const configuredCount = this.state.providers.filter((p) => p.configured).length;
+
+    let selectedTask = null;
+    if (view === "task-detail" && this.state.selectedTaskId) {
+      const td = this.state.taskDetails[this.state.selectedTaskId];
+      const t = this.state.tasks.find((x) => x.id === this.state.selectedTaskId) || td?.task;
+      if (t) {
+        const detailRuns = td?.runs || [];
+        const decoratedRuns = detailRuns.map((run) => {
+          const stageCount = Math.max((run.completedStages || []).length, 1);
+          const stageText = run.currentStage ? this.currentStageLabel(run) : (run.completedStages || []).length + "/" + stageCount + " stages";
+          const branchText = run.branchName || "No branch";
+          const crShort = run.changeRequestUrl ? (run.changeRequestUrl.match(/\/pull\/(\d+)/) || [])[1] || "PR" : null;
+          return Object.assign({}, run, {
+            badge: this.badge(run.status),
+            summaryLine: [stageText, branchText, crShort ? "PR #" + crShort : ""].filter(Boolean).join(" · "),
+            recentLogSummary: run.latestOutputSummary || run.recentLogSummary || "",
+            hasLogSummary: !!(run.latestOutputSummary || run.recentLogSummary),
+          });
+        });
+        const run = decoratedRuns[0] || t.latestRun || (t.latestRunId ? this.state.runs.find((r) => r.runId === t.latestRunId) : null);
+        const latestRunId = run?.runId || t.latestRunId;
+        const flowName = t.flowPath ? t.flowPath.split("/").pop().replace(".json", "") : "—";
+        const issueNum = t.issueUrl ? (t.issueUrl.match(/\/issues\/(\d+)/) || [])[1] || "—" : "—";
+        const doneCount = (run?.completedStages || []).length;
+        const inputSources = Object.entries(t.inputs || {}).map(([id, ref]) => ({
+          id,
+          uri: ((ref || {}).connector ? (ref.connector + ":") : "") + ((ref || {}).uri || ""),
+        }));
+        const artifactGroups = (td?.artifactsByType || []).map((group) => ({
+          label: group.type + " · " + (group.artifacts || []).length,
+        }));
+        const displayStatus = this.taskDisplayStatus(t);
+        const specStatus = t.specStatus || (t.status === "draft" ? "draft" : "approved");
+        const techDesignStatus = t.techDesignStatus || (t.status === "draft" ? "draft" : "approved");
+        const canStartRun = !t.readOnly && t.status !== "running" && t.status !== "draft" && specStatus === "approved" && techDesignStatus === "approved";
+        const canApproveSpec = !t.readOnly && specStatus === "draft";
+        const canDraftTechDesign = !t.readOnly && specStatus === "approved" && techDesignStatus === "draft";
+        const canApproveTechDesign = !t.readOnly && specStatus === "approved" && t.techDesignStatus === "draft";
+        const repoName = t.repoName || t.repoId || "default";
+        const planningNotes = t.planningNotes || {};
+        const openQuestions = planningNotes.openQuestions || [];
+        const planningSource = t.planningSource || {};
+        const planningSourceLabel = planningSource.type
+          ? [planningSource.type, planningSource.title || planningSource.uri || ""].filter(Boolean).join(" · ")
+          : (t.issueUrl ? "github-issue · " + t.issueUrl : "manual");
+        selectedTask = Object.assign({}, t, {
+          badge: this.badge(displayStatus),
+          repoName,
+          flow: flowName,
+          issue: issueNum ? "#" + issueNum : "—",
+          specStatus,
+          techDesignStatus,
+          specApprovalBadge: this.badge(specStatus === "approved" ? "completed" : "pending", specStatus),
+          techApprovalBadge: this.badge(techDesignStatus === "approved" ? "completed" : "pending", techDesignStatus),
+          planningSourceLabel,
+          openQuestions,
+          hasOpenQuestions: openQuestions.length > 0,
+          noOpenQuestions: openQuestions.length === 0,
+          specPath: t.specPath || "—",
+          techPath: t.techDesignPath || "—",
+          specText: td ? (td.spec || "No specification content is available for this task.") : "(Loading specification…)",
+          techText: td ? (td.techDesign || "No technical design content is available for this task.") : "(Loading technical design…)",
+          hasRun: !!latestRunId,
+          noRun: !latestRunId,
+          latestRunId,
+          latestRunShort: latestRunId || "",
+          created: this.timeAgo(t.createdAt),
+          updated: this.timeAgo(t.updatedAt),
+          runBadge: run ? this.badge(run.status) : this.badge("pending"),
+          runStagesLabel: run ? (run.currentStage ? this.currentStageLabel(run) : doneCount + " stages complete") : "",
+          recentLogSummary: run?.latestOutputSummary || run?.recentLogSummary || t.latestOutputSummary || t.recentLogSummary || "",
+          hasLogSummary: !!(run?.latestOutputSummary || run?.recentLogSummary || t.latestOutputSummary || t.recentLogSummary),
+          runs: decoratedRuns,
+          hasHistory: decoratedRuns.length > 0,
+          noHistory: decoratedRuns.length === 0,
+          inputSources,
+          hasInputSources: inputSources.length > 0,
+          noInputSources: inputSources.length === 0,
+          artifactGroups,
+          hasArtifacts: artifactGroups.length > 0,
+          noArtifacts: artifactGroups.length === 0,
+          canStartRun,
+          canApproveSpec,
+          canDraftTechDesign,
+          canApproveTechDesign,
+          isRunning: t.status === "running",
+          runningBadge: this.badge("running", "Run in progress"),
+          startLabel: decoratedRuns.length > 0 || t.runCount > 0 ? "Start another run" : "Start run",
+        });
+      }
+    }
+
+    let selectedRun = null;
+    if (view === "run-detail" && this.state.selectedRunId) {
+      const rd = this.state.runDetails[this.state.selectedRunId];
+      if (rd) {
+        const logMap = {};
+        for (const log of rd.logs || []) {
+          if (!logMap[log.stageId]) logMap[log.stageId] = { stdout: "", stderr: "" };
+          if (log.stdout) logMap[log.stageId].stdout = [logMap[log.stageId].stdout, log.stdout].filter(Boolean).join("\n");
+          if (log.stderr) logMap[log.stageId].stderr = [logMap[log.stageId].stderr, log.stderr].filter(Boolean).join("\n");
+        }
+        const stages = (rd.timeline || rd.stages || this.buildStagesFromLogs(rd.runId, rd.completedStages, rd.logs)).map((stage) => {
+          const id = stage.id || stage.stageId;
+          const logs = logMap[id] || {};
+          const details = stage.details || {};
+          return Object.assign({}, stage, {
+            id,
+            type: stage.stageType || stage.type || "agent",
+            attempts: stage.attempts || 0,
+            duration: stage.duration || (stage.durationMs ? Math.round(stage.durationMs / 1000) + "s" : ""),
+            stdout: stage.stdout || details.stdout || logs.stdout || stage.latestOutput || "",
+            stderr: stage.stderr || details.stderr || logs.stderr || stage.error || "",
+            details,
+            contextUsage: stage.contextUsage,
+            runtimeUsage: stage.runtimeUsage,
+            budget: stage.budget,
+          });
+        });
+        const done = stages.filter((s) => s.status === "completed");
+        const prNumber = rd.changeRequestUrl ? (rd.changeRequestUrl.match(/\/pull\/(\d+)/) || [])[1] : null;
+        const associatedTaskId = this.associatedTaskIdForRun(rd.runId);
+        const reviewFindings = (rd.reviewFindings || []).map((finding) => {
+          const severities = finding.severities || {};
+          const severityLabel = Object.keys(severities).length
+            ? Object.entries(severities).map(([key, count]) => key === "none" ? "No issues" : key + " " + count).join(" · ")
+            : "Unbucketed";
+          return Object.assign({}, finding, { severityLabel });
+        });
+        const childRuns = (rd.childRuns || []).map((child) => Object.assign({}, child, { badge: this.badge(child.status) }));
+        const evidenceTimeline = (rd.evidenceTimeline || []).map((ev) => ({
+          kind: ev.kind,
+          label: ev.label,
+          summary: this.evidenceSummary(ev),
+        }));
+        const contextUsageLabel = this.formatContextUsage(rd.contextUsage);
+        const runtimeUsageLabel = this.formatRuntimeUsage(rd.runtimeUsage);
+        const budgetSummaryLabel = this.formatBudgetSummary(rd.budgetSummary);
+        const budgetConsumersLabel = this.formatBudgetConsumers(rd.budgetSummary);
+        selectedRun = Object.assign({}, rd, {
+          badge: this.badge(rd.status),
+          stages: stages.map((s, i) => this.decorateStage(rd, s, i, stages.length)),
+          stagesLabel: done.length + " of " + stages.length + " stages",
+          progressLabel: done.length + " / " + stages.length + " complete",
+          completedLabel: done.map((s) => s.id).join(", ") || "None",
+          currentStageLabel: this.currentStageLabel(rd),
+          hasLatestOutput: !!rd.latestOutputSummary,
+          hasBlocker: !!rd.blocker,
+          blockerLabel: this.blockerLabel(rd.blocker),
+          inputsJson: JSON.stringify(rd.inputs || {}, null, 2),
+          evidenceTimeline,
+          hasEvidenceTimeline: evidenceTimeline.length > 0,
+          noEvidenceTimeline: evidenceTimeline.length === 0,
+          hasChange: !!rd.changeRequestUrl,
+          isFailed: rd.status === "failed",
+          hasEvidence: !!rd.evidence,
+          noEvidence: !rd.evidence,
+          duration: rd.duration || "",
+          contextUsageLabel,
+          hasContextUsageLabel: !!contextUsageLabel,
+          runtimeUsageLabel,
+          hasRuntimeUsageLabel: !!runtimeUsageLabel,
+          budgetSummaryLabel,
+          hasBudgetSummaryLabel: !!budgetSummaryLabel,
+          budgetConsumersLabel,
+          hasBudgetConsumersLabel: !!budgetConsumersLabel,
+          branchName: rd.branchName || "—",
+          worktree: rd.worktreePath || "—",
+          repo: rd.repoName || rd.repoId || rd.repo || "—",
+          started: rd.started || "",
+          changeUrl: rd.changeRequestUrl || "",
+          cr: prNumber ? "#" + prNumber : "change",
+          flowName: rd.flowName || "",
+          backLabel: associatedTaskId ? "Task" : "Tasks",
+          contextItems: rd.contextManifest || [],
+          hasContext: (rd.contextManifest || []).length > 0,
+          noContext: (rd.contextManifest || []).length === 0,
+          reviewFindings,
+          hasReviewFindings: reviewFindings.length > 0,
+          noReviewFindings: reviewFindings.length === 0,
+          parentRunId: rd.parentRun?.runId || "",
+          hasParentRun: !!rd.parentRun,
+          childRuns,
+          hasChildRuns: childRuns.length > 0,
+          noChain: !rd.parentRun && childRuns.length === 0,
+        });
+      }
+    }
+
+    const inputStyle = { width: "100%", border: "1px solid var(--line)", borderRadius: "8px", background: "var(--panel-2)", color: "var(--ink)", padding: "9px 11px", font: "inherit", fontSize: "13px", outline: "none" };
+    const textareaStyle = Object.assign({}, inputStyle, { minHeight: "92px", resize: "vertical", lineHeight: 1.55 });
+    const termPre = { whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontFamily: "'Geist Mono', monospace", fontSize: "12px", lineHeight: 1.6, background: "var(--code-bg)", color: "var(--code-ink)", borderRadius: "9px", padding: "13px 15px", margin: 0, overflow: "auto", maxHeight: "300px" };
+    const docPre = { whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontFamily: "'Geist Mono', monospace", fontSize: "12.5px", lineHeight: 1.65, color: "var(--ink)", background: "var(--panel-2)", border: "1px solid var(--line)", borderRadius: "10px", padding: "16px", margin: 0, maxHeight: "360px", overflow: "auto" };
+    const showLogin = this.state.sessionLoaded && this.state.authRequired && !this.state.user;
+    const showConsole = !showLogin;
+    const currentMembership = this.state.user && this.state.user.currentOrganizationId
+      ? (this.state.user.memberships || []).find((m) => m.organizationId === this.state.user.currentOrganizationId)
+      : null;
+    const currentOrganizationText = currentMembership
+      ? (" · " + currentMembership.organizationName + " · " + currentMembership.role)
+      : "";
+    const currentUser = this.state.user ? (this.state.user.email + " · " + this.state.user.role + currentOrganizationText) : "local";
+    const canSignOut = !!(this.state.authRequired && this.state.user);
+    const canManageRepositories = !this.state.authRequired || !this.state.user || this.state.user.role === "admin";
+
+    const flows = this.state.flows.map((f) => ({
+      id: f.id,
+      name: f.name,
+      stageCount: f.stageCount,
+      workItemTypeLabel: f.workItemType || "—",
+      sourceBadge: f.source === "user"
+        ? { label: "Custom", style: { fontFamily: "'Geist Mono', monospace", fontSize: "11px", color: "var(--accent)", background: "var(--accent-soft)", borderRadius: "6px", padding: "2px 8px" } }
+        : { label: "Built-in", style: { fontFamily: "'Geist Mono', monospace", fontSize: "11px", color: "var(--muted)", background: "var(--panel-2)", border: "1px solid var(--line)", borderRadius: "6px", padding: "2px 8px" } },
+    }));
+    const selectedFlowId = this.state.selectedFlowId;
+    const selectedFlow = selectedFlowId ? this.state.flowDetails[selectedFlowId] : null;
+    const isFlowEditor = view === "flow-new" || view === "flow-detail";
+    const flowEditorEditable = view === "flow-new" || (!!selectedFlowId && !String(selectedFlowId).startsWith("flows/"));
+    const flowEditorRunnable = view === "flow-detail" && !!selectedFlow;
+    const report = this.state.flowDraftReport;
+    const flowDraftErrors = report ? (report.errors || []) : [];
+
+    return {
+      themeAttr: theme,
+      densityAttr: density,
+      rootStyle: Object.assign({ "--accent": accent, "--accent-soft": this.hexToRgba(accent, theme === "dark" ? 0.18 : 0.1), minHeight: "100vh", width: "100%", background: "var(--bg)", color: "var(--ink)", fontFamily: "'Geist', ui-sans-serif, system-ui, sans-serif", fontSize: "15px" }, showLogin ? { display: "flex", alignItems: "center", justifyContent: "center", padding: "24px" } : { display: "grid", gridTemplateColumns: "248px minmax(0,1fr)" }),
+      nav: { dashboard: this.navStyle(view === "dashboard"), tasks: this.navStyle(view === "tasks" || view === "task-detail" || view === "run-detail"), flows: this.navStyle(view === "flows" || view === "flow-new" || view === "flow-detail"), providers: this.navStyle(view === "providers") },
+      taskCount: this.state.tasks.length,
+      flowCount: this.state.flows.length,
+      runCount: this.state.runs.length,
+      providersSummary: configuredCount + "/" + this.state.providers.length,
+      providersBar: { width: Math.round((configuredCount / this.state.providers.length) * 100) + "%", height: "100%", background: "var(--accent)", borderRadius: "3px" },
+      isTasks: view === "tasks",
+      isDashboard: view === "dashboard",
+      isFlows: view === "flows",
+      isFlowEditor,
+      isRuns: view === "runs",
+      isProviders: view === "providers",
+      isTaskDetail: view === "task-detail",
+      isRunDetail: view === "run-detail",
+      flows, selectedFlowId,
+      flowTemplates: this.state.flowTemplates,
+      flowEditorTitle: view === "flow-new" ? "New flow" : (selectedFlow?.name || selectedFlowId || "Flow"),
+      flowEditorEditable, flowEditorRunnable,
+      flowEditorHasTemplates: view === "flow-new",
+      flowDraftDocument: this.state.flowDraftDocument,
+      flowDraftStatus: this.state.flowDraftStatus,
+      flowDraftValid: !!report && report.valid,
+      flowDraftHasErrors: flowDraftErrors.length > 0,
+      flowDraftErrors,
+      flowDraftUnchecked: !report,
+      newFlow: this.newFlow, openFlow: this.openFlow, pickTemplate: this.pickTemplate,
+      editFlowDraft: this.editFlowDraft, saveFlow: this.saveFlow, runFromFlow: this.runFromFlow,
+      repositories, dashboard, tasks, runs, filteredRuns, hasSessionOwners, providers, selectedTask, selectedRun,
+      navTo: this.navTo, openTask: this.openTask, openRun: this.openRun,
+      startRun: this.startRun, planWork: this.planWork, approveSpec: this.approveSpec,
+      draftTechnicalDesign: this.draftTechnicalDesign, approveTechDesign: this.approveTechDesign,
+      toggleNewTask: this.toggleNewTask, createTask: this.createTask,
+      toggleNewRepo: this.toggleNewRepo, createRepository: this.createRepository,
+      saveConnection: this.saveConnection, clearConnection: this.clearConnection,
+      setSessionFilter: this.setSessionFilter,
+      toggleStage: this.toggleStage, noop: this.noop, stop: this.stop, backFromRun: this.backFromRun,
+      plannerForm: this.plannerForm,
+      showNewTask: this.state.showNewTask, newTaskForm: this.newTaskForm,
+      showNewRepo: this.state.showNewRepo, newRepoForm: this.newRepoForm,
+      repoStatus: this.state.repoStatus, canManageRepositories,
+      loginForm: this.loginForm,
+      showLogin, showConsole, currentUser, canSignOut, cannotSignOut: !canSignOut,
+      signIn: this.signIn, signOut: this.signOut,
+      authRequired: this.state.authRequired, hasLoginError: !!this.state.loginError, loginError: this.state.loginError,
+      inputStyle, textareaStyle, termPre, docPre,
+    };
+  }
+
+  hexToRgba(hex, a) {
+    let h = String(hex).replace("#", "");
+    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    const n = parseInt(h, 16);
+    if (isNaN(n)) return "rgba(91,80,232," + a + ")";
+    return "rgba(" + ((n >> 16) & 255) + "," + ((n >> 8) & 255) + "," + (n & 255) + "," + a + ")";
+  }
+}
+</script>
+</body>
+</html>
