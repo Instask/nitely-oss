@@ -282,6 +282,20 @@ export function assertMetadataBoundary(input: {
   }
 }
 
+export function assertAssignmentMetadataBoundary(
+  assignment: RunnerTaskAssignment,
+): void {
+  const violations = [
+    ...findSensitiveAssignmentPaths(assignment),
+    ...findSensitivePayloadPaths(assignment.inputs ?? {}, "assignment.inputs"),
+  ];
+  if (violations.length > 0) {
+    throw new MetadataBoundaryError(
+      `assignment metadata contains disallowed fields: ${violations.join(", ")}`,
+    );
+  }
+}
+
 export function assertRunnerEventEnvelope(input: {
   event: RunnerToControlPlaneEvent;
   policy: RunnerPolicySnapshot;
@@ -384,4 +398,61 @@ function looksLikeSecret(value: string): boolean {
     /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/.test(value) ||
     /\bsk-[A-Za-z0-9_-]{20,}\b/.test(value)
   );
+}
+
+function findSensitiveAssignmentPaths(
+  assignment: RunnerTaskAssignment,
+): string[] {
+  const violations: string[] = [];
+  const assignmentRecord = assignment as unknown as Record<string, unknown>;
+  for (const key of Object.keys(assignmentRecord)) {
+    if (isRunnerLocalPathKey(key) || sensitivePayloadKeys.has(key)) {
+      violations.push(`assignment.${key}`);
+    }
+  }
+  if (assignment.repository) {
+    for (const key of Object.keys(assignment.repository)) {
+      if (isRunnerLocalPathKey(key) || sensitivePayloadKeys.has(key)) {
+        violations.push(`assignment.repository.${key}`);
+      }
+    }
+    if (assignment.repository.cloneUrl) {
+      if (isCredentialedUrl(assignment.repository.cloneUrl)) {
+        violations.push("assignment.repository.cloneUrl");
+      }
+    }
+  }
+  return violations;
+}
+
+function isRunnerLocalPathKey(key: string): boolean {
+  return [
+    "absolutePath",
+    "checkoutPath",
+    "localCheckoutPath",
+    "localPath",
+    "repositoryPath",
+    "repoPath",
+    "worktreePath",
+  ].includes(key);
+}
+
+function isCredentialedUrl(value: string): boolean {
+  if (looksLikeSecret(value)) {
+    return true;
+  }
+  try {
+    const url = new URL(value);
+    if (url.username || url.password) {
+      return true;
+    }
+    for (const key of url.searchParams.keys()) {
+      if (sensitivePayloadKeys.has(key) || /token|secret|password|auth/i.test(key)) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return /https?:\/\/[^/\s]+@/.test(value);
+  }
 }

@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import {
+  assertAssignmentMetadataBoundary,
   assertMetadataBoundary,
   assertRunnerEventEnvelope,
   createControlPlaneEvent,
@@ -197,6 +198,7 @@ export class FileRunnerControlPlane {
     input: AssignRunnerTaskInput,
     options: AssignRunnerTaskOptions = {},
   ): Promise<ControlPlaneToRunnerEvent> {
+    assertAssignmentMetadataBoundary(input);
     const state = await readControlPlaneState(this.#path);
     const runner = requireRunner(state, input.tenantId, input.runnerId);
     const event = createControlPlaneEvent({

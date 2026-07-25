@@ -161,6 +161,50 @@ describe("FileRunnerControlPlane", () => {
     });
   });
 
+  it("rejects assignment metadata with credentials or runner-local paths", async () => {
+    const { controlPlane, policy } = await controlPlaneFixture();
+
+    await expect(
+      controlPlane.assignTask({
+        tenantId: policy.tenantId,
+        runnerId: policy.runnerId,
+        ...assignment({
+          taskId: "task-credentialed-url",
+          repository: {
+            repoId: "repo-1",
+            cloneUrl:
+              "https://x-access-token:runner-secret@github.com/Instask/example.git",
+          },
+        }),
+      }),
+    ).rejects.toThrow("assignment.repository.cloneUrl");
+
+    await expect(
+      controlPlane.assignTask({
+        tenantId: policy.tenantId,
+        runnerId: policy.runnerId,
+        ...assignment({
+          taskId: "task-auth-input",
+          inputs: { authorization: "Bearer runner-secret" },
+        }),
+      }),
+    ).rejects.toThrow("assignment.inputs.authorization");
+
+    const withLocalPath = {
+      tenantId: policy.tenantId,
+      runnerId: policy.runnerId,
+      ...assignment({ taskId: "task-local-path" }),
+      localCheckoutPath: "/tmp/customer/repo",
+    } as RunnerTaskAssignment & {
+      tenantId: string;
+      runnerId: string;
+      localCheckoutPath: string;
+    };
+    await expect(controlPlane.assignTask(withLocalPath)).rejects.toThrow(
+      "assignment.localCheckoutPath",
+    );
+  });
+
   it("records runner heartbeat metadata without source or log upload", async () => {
     const { controlPlane, policy } = await controlPlaneFixture();
     const heartbeat = createRunnerEvent({

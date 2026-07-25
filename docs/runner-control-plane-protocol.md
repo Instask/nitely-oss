@@ -112,6 +112,9 @@ hosted assignments should include them so runner execution is reproducible.
 Assignments must not carry the runner's local checkout path. A customer-hosted
 runner maps `repoId` to local paths in runner-local configuration so a remote
 control plane cannot select arbitrary filesystem locations for execution.
+Assignment payloads are rejected when they include runner-local checkout path
+fields, credentialed clone URLs, authorization headers, cookies, runner tokens,
+or secret-like input metadata.
 
 ## Metadata Boundary
 
