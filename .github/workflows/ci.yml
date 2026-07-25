@@ -21,4 +21,5 @@ jobs:
       - run: npm install --package-lock=false --ignore-scripts
       - run: npm run check
       - run: npm run build
+      - run: npm pack --dry-run
       - run: npm test -- --run
