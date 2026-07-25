@@ -56,7 +56,7 @@ Runner to control plane:
 | `runner.heartbeat` | Reports liveness and capacity. | `status`, `activeRunIds`, `version`. |
 | `task.accepted` | Runner accepted assignment. | `taskId`, `repoId`, `policyVersion`. |
 | `task.rejected` | Runner rejected assignment. | `taskId`, `reason`, `safeMessage`. |
-| `run.preparing` | Runner is preparing local checkout/runtime state. | `runId`, `taskId`, `repoId`, `flowId`. |
+| `run.preparing` | Runner is preparing local checkout/runtime state before a local run id may exist. | `taskId`, `repoId`, `flowId`. |
 | `run.started` | Local run created. | `runId`, `taskId`, `repoId`, `flowId`. |
 | `stage.updated` | Stage attempt/status update. | `runId`, `stageId`, `attempt`, `status`. |
 | `run.blocked` | Run needs intervention. | `runId`, `stageId`, `blockerCategory`, `safeMessage`. |
@@ -70,6 +70,10 @@ Runner to control plane:
 artifact ids, kind/name labels, media type, byte counts, and durable URIs, but
 must not include raw artifact bodies unless the runner policy explicitly allows
 `explicit_raw_upload`.
+
+`run.preparing` may omit `runId` because the runner emits it before the local
+Nitely runtime necessarily creates a run record. `run.started` and later run
+events should include the local run id once it is known.
 
 ## Public Modules
 

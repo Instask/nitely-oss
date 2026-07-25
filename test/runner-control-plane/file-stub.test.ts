@@ -380,13 +380,11 @@ describe("FileRunnerControlPlane", () => {
         tenantId: policy.tenantId,
         runnerId: policy.runnerId,
         taskId: task.taskId,
-        runId: "run-1",
         sequence: 1,
         policyVersion: policy.policyVersion,
         now: fixedNow,
         createId: () => "run-preparing-1",
         payload: {
-          runId: "run-1",
           taskId: task.taskId,
           repoId: task.repoId,
           flowId: task.flowId,
