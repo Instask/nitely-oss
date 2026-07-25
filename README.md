@@ -27,6 +27,8 @@ multi-repository shape and [docs/public-release-roadmap.md](docs/public-release-
 for the gates before making this repository public.
 See [docs/runner-control-plane-protocol.md](docs/runner-control-plane-protocol.md)
 for the first public runner/control-plane protocol stub.
+See [SECURITY.md](SECURITY.md), [CONTRIBUTING.md](CONTRIBUTING.md), and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for public project hygiene.
 
 ## Current Status
 

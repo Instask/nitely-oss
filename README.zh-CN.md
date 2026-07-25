@@ -22,6 +22,8 @@ SSO、audit logs，以及 customer-hosted runner coordination。
 [docs/open-core-boundary.md](docs/open-core-boundary.md) 中定义的边界。
 首个公开 runner/control-plane 协议 stub 见
 [docs/runner-control-plane-protocol.md](docs/runner-control-plane-protocol.md)。
+公开项目治理文件见 [SECURITY.md](SECURITY.md)、[CONTRIBUTING.md](CONTRIBUTING.md)
+和 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
 
 ## 当前状态
 

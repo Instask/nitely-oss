@@ -28,8 +28,8 @@ The first public release should demonstrate:
 - Remove private customer names, unpublished strategy, credentials, local
   deployment paths, and internal-only planning artifacts.
 - Keep `LICENSE`, `NOTICE`, `README.md`, and `README.zh-CN.md` current.
-- Add `SECURITY.md`, `CONTRIBUTING.md`, and a minimal Code of Conduct if public
-  contribution is desired at launch.
+- Keep `SECURITY.md`, `CONTRIBUTING.md`, and `CODE_OF_CONDUCT.md` current before
+  public launch.
 
 ### Build And Test
 
