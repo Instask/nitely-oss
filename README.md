@@ -22,6 +22,13 @@ customer-hosted runner coordination.
 
 See [docs/open-core-boundary.md](docs/open-core-boundary.md) for the boundary
 used by future SaaS and control-plane work.
+See [docs/repository-split.md](docs/repository-split.md) for the planned
+multi-repository shape and [docs/public-release-roadmap.md](docs/public-release-roadmap.md)
+for the gates before making this repository public.
+See [docs/runner-control-plane-protocol.md](docs/runner-control-plane-protocol.md)
+for the first public runner/control-plane protocol stub.
+See [SECURITY.md](SECURITY.md), [CONTRIBUTING.md](CONTRIBUTING.md), and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for public project hygiene.
 
 ## Current Status
 
@@ -64,6 +71,8 @@ Implemented on `master`:
 - Resumable agent usage-limit blockers: provider quota and rate-limit failures
   are projected as `agent_usage_limit` blockers instead of normal attempt
   failures, and active blocker banners clear after resumed terminal runs.
+- Runner/control-plane protocol helpers and a file-backed local stub for testing
+  runner assignment, heartbeat, evidence metadata, and idempotent event replay.
 
 In progress / planned:
 
