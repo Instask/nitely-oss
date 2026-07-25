@@ -71,6 +71,19 @@ The package exports two protocol modules:
 - `nitely/runner-control-plane/file-stub`: file-backed control-plane and runner
   outbox for local contract tests and runner development.
 
+## Runner Polling
+
+The first transport keeps assignment delivery and follow-up control-plane
+instructions separate:
+
+- `pollAssignments(identity)` returns pending `task.assigned` events.
+- `pollControlPlaneEvents(identity)` returns active control-plane instructions
+  such as `task.cancel_requested`.
+
+Cancellation requests are cooperative. A control plane should keep returning
+the same `task.cancel_requested` event until the runner reports a terminal
+`run.cancelled` or `run.failed` event for that assignment.
+
 ## Assignment Repository Metadata
 
 Execution-capable assignments should pin both the repository and the source

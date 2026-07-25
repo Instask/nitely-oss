@@ -348,6 +348,112 @@ describe("FileRunnerControlPlane", () => {
     });
   });
 
+  it("queues cooperative cancellation requests for runner polling", async () => {
+    const { controlPlane, policy } = await controlPlaneFixture();
+    const task = assignment();
+
+    await controlPlane.assignTask(
+      { tenantId: policy.tenantId, runnerId: policy.runnerId, ...task },
+      { now: fixedNow, createId: () => "assign-1" },
+    );
+    await controlPlane.reportRunnerEvents([
+      createRunnerEvent({
+        kind: "task.accepted",
+        tenantId: policy.tenantId,
+        runnerId: policy.runnerId,
+        taskId: task.taskId,
+        policyVersion: policy.policyVersion,
+        sequence: 1,
+        now: fixedNow,
+        createId: () => "accepted-1",
+        payload: {
+          taskId: task.taskId,
+          repoId: task.repoId,
+          flowId: task.flowId,
+          policyVersion: policy.policyVersion,
+        },
+      }),
+      createRunnerEvent({
+        kind: "run.started",
+        tenantId: policy.tenantId,
+        runnerId: policy.runnerId,
+        taskId: task.taskId,
+        runId: "run-1",
+        policyVersion: policy.policyVersion,
+        sequence: 2,
+        now: fixedNow,
+        createId: () => "started-1",
+        payload: {
+          taskId: task.taskId,
+          runId: "run-1",
+          repoId: task.repoId,
+          flowId: task.flowId,
+        },
+      }),
+    ]);
+
+    await expect(
+      controlPlane.requestRunCancellation(
+        {
+          tenantId: policy.tenantId,
+          runId: "run-1",
+          reason: "operator_requested",
+          safeMessage: "stop after current safe point",
+        },
+        { now: fixedNow, createId: () => "cancel-request-1" },
+      ),
+    ).resolves.toMatchObject({
+      eventId: "cancel-request-1",
+      kind: "task.cancel_requested",
+      taskId: task.taskId,
+      runId: "run-1",
+      sequence: 3,
+      payload: {
+        taskId: task.taskId,
+        runId: "run-1",
+        reason: "operator_requested",
+        safeMessage: "stop after current safe point",
+      },
+    });
+    await expect(controlPlane.pollControlPlaneEvents(policy)).resolves.toMatchObject([
+      {
+        eventId: "cancel-request-1",
+        kind: "task.cancel_requested",
+        runId: "run-1",
+      },
+    ]);
+    await expect(
+      controlPlane.getAssignment({ tenantId: policy.tenantId, taskId: task.taskId }),
+    ).resolves.toMatchObject({
+      status: "cancelling",
+      cancellationRequest: {
+        runId: "run-1",
+        reason: "operator_requested",
+        safeMessage: "stop after current safe point",
+      },
+    });
+
+    await controlPlane.reportRunnerEvents([
+      createRunnerEvent({
+        kind: "run.cancelled",
+        tenantId: policy.tenantId,
+        runnerId: policy.runnerId,
+        taskId: task.taskId,
+        runId: "run-1",
+        policyVersion: policy.policyVersion,
+        sequence: 4,
+        now: fixedNow,
+        createId: () => "cancelled-1",
+        payload: {
+          taskId: task.taskId,
+          runId: "run-1",
+          safeMessage: "runner stopped cooperatively",
+        },
+      }),
+    ]);
+    await expect(controlPlane.pollControlPlaneEvents(policy)).resolves.toEqual([]);
+  });
+
   it("enforces metadata-only upload boundaries by default", async () => {
     const { controlPlane, policy } = await controlPlaneFixture();
     const task = assignment();
