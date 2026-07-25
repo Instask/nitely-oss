@@ -50,6 +50,7 @@ function assignment(
     },
     sourceRevision: input.sourceRevision ?? "abc1234",
     flowId: input.flowId ?? "flow-approved-pr",
+    flowPath: input.flowPath ?? "flows/approved-pr.json",
     policyVersion: input.policyVersion ?? "policy-1",
     inputs: input.inputs ?? { issue: { type: "github-issue", id: "275" } },
   };
@@ -80,6 +81,7 @@ describe("FileRunnerControlPlane", () => {
           },
           sourceRevision: "abc1234",
           flowId: "flow-approved-pr",
+          flowPath: "flows/approved-pr.json",
           policyVersion: "policy-1",
         },
         redactionStatus: "metadata_only",
@@ -106,6 +108,7 @@ describe("FileRunnerControlPlane", () => {
       repoId: "repo-1",
       sourceRevision: "abc1234",
       flowId: "flow-approved-pr",
+      flowPath: "flows/approved-pr.json",
     });
   });
 

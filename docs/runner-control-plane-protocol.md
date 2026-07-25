@@ -35,7 +35,7 @@ Control plane to runner:
 | Kind | Purpose | Required payload |
 | --- | --- | --- |
 | `runner.register.accepted` | Confirms runner registration and policy baseline. | `runnerId`, `policyVersion`, `allowedRepositories`. |
-| `task.assigned` | Assigns a task to a runner. | `taskId`, `repoId`, `repository`, `sourceRevision`, `flowId`, `inputs`, `policyVersion`. |
+| `task.assigned` | Assigns a task to a runner. | `taskId`, `repoId`, `repository`, `sourceRevision`, `flowId`, `flowPath`, `inputs`, `policyVersion`. |
 | `task.cancel_requested` | Requests cooperative cancellation. | `taskId`, `reason`. |
 | `policy.updated` | Notifies runner of policy changes. | `policyVersion`, `changedFields`. |
 | `evidence.upload_requested` | Requests optional evidence upload. | `runId`, `artifactIds`, `requiredRedactionStatus`. |

@@ -76,6 +76,7 @@ export interface RunnerTaskAssignment {
   repository?: RunnerRepositoryRef;
   sourceRevision?: string;
   flowId: string;
+  flowPath?: string;
   policyVersion: string;
   title?: string;
   inputs?: Record<string, unknown>;
@@ -216,6 +217,9 @@ export function runnerEventForAssignmentDecision(input: {
           ? { sourceRevision: input.assignment.sourceRevision }
           : {}),
         flowId: input.assignment.flowId,
+        ...(input.assignment.flowPath
+          ? { flowPath: input.assignment.flowPath }
+          : {}),
         policyVersion: input.policy.policyVersion,
       },
     });

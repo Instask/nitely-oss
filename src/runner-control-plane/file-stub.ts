@@ -42,6 +42,7 @@ export interface StoredRunnerAssignment {
   repository?: RunnerTaskAssignment["repository"];
   sourceRevision?: string;
   flowId: string;
+  flowPath?: string;
   title?: string;
   inputs: Record<string, unknown>;
   policyVersion: string;
@@ -186,6 +187,7 @@ export class FileRunnerControlPlane {
           ? { sourceRevision: input.sourceRevision }
           : {}),
         flowId: input.flowId,
+        ...(input.flowPath ? { flowPath: input.flowPath } : {}),
         inputs: input.inputs ?? {},
         policyVersion: input.policyVersion,
       },
@@ -199,6 +201,7 @@ export class FileRunnerControlPlane {
       ...(input.repository ? { repository: input.repository } : {}),
       ...(input.sourceRevision ? { sourceRevision: input.sourceRevision } : {}),
       flowId: input.flowId,
+      ...(input.flowPath ? { flowPath: input.flowPath } : {}),
       ...(input.title ? { title: input.title } : {}),
       inputs: input.inputs ?? {},
       policyVersion: input.policyVersion,
