@@ -1,8 +1,25 @@
 {
   "name": "nitely",
   "version": "0.1.0",
+  "description": "Local-first AI development workflow runtime for specs, flows, evidence, and runner-control-plane protocol contracts.",
   "license": "Apache-2.0",
   "type": "module",
+  "keywords": [
+    "ai",
+    "agent",
+    "developer-tools",
+    "workflow",
+    "runner",
+    "control-plane"
+  ],
+  "homepage": "https://github.com/Instask/nitely-oss#readme",
+  "bugs": {
+    "url": "https://github.com/Instask/nitely-oss/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Instask/nitely-oss.git"
+  },
   "bin": {
     "nitely": "./dist/index.js"
   },
