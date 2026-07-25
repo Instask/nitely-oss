@@ -57,6 +57,11 @@ Runner to control plane:
 | `evidence.reported` | Reports selected evidence metadata. | `runId`, `artifacts`, `redactionStatus`. |
 | `runner.error` | Reports runner-level error. | `errorCategory`, `safeMessage`. |
 
+`evidence.reported.artifacts` is a metadata array. Entries may include stable
+artifact ids, kind/name labels, media type, byte counts, and durable URIs, but
+must not include raw artifact bodies unless the runner policy explicitly allows
+`explicit_raw_upload`.
+
 ## Public Modules
 
 The package exports two protocol modules:
@@ -97,3 +102,7 @@ raw artifact content. Policies must explicitly include
 
 This default keeps hosted coordination from becoming an implicit source-code or
 secret exfiltration channel.
+
+The file-backed control-plane stub retains accepted `evidence.reported`
+artifact metadata on the stored assignment projection so runner and hosted
+control-plane tests can share the same evidence boundary.

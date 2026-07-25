@@ -6,6 +6,7 @@ import {
   assertRunnerEventEnvelope,
   createControlPlaneEvent,
   type ControlPlaneToRunnerEvent,
+  type RunnerControlPlaneRedactionStatus,
   type RunnerPolicySnapshot,
   type RunnerTaskAssignment,
   type RunnerToControlPlaneEvent,
@@ -69,6 +70,12 @@ export interface StoredRunnerAssignment {
   };
   changeRequestUrl?: string;
   evidenceSummary?: unknown;
+  evidence?: Array<{
+    runId?: string;
+    redactionStatus: RunnerControlPlaneRedactionStatus;
+    artifacts: unknown[];
+    reportedAt: string;
+  }>;
   assignedEvent: ControlPlaneToRunnerEvent;
   createdAt: string;
   updatedAt: string;
@@ -429,6 +436,22 @@ function applyRunnerEvent(
       runId: assignment.latestRunId,
       safeMessage: stringPayload(event.payload, "safeMessage"),
     };
+    return;
+  }
+  if (event.kind === "evidence.reported") {
+    assignment.latestRunId =
+      event.runId ?? stringPayload(event.payload, "runId") ?? assignment.latestRunId;
+    assignment.evidence = [
+      ...(assignment.evidence ?? []),
+      {
+        runId: assignment.latestRunId,
+        redactionStatus: event.redactionStatus,
+        artifacts: Array.isArray(event.payload.artifacts)
+          ? event.payload.artifacts
+          : [],
+        reportedAt: event.createdAt,
+      },
+    ];
     return;
   }
   if (event.kind === "run.completed") {

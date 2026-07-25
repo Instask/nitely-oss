@@ -423,6 +423,25 @@ describe("FileRunnerControlPlane", () => {
       },
     ]);
     await expect(controlPlane.listRunnerEvents()).resolves.toHaveLength(1);
+    await expect(
+      controlPlane.getAssignment({ tenantId: policy.tenantId, taskId: task.taskId }),
+    ).resolves.toMatchObject({
+      latestRunId: "run-1",
+      evidence: [
+        {
+          runId: "run-1",
+          redactionStatus: "metadata_only",
+          artifacts: [
+            {
+              id: "run-evidence",
+              mediaType: "text/markdown",
+              bytes: 380,
+              redactionStatus: "metadata_only",
+            },
+          ],
+        },
+      ],
+    });
   });
 
   it("allows explicit raw evidence only when runner policy opts in", async () => {

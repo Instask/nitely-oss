@@ -82,6 +82,24 @@ export interface RunnerTaskAssignment {
   inputs?: Record<string, unknown>;
 }
 
+export interface RunnerEvidenceArtifactMetadata {
+  [key: string]: unknown;
+  artifactId?: string;
+  id?: string;
+  kind?: string;
+  name?: string;
+  uri?: string;
+  mediaType?: string;
+  bytes?: number;
+  redactionStatus?: RunnerControlPlaneRedactionStatus;
+}
+
+export interface RunnerEvidenceReportedPayload {
+  runId: string;
+  artifacts: RunnerEvidenceArtifactMetadata[];
+  redactionStatus?: RunnerControlPlaneRedactionStatus;
+}
+
 export type AssignmentRejectionReason =
   | "policy_version_mismatch"
   | "repository_not_allowed";
