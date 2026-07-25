@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,6 +9,8 @@ import {
   FileRunnerEventOutbox,
 } from "../../src/runner-control-plane/file-stub.js";
 import {
+  assertControlPlaneEventEnvelope,
+  createControlPlaneEvent,
   createRunnerEvent,
   runnerEventForAssignmentDecision,
   type RunnerPolicySnapshot,
@@ -110,6 +112,60 @@ describe("FileRunnerControlPlane", () => {
       flowId: "flow-approved-pr",
       flowPath: "flows/approved-pr.json",
     });
+  });
+
+  it("validates public control-plane event envelopes with explicit assignment policy handling", () => {
+    const policy: RunnerPolicySnapshot = {
+      tenantId: "tenant-1",
+      runnerId: "runner-1",
+      policyVersion: "policy-1",
+      allowedRepositories: ["repo-1"],
+    };
+    const assigned = createControlPlaneEvent({
+      kind: "task.assigned",
+      tenantId: policy.tenantId,
+      runnerId: policy.runnerId,
+      taskId: "task-1",
+      policyVersion: "policy-stale",
+      createId: () => "assigned-stale-policy",
+      now: fixedNow,
+      payload: {
+        taskId: "task-1",
+        repoId: "repo-1",
+        flowId: "flow-approved-pr",
+        policyVersion: "policy-stale",
+      },
+    });
+
+    expect(() =>
+      assertControlPlaneEventEnvelope({ event: assigned, policy }),
+    ).toThrow("control-plane event policy mismatch");
+    expect(() =>
+      assertControlPlaneEventEnvelope({
+        event: assigned,
+        policy,
+        requirePolicyMatch: false,
+      }),
+    ).not.toThrow();
+  });
+
+  it("validates persisted assignment envelopes before runner polling", async () => {
+    const { dir, controlPlane, policy } = await controlPlaneFixture();
+    const task = assignment();
+    const statePath = join(dir, "control-plane.json");
+    await controlPlane.assignTask(
+      { tenantId: policy.tenantId, runnerId: policy.runnerId, ...task },
+      { now: fixedNow, createId: () => "assign-1" },
+    );
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      assignments: Record<string, { assignedEvent: { eventId?: string } }>;
+    };
+    delete state.assignments["tenant-1:task-1"]!.assignedEvent.eventId;
+    await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+
+    await expect(controlPlane.pollAssignments(policy)).rejects.toThrow(
+      "invalid event id",
+    );
   });
 
   it("rejects assignments outside the runner repository set or policy version", async () => {
@@ -496,6 +552,70 @@ describe("FileRunnerControlPlane", () => {
       }),
     ]);
     await expect(controlPlane.pollControlPlaneEvents(policy)).resolves.toEqual([]);
+  });
+
+  it("validates persisted control-plane instruction envelopes before runner polling", async () => {
+    const { dir, controlPlane, policy } = await controlPlaneFixture();
+    const task = assignment();
+    const statePath = join(dir, "control-plane.json");
+
+    await controlPlane.assignTask(
+      { tenantId: policy.tenantId, runnerId: policy.runnerId, ...task },
+      { now: fixedNow, createId: () => "assign-1" },
+    );
+    await controlPlane.reportRunnerEvents([
+      createRunnerEvent({
+        kind: "task.accepted",
+        tenantId: policy.tenantId,
+        runnerId: policy.runnerId,
+        taskId: task.taskId,
+        policyVersion: policy.policyVersion,
+        sequence: 1,
+        now: fixedNow,
+        createId: () => "accepted-1",
+        payload: {
+          taskId: task.taskId,
+          repoId: task.repoId,
+          flowId: task.flowId,
+          policyVersion: policy.policyVersion,
+        },
+      }),
+      createRunnerEvent({
+        kind: "run.started",
+        tenantId: policy.tenantId,
+        runnerId: policy.runnerId,
+        taskId: task.taskId,
+        runId: "run-1",
+        policyVersion: policy.policyVersion,
+        sequence: 2,
+        now: fixedNow,
+        createId: () => "started-1",
+        payload: {
+          taskId: task.taskId,
+          runId: "run-1",
+          repoId: task.repoId,
+          flowId: task.flowId,
+        },
+      }),
+    ]);
+    await controlPlane.requestRunCancellation(
+      {
+        tenantId: policy.tenantId,
+        runId: "run-1",
+        reason: "operator_requested",
+      },
+      { now: fixedNow, createId: () => "cancel-request-1" },
+    );
+
+    const state = JSON.parse(await readFile(statePath, "utf8")) as {
+      controlPlaneEvents: Array<{ payload: Record<string, unknown> }>;
+    };
+    state.controlPlaneEvents[0]!.payload.taskId = "other-task";
+    await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+
+    await expect(controlPlane.pollControlPlaneEvents(policy)).rejects.toThrow(
+      "control-plane event task id mismatch",
+    );
   });
 
   it("enforces metadata-only upload boundaries by default", async () => {

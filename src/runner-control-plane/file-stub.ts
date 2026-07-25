@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 
 import {
   assertAssignmentMetadataBoundary,
+  assertControlPlaneEventEnvelope,
   assertMetadataBoundary,
   assertRunnerEventEnvelope,
   createControlPlaneEvent,
@@ -250,7 +251,7 @@ export class FileRunnerControlPlane {
     runnerId: string;
   }): Promise<ControlPlaneToRunnerEvent[]> {
     const state = await readControlPlaneState(this.#path);
-    requireRunner(state, input.tenantId, input.runnerId);
+    const runner = requireRunner(state, input.tenantId, input.runnerId);
     return Object.values(state.assignments)
       .filter(
         (assignment) =>
@@ -259,7 +260,13 @@ export class FileRunnerControlPlane {
           assignment.status === "assigned",
       )
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-      .map((assignment) => assignment.assignedEvent);
+      .map((assignment) =>
+        assertControlPlaneEventForRunner(
+          assignment.assignedEvent,
+          runner.policy,
+          { requirePolicyMatch: false },
+        ),
+      );
   }
 
   async pollControlPlaneEvents(input: {
@@ -267,7 +274,7 @@ export class FileRunnerControlPlane {
     runnerId: string;
   }): Promise<ControlPlaneToRunnerEvent[]> {
     const state = await readControlPlaneState(this.#path);
-    requireRunner(state, input.tenantId, input.runnerId);
+    const runner = requireRunner(state, input.tenantId, input.runnerId);
     return state.controlPlaneEvents
       .filter(
         (event) =>
@@ -275,7 +282,8 @@ export class FileRunnerControlPlane {
           event.runnerId === input.runnerId &&
           shouldDeliverControlPlaneEvent(state, event),
       )
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .map((event) => assertControlPlaneEventForRunner(event, runner.policy));
   }
 
   async requestRunCancellation(
@@ -566,6 +574,19 @@ function applyRunnerEvent(
       safeMessage: stringPayload(event.payload, "safeMessage"),
     };
   }
+}
+
+function assertControlPlaneEventForRunner(
+  event: ControlPlaneToRunnerEvent,
+  policy: RunnerPolicySnapshot,
+  options: { requirePolicyMatch?: boolean } = {},
+): ControlPlaneToRunnerEvent {
+  assertControlPlaneEventEnvelope({
+    event,
+    policy,
+    requirePolicyMatch: options.requirePolicyMatch,
+  });
+  return event;
 }
 
 function emptyControlPlaneState(): FileRunnerControlPlaneState {

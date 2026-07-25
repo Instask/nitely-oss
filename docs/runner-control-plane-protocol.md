@@ -33,7 +33,9 @@ Protocol ids (`eventId`, `tenantId`, `runnerId`, `taskId`, `runId`, and
 underscores, dots, colons, or hyphens. `createdAt` must be a parseable
 timestamp. Runner-to-control-plane events other than `runner.heartbeat` must
 carry a top-level `taskId` so the control plane cannot accept unprojectable
-assignment lifecycle events.
+assignment lifecycle events. Control-plane assignment and cancellation events
+must also carry a top-level `taskId` matching the payload task id before a
+runner acts on them.
 
 ## Event Families
 
@@ -74,7 +76,8 @@ must not include raw artifact bodies unless the runner policy explicitly allows
 The package exports two protocol modules:
 
 - `nitely/runner-control-plane/protocol`: event types, event constructors,
-  assignment decisions, envelope validation, and metadata boundary checks.
+  assignment decisions, control-plane and runner envelope validation, and
+  metadata boundary checks.
 - `nitely/runner-control-plane/file-stub`: file-backed control-plane and runner
   outbox for local contract tests and runner development.
 
@@ -94,6 +97,12 @@ instructions separate:
 - `pollAssignments(identity)` returns pending `task.assigned` events.
 - `pollControlPlaneEvents(identity)` returns active control-plane instructions
   such as `task.cancel_requested`.
+
+Runners should validate control-plane event envelopes before executing or
+aborting work. The public validator can intentionally allow stale
+`task.assigned` policy versions so the runner can report an explicit
+`policy_version_mismatch` task rejection instead of treating that business
+decision as malformed transport.
 
 Cancellation requests are cooperative. A control plane should keep returning
 the same `task.cancel_requested` event until the runner reports a terminal

@@ -52,6 +52,12 @@ export const RUNNER_TO_CONTROL_PLANE_EVENT_KINDS = new Set([
   "runner.error",
 ] as const);
 
+const RUNNER_CONTROL_PLANE_REDACTION_STATUSES = new Set([
+  "metadata_only",
+  "sanitized",
+  "explicit_raw_upload",
+] as const);
+
 export interface RunnerProtocolEvent<
   Kind extends string = string,
   Payload extends Record<string, unknown> = Record<string, unknown>,
@@ -391,6 +397,99 @@ export function assertRunnerEventEnvelope(input: {
       "runner event payload must be an object",
     );
   }
+}
+
+export function assertControlPlaneEventEnvelope(input: {
+  event: ControlPlaneToRunnerEvent;
+  policy: RunnerPolicySnapshot;
+  requirePolicyMatch?: boolean;
+}): void {
+  validateProtocolSegment("event id", input.event.eventId);
+  if (input.event.schemaVersion !== RUNNER_CONTROL_PLANE_SCHEMA_VERSION) {
+    throw new RunnerProtocolValidationError(
+      `unsupported runner protocol schema ${input.event.schemaVersion}`,
+    );
+  }
+  if (
+    !CONTROL_PLANE_TO_RUNNER_EVENT_KINDS.has(
+      input.event.kind as ControlPlaneToRunnerEventKind,
+    )
+  ) {
+    throw new RunnerProtocolValidationError(
+      `unsupported control-plane event kind ${input.event.kind}`,
+    );
+  }
+  if (input.event.tenantId !== input.policy.tenantId) {
+    throw new RunnerProtocolValidationError("control-plane event tenant mismatch");
+  }
+  if (input.event.runnerId !== input.policy.runnerId) {
+    throw new RunnerProtocolValidationError(
+      "control-plane event identity mismatch",
+    );
+  }
+  validatePolicyVersion(input.event.policyVersion);
+  if (
+    input.requirePolicyMatch !== false &&
+    input.event.policyVersion !== input.policy.policyVersion
+  ) {
+    throw new RunnerProtocolValidationError(
+      "control-plane event policy mismatch",
+    );
+  }
+  if (
+    requiresControlPlaneTaskId(input.event.kind) &&
+    input.event.taskId === undefined
+  ) {
+    throw new RunnerProtocolValidationError(
+      "control-plane event task id is required for assignment events",
+    );
+  }
+  if (input.event.taskId !== undefined) {
+    validateProtocolSegment("task id", input.event.taskId);
+  }
+  if (input.event.runId !== undefined) {
+    validateProtocolSegment("run id", input.event.runId);
+  }
+  if (
+    input.event.sequence !== undefined &&
+    (!Number.isInteger(input.event.sequence) || input.event.sequence < 0)
+  ) {
+    throw new RunnerProtocolValidationError(
+      "runner protocol sequence must be a non-negative integer",
+    );
+  }
+  if (
+    typeof input.event.createdAt !== "string" ||
+    Number.isNaN(Date.parse(input.event.createdAt))
+  ) {
+    throw new RunnerProtocolValidationError(
+      "control-plane event createdAt must be a valid timestamp",
+    );
+  }
+  if (!RUNNER_CONTROL_PLANE_REDACTION_STATUSES.has(input.event.redactionStatus)) {
+    throw new RunnerProtocolValidationError(
+      `unsupported redaction status ${input.event.redactionStatus}`,
+    );
+  }
+  if (!isRecord(input.event.payload)) {
+    throw new RunnerProtocolValidationError(
+      "control-plane event payload must be an object",
+    );
+  }
+  if (requiresControlPlaneTaskId(input.event.kind)) {
+    const payloadTaskId = input.event.payload.taskId;
+    if (payloadTaskId !== input.event.taskId) {
+      throw new RunnerProtocolValidationError(
+        "control-plane event task id mismatch",
+      );
+    }
+  }
+}
+
+function requiresControlPlaneTaskId(
+  kind: ControlPlaneToRunnerEventKind,
+): boolean {
+  return kind === "task.assigned" || kind === "task.cancel_requested";
 }
 
 function validateProtocolSegment(kind: string, value: unknown): void {
