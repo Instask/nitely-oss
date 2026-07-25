@@ -22,6 +22,9 @@ customer-hosted runner coordination.
 
 See [docs/open-core-boundary.md](docs/open-core-boundary.md) for the boundary
 used by future SaaS and control-plane work.
+See [docs/repository-split.md](docs/repository-split.md) for the planned
+multi-repository shape and [docs/public-release-roadmap.md](docs/public-release-roadmap.md)
+for the gates before making this repository public.
 
 ## Current Status
 
