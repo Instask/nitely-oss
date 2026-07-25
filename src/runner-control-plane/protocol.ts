@@ -63,9 +63,18 @@ export interface RunnerPolicySnapshot {
   allowedUploadRedactionStatuses?: RunnerControlPlaneRedactionStatus[];
 }
 
+export interface RunnerRepositoryRef {
+  repoId: string;
+  name?: string;
+  cloneUrl?: string;
+  defaultBranch?: string;
+}
+
 export interface RunnerTaskAssignment {
   taskId: string;
   repoId: string;
+  repository?: RunnerRepositoryRef;
+  sourceRevision?: string;
   flowId: string;
   policyVersion: string;
   title?: string;
@@ -203,6 +212,9 @@ export function runnerEventForAssignmentDecision(input: {
       payload: {
         taskId: input.assignment.taskId,
         repoId: input.assignment.repoId,
+        ...(input.assignment.sourceRevision
+          ? { sourceRevision: input.assignment.sourceRevision }
+          : {}),
         flowId: input.assignment.flowId,
         policyVersion: input.policy.policyVersion,
       },

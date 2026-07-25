@@ -42,6 +42,13 @@ function assignment(
   return {
     taskId: input.taskId ?? "task-1",
     repoId: input.repoId ?? "repo-1",
+    repository: input.repository ?? {
+      repoId: input.repoId ?? "repo-1",
+      name: "Instask/example",
+      cloneUrl: "https://github.com/Instask/example.git",
+      defaultBranch: "main",
+    },
+    sourceRevision: input.sourceRevision ?? "abc1234",
     flowId: input.flowId ?? "flow-approved-pr",
     policyVersion: input.policyVersion ?? "policy-1",
     inputs: input.inputs ?? { issue: { type: "github-issue", id: "275" } },
@@ -65,6 +72,13 @@ describe("FileRunnerControlPlane", () => {
         payload: {
           taskId: "task-1",
           repoId: "repo-1",
+          repository: {
+            repoId: "repo-1",
+            name: "Instask/example",
+            cloneUrl: "https://github.com/Instask/example.git",
+            defaultBranch: "main",
+          },
+          sourceRevision: "abc1234",
           flowId: "flow-approved-pr",
           policyVersion: "policy-1",
         },
@@ -90,6 +104,7 @@ describe("FileRunnerControlPlane", () => {
     ).resolves.toMatchObject({
       status: "accepted",
       repoId: "repo-1",
+      sourceRevision: "abc1234",
       flowId: "flow-approved-pr",
     });
   });

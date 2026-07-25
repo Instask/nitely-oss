@@ -39,6 +39,8 @@ export interface StoredRunnerAssignment {
   runnerId: string;
   taskId: string;
   repoId: string;
+  repository?: RunnerTaskAssignment["repository"];
+  sourceRevision?: string;
   flowId: string;
   title?: string;
   inputs: Record<string, unknown>;
@@ -179,6 +181,10 @@ export class FileRunnerControlPlane {
       payload: {
         taskId: input.taskId,
         repoId: input.repoId,
+        ...(input.repository ? { repository: input.repository } : {}),
+        ...(input.sourceRevision
+          ? { sourceRevision: input.sourceRevision }
+          : {}),
         flowId: input.flowId,
         inputs: input.inputs ?? {},
         policyVersion: input.policyVersion,
@@ -190,6 +196,8 @@ export class FileRunnerControlPlane {
       runnerId: input.runnerId,
       taskId: input.taskId,
       repoId: input.repoId,
+      ...(input.repository ? { repository: input.repository } : {}),
+      ...(input.sourceRevision ? { sourceRevision: input.sourceRevision } : {}),
       flowId: input.flowId,
       ...(input.title ? { title: input.title } : {}),
       inputs: input.inputs ?? {},

@@ -35,7 +35,7 @@ Control plane to runner:
 | Kind | Purpose | Required payload |
 | --- | --- | --- |
 | `runner.register.accepted` | Confirms runner registration and policy baseline. | `runnerId`, `policyVersion`, `allowedRepositories`. |
-| `task.assigned` | Assigns a task to a runner. | `taskId`, `repoId`, `flowId`, `inputs`, `policyVersion`. |
+| `task.assigned` | Assigns a task to a runner. | `taskId`, `repoId`, `repository`, `sourceRevision`, `flowId`, `inputs`, `policyVersion`. |
 | `task.cancel_requested` | Requests cooperative cancellation. | `taskId`, `reason`. |
 | `policy.updated` | Notifies runner of policy changes. | `policyVersion`, `changedFields`. |
 | `evidence.upload_requested` | Requests optional evidence upload. | `runId`, `artifactIds`, `requiredRedactionStatus`. |
@@ -65,6 +65,27 @@ The package exports two protocol modules:
   assignment decisions, envelope validation, and metadata boundary checks.
 - `nitely/runner-control-plane/file-stub`: file-backed control-plane and runner
   outbox for local contract tests and runner development.
+
+## Assignment Repository Metadata
+
+Execution-capable assignments should pin both the repository and the source
+revision:
+
+- `repoId`: stable control-plane repository id and policy scope key.
+- `repository.repoId`: same repository id repeated inside the repository
+  descriptor for transport consumers.
+- `repository.name`: human-readable repository name such as `owner/name`.
+- `repository.cloneUrl`: credential-free clone URL. Tokens, usernames with
+  embedded credentials, or signed URLs do not belong in assignment metadata.
+- `repository.defaultBranch`: expected default branch when known.
+- `sourceRevision`: immutable commit SHA or resolved revision the runner should
+  check out before invoking the local Nitely runtime.
+
+Older local stubs may omit `repository` and `sourceRevision`, but networked or
+hosted assignments should include them so runner execution is reproducible.
+Assignments must not carry the runner's local checkout path. A customer-hosted
+runner maps `repoId` to local paths in runner-local configuration so a remote
+control plane cannot select arbitrary filesystem locations for execution.
 
 ## Metadata Boundary
 
