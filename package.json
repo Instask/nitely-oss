@@ -20,6 +20,14 @@
       "default": "./dist/runner-control-plane/protocol.js"
     }
   },
+  "files": [
+    "dist/",
+    "src/web/static/",
+    "flows/",
+    "docs/",
+    "README.zh-CN.md",
+    "NOTICE"
+  ],
   "engines": {
     "node": ">=24"
   },
@@ -27,7 +35,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc -p tsconfig.json --noEmit",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "dev": "tsx src/index.ts",
+    "prepack": "npm run clean && npm run build",
     "test": "vitest",
     "test:run": "vitest run"
   },
