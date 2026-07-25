@@ -28,6 +28,13 @@ Every protocol event includes:
 - `redactionStatus`: `metadata_only`, `sanitized`, or `explicit_raw_upload`.
 - `policyVersion`: policy used when producing the event.
 
+Protocol ids (`eventId`, `tenantId`, `runnerId`, `taskId`, `runId`, and
+`policyVersion`) must be non-empty stable segments using letters, numbers,
+underscores, dots, colons, or hyphens. `createdAt` must be a parseable
+timestamp. Runner-to-control-plane events other than `runner.heartbeat` must
+carry a top-level `taskId` so the control plane cannot accept unprojectable
+assignment lifecycle events.
+
 ## Event Families
 
 Control plane to runner:

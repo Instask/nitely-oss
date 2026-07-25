@@ -612,6 +612,85 @@ describe("FileRunnerControlPlane", () => {
     });
   });
 
+  it("rejects malformed runner event envelopes before projection", async () => {
+    const { controlPlane, policy } = await controlPlaneFixture();
+    const task = assignment();
+    await controlPlane.assignTask({
+      tenantId: policy.tenantId,
+      runnerId: policy.runnerId,
+      ...task,
+    });
+    const missingEventId = createRunnerEvent({
+      kind: "task.accepted",
+      tenantId: policy.tenantId,
+      runnerId: policy.runnerId,
+      taskId: task.taskId,
+      policyVersion: policy.policyVersion,
+      createId: () => "accepted-missing-id",
+      payload: {
+        taskId: task.taskId,
+        repoId: task.repoId,
+        flowId: task.flowId,
+        policyVersion: policy.policyVersion,
+      },
+    }) as Partial<ReturnType<typeof createRunnerEvent>>;
+    delete missingEventId.eventId;
+    const badRunId = {
+      ...createRunnerEvent({
+        kind: "run.started",
+        tenantId: policy.tenantId,
+        runnerId: policy.runnerId,
+        taskId: task.taskId,
+        runId: "run-1",
+        sequence: 2,
+        policyVersion: policy.policyVersion,
+        createId: () => "bad-run-id",
+        payload: {
+          taskId: task.taskId,
+          runId: "run-1",
+          repoId: task.repoId,
+          flowId: task.flowId,
+        },
+      }),
+      runId: "run with spaces",
+    };
+    const missingTaskId = createRunnerEvent({
+      kind: "run.completed",
+      tenantId: policy.tenantId,
+      runnerId: policy.runnerId,
+      taskId: task.taskId,
+      runId: "run-1",
+      sequence: 3,
+      policyVersion: policy.policyVersion,
+      createId: () => "missing-task-id",
+      payload: {
+        runId: "run-1",
+      },
+    }) as Partial<ReturnType<typeof createRunnerEvent>>;
+    delete missingTaskId.taskId;
+
+    await expect(
+      controlPlane.reportRunnerEvents([
+        missingEventId as ReturnType<typeof createRunnerEvent>,
+        badRunId,
+        missingTaskId as ReturnType<typeof createRunnerEvent>,
+      ]),
+    ).resolves.toMatchObject({
+      acceptedEventIds: [],
+      rejectedEvents: [
+        { reason: "invalid event id: undefined" },
+        { reason: "invalid run id: run with spaces" },
+        {
+          reason: "runner event task id is required for assignment events",
+        },
+      ],
+    });
+    await expect(controlPlane.listRunnerEvents()).resolves.toHaveLength(0);
+    await expect(
+      controlPlane.getAssignment({ tenantId: policy.tenantId, taskId: task.taskId }),
+    ).resolves.toMatchObject({ status: "assigned" });
+  });
+
   it("allows explicit raw evidence only when runner policy opts in", async () => {
     const { dir } = await controlPlaneFixture();
     const policy: RunnerPolicySnapshot = {

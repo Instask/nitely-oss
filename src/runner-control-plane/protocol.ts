@@ -15,6 +15,14 @@ export type ControlPlaneToRunnerEventKind =
   | "policy.updated"
   | "evidence.upload_requested";
 
+export const CONTROL_PLANE_TO_RUNNER_EVENT_KINDS = new Set([
+  "runner.register.accepted",
+  "task.assigned",
+  "task.cancel_requested",
+  "policy.updated",
+  "evidence.upload_requested",
+] as const);
+
 export type RunnerToControlPlaneEventKind =
   | "runner.heartbeat"
   | "task.accepted"
@@ -28,6 +36,21 @@ export type RunnerToControlPlaneEventKind =
   | "run.cancelled"
   | "evidence.reported"
   | "runner.error";
+
+export const RUNNER_TO_CONTROL_PLANE_EVENT_KINDS = new Set([
+  "runner.heartbeat",
+  "task.accepted",
+  "task.rejected",
+  "run.preparing",
+  "run.started",
+  "stage.updated",
+  "run.blocked",
+  "run.completed",
+  "run.failed",
+  "run.cancelled",
+  "evidence.reported",
+  "runner.error",
+] as const);
 
 export interface RunnerProtocolEvent<
   Kind extends string = string,
@@ -145,6 +168,18 @@ export interface CreateRunnerProtocolEventInput<
 export function createRunnerProtocolEvent<
   Kind extends RunnerToControlPlaneEventKind | ControlPlaneToRunnerEventKind,
 >(input: CreateRunnerProtocolEventInput<Kind>): RunnerProtocolEvent<Kind> {
+  if (
+    !CONTROL_PLANE_TO_RUNNER_EVENT_KINDS.has(
+      input.kind as ControlPlaneToRunnerEventKind,
+    ) &&
+    !RUNNER_TO_CONTROL_PLANE_EVENT_KINDS.has(
+      input.kind as RunnerToControlPlaneEventKind,
+    )
+  ) {
+    throw new RunnerProtocolValidationError(
+      `unsupported runner protocol event kind ${input.kind}`,
+    );
+  }
   validateProtocolSegment("tenant id", input.tenantId);
   validateProtocolSegment("runner id", input.runnerId);
   validatePolicyVersion(input.policyVersion);
@@ -300,9 +335,19 @@ export function assertRunnerEventEnvelope(input: {
   event: RunnerToControlPlaneEvent;
   policy: RunnerPolicySnapshot;
 }): void {
+  validateProtocolSegment("event id", input.event.eventId);
   if (input.event.schemaVersion !== RUNNER_CONTROL_PLANE_SCHEMA_VERSION) {
     throw new RunnerProtocolValidationError(
       `unsupported runner protocol schema ${input.event.schemaVersion}`,
+    );
+  }
+  if (
+    !RUNNER_TO_CONTROL_PLANE_EVENT_KINDS.has(
+      input.event.kind as RunnerToControlPlaneEventKind,
+    )
+  ) {
+    throw new RunnerProtocolValidationError(
+      `unsupported runner event kind ${input.event.kind}`,
     );
   }
   if (input.event.tenantId !== input.policy.tenantId) {
@@ -314,16 +359,54 @@ export function assertRunnerEventEnvelope(input: {
   if (input.event.policyVersion !== input.policy.policyVersion) {
     throw new RunnerProtocolValidationError("runner event policy mismatch");
   }
+  if (input.event.kind !== "runner.heartbeat" && input.event.taskId === undefined) {
+    throw new RunnerProtocolValidationError(
+      "runner event task id is required for assignment events",
+    );
+  }
+  if (input.event.taskId !== undefined) {
+    validateProtocolSegment("task id", input.event.taskId);
+  }
+  if (input.event.runId !== undefined) {
+    validateProtocolSegment("run id", input.event.runId);
+  }
+  if (
+    input.event.sequence !== undefined &&
+    (!Number.isInteger(input.event.sequence) || input.event.sequence < 0)
+  ) {
+    throw new RunnerProtocolValidationError(
+      "runner protocol sequence must be a non-negative integer",
+    );
+  }
+  if (
+    typeof input.event.createdAt !== "string" ||
+    Number.isNaN(Date.parse(input.event.createdAt))
+  ) {
+    throw new RunnerProtocolValidationError(
+      "runner event createdAt must be a valid timestamp",
+    );
+  }
+  if (!isRecord(input.event.payload)) {
+    throw new RunnerProtocolValidationError(
+      "runner event payload must be an object",
+    );
+  }
 }
 
-function validateProtocolSegment(kind: string, value: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,160}$/.test(value)) {
+function validateProtocolSegment(kind: string, value: unknown): void {
+  if (
+    typeof value !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,160}$/.test(value)
+  ) {
     throw new RunnerProtocolValidationError(`invalid ${kind}: ${value}`);
   }
 }
 
-function validatePolicyVersion(value: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,160}$/.test(value)) {
+function validatePolicyVersion(value: unknown): void {
+  if (
+    typeof value !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,160}$/.test(value)
+  ) {
     throw new RunnerProtocolValidationError(`invalid policy version: ${value}`);
   }
 }
@@ -455,4 +538,8 @@ function isCredentialedUrl(value: string): boolean {
   } catch {
     return /https?:\/\/[^/\s]+@/.test(value);
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
