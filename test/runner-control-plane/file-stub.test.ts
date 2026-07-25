@@ -510,11 +510,25 @@ describe("FileRunnerControlPlane", () => {
         artifactContent: "raw artifact body",
       },
     });
+    const transportCredential = createRunnerEvent({
+      kind: "runner.heartbeat",
+      tenantId: policy.tenantId,
+      runnerId: policy.runnerId,
+      policyVersion: policy.policyVersion,
+      createId: () => "transport-credential",
+      payload: {
+        status: "idle",
+        activeRunIds: [],
+        version: "0.1.0-dev",
+        runnerToken: "runner-secret",
+      },
+    });
 
     const report = await controlPlane.reportRunnerEvents([
       safeEvidence,
       rawPrompt,
       explicitRaw,
+      transportCredential,
     ]);
 
     expect(report.acceptedEventIds).toEqual(["safe-evidence"]);
@@ -526,6 +540,10 @@ describe("FileRunnerControlPlane", () => {
       {
         eventId: "explicit-raw",
         reason: expect.stringContaining("explicit_raw_upload"),
+      },
+      {
+        eventId: "transport-credential",
+        reason: expect.stringContaining("payload.runnerToken"),
       },
     ]);
     await expect(controlPlane.listRunnerEvents()).resolves.toHaveLength(1);

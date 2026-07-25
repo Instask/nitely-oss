@@ -71,6 +71,14 @@ The package exports two protocol modules:
 - `nitely/runner-control-plane/file-stub`: file-backed control-plane and runner
   outbox for local contract tests and runner development.
 
+## Transport Authentication Boundary
+
+Runner authentication is a transport concern. Bearer tokens, cookies, API keys,
+registration secrets, and authorization headers must not appear in protocol
+event payloads, assignment metadata, or evidence metadata. HTTP clients and
+servers may use those credentials in headers or session state outside the
+`runner-control-plane.v1` envelope.
+
 ## Runner Polling
 
 The first transport keeps assignment delivery and follow-up control-plane
@@ -109,8 +117,9 @@ control plane cannot select arbitrary filesystem locations for execution.
 
 Runner uploads are metadata-only by default. Runner-to-control-plane events are
 rejected when metadata-only or sanitized payloads include raw source, raw
-prompts, access tokens, API keys, full logs, diffs, patches, stdout/stderr, or
-raw artifact content. Policies must explicitly include
+prompts, access tokens, API keys, authorization headers, cookies, runner
+tokens, full logs, diffs, patches, stdout/stderr, or raw artifact content.
+Policies must explicitly include
 `explicit_raw_upload` before raw evidence events are accepted.
 
 This default keeps hosted coordination from becoming an implicit source-code or
