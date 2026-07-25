@@ -6,6 +6,20 @@
   "bin": {
     "nitely": "./dist/index.js"
   },
+  "exports": {
+    ".": {
+      "types": "./dist/api.d.ts",
+      "default": "./dist/api.js"
+    },
+    "./runner-control-plane/file-stub": {
+      "types": "./dist/runner-control-plane/file-stub.d.ts",
+      "default": "./dist/runner-control-plane/file-stub.js"
+    },
+    "./runner-control-plane/protocol": {
+      "types": "./dist/runner-control-plane/protocol.d.ts",
+      "default": "./dist/runner-control-plane/protocol.js"
+    }
+  },
   "engines": {
     "node": ">=24"
   },

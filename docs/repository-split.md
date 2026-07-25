@@ -18,6 +18,8 @@ must be able to audit without trusting a hosted service:
 - Local execution backend, agent runtime registry, command/gate/approval stages,
   retry, blocker, resume, rework, and PR publication primitives.
 - Provider preflight and local credential handling.
+- Runner/control-plane protocol types, metadata upload boundaries, and local
+  file-backed contract stubs.
 - Public security and trust documentation.
 
 It must remain runnable without a hosted control plane.
@@ -69,8 +71,8 @@ protocol is stable.
 The first release target is not a full SaaS split. It is:
 
 1. Make `nitely-oss` buildable, documented, and safe to publish.
-2. Define the runner/control-plane protocol in docs before implementing network
-   execution.
+2. Publish the runner/control-plane protocol as a local contract stub before
+   implementing network execution.
 3. Keep hosted deployment work in `nitely-cloud` as runbooks and manifests only.
 
 This reduces the risk of splitting the runtime around a protocol that is still
@@ -86,6 +88,8 @@ The first stable package boundaries should be:
 - `evidence`: artifact registry, integrity, run evidence projection.
 - `providers`: descriptors and local provider status checks.
 - `web-local`: local Web Console server and static assets.
+- `runner-protocol`: runner identity, assignment, heartbeat, evidence metadata,
+  redaction status, and local file-backed contract tests.
 
 These can stay as internal modules in the first public release. The important
 part is documenting which behaviors are contract-bearing before the repository

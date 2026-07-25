@@ -17,6 +17,8 @@ The first public release should demonstrate:
 - Agent, command, gate, approval, retry, resume, blocker, and publish stages.
 - Local evidence, logs, artifacts, and redaction.
 - A local Web Console for task/run inspection.
+- A runner/control-plane protocol stub that proves metadata-only event exchange
+  and assignment decisions without requiring hosted infrastructure.
 
 ## Release Gates
 
@@ -43,6 +45,7 @@ The first public release should demonstrate:
 - Document prompt construction and context delivery.
 - Document where secrets are excluded, redacted, persisted, or never persisted.
 - Document event, evidence, artifact, and log semantics.
+- Document the runner/control-plane protocol and metadata upload boundary.
 - Document known local execution risks: agent CLIs run with user authority,
   generated code is untrusted until reviewed, and provider CLIs may have their
   own credential stores.

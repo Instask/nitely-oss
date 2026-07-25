@@ -20,6 +20,8 @@ SSO、audit logs，以及 customer-hosted runner coordination。
 
 后续 SaaS 和 control-plane 工作应遵循
 [docs/open-core-boundary.md](docs/open-core-boundary.md) 中定义的边界。
+首个公开 runner/control-plane 协议 stub 见
+[docs/runner-control-plane-protocol.md](docs/runner-control-plane-protocol.md)。
 
 ## 当前状态
 
@@ -57,6 +59,8 @@ SSO、audit logs，以及 customer-hosted runner coordination。
 - 可 resume 的 agent usage-limit blocker：provider quota/rate-limit 失败会被投影为
   `agent_usage_limit` blocker，而不是普通 attempt failure；resume 后 run 进入
   terminal 状态时，active blocker banner 会清除。
+- Runner/control-plane 协议 helper 和 file-backed 本地 stub：可测试 runner
+  assignment、heartbeat、evidence metadata，以及幂等 event replay。
 
 正在推进 / 计划中：
 
