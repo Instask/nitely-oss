@@ -15,10 +15,12 @@ export type StoredAssignmentStatus =
   | "assigned"
   | "accepted"
   | "rejected"
+  | "preparing"
   | "running"
   | "blocked"
   | "completed"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 export interface StoredRunnerRegistration {
   tenantId: string;
@@ -56,6 +58,10 @@ export interface StoredRunnerAssignment {
   failure?: {
     runId?: string;
     category?: string;
+    safeMessage?: string;
+  };
+  cancellation?: {
+    runId?: string;
     safeMessage?: string;
   };
   changeRequestUrl?: string;
@@ -382,6 +388,11 @@ function applyRunnerEvent(
     };
     return;
   }
+  if (event.kind === "run.preparing") {
+    assignment.status = "preparing";
+    assignment.latestRunId = event.runId ?? stringPayload(event.payload, "runId");
+    return;
+  }
   if (event.kind === "run.started") {
     assignment.status = "running";
     assignment.latestRunId = event.runId ?? stringPayload(event.payload, "runId");
@@ -395,6 +406,16 @@ function applyRunnerEvent(
       runId: assignment.latestRunId,
       stageId: stringPayload(event.payload, "stageId"),
       category: stringPayload(event.payload, "blockerCategory"),
+      safeMessage: stringPayload(event.payload, "safeMessage"),
+    };
+    return;
+  }
+  if (event.kind === "run.cancelled") {
+    assignment.status = "cancelled";
+    assignment.latestRunId =
+      event.runId ?? stringPayload(event.payload, "runId") ?? assignment.latestRunId;
+    assignment.cancellation = {
+      runId: assignment.latestRunId,
       safeMessage: stringPayload(event.payload, "safeMessage"),
     };
     return;

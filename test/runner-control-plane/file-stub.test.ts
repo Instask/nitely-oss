@@ -241,6 +241,95 @@ describe("FileRunnerControlPlane", () => {
     });
   });
 
+  it("records preparing and cancelled run status on the assignment", async () => {
+    const { controlPlane, policy } = await controlPlaneFixture();
+    const task = assignment();
+    await controlPlane.assignTask({
+      tenantId: policy.tenantId,
+      runnerId: policy.runnerId,
+      ...task,
+    });
+
+    const events = [
+      runnerEventForAssignmentDecision({
+        policy,
+        assignment: task,
+        createId: () => "accepted-1",
+        now: fixedNow,
+      }),
+      createRunnerEvent({
+        kind: "run.preparing",
+        tenantId: policy.tenantId,
+        runnerId: policy.runnerId,
+        taskId: task.taskId,
+        runId: "run-1",
+        sequence: 1,
+        policyVersion: policy.policyVersion,
+        now: fixedNow,
+        createId: () => "run-preparing-1",
+        payload: {
+          runId: "run-1",
+          taskId: task.taskId,
+          repoId: task.repoId,
+          flowId: task.flowId,
+        },
+      }),
+      createRunnerEvent({
+        kind: "run.started",
+        tenantId: policy.tenantId,
+        runnerId: policy.runnerId,
+        taskId: task.taskId,
+        runId: "run-1",
+        sequence: 2,
+        policyVersion: policy.policyVersion,
+        now: fixedNow,
+        createId: () => "run-started-1",
+        payload: {
+          runId: "run-1",
+          taskId: task.taskId,
+          repoId: task.repoId,
+          flowId: task.flowId,
+        },
+      }),
+      createRunnerEvent({
+        kind: "run.cancelled",
+        tenantId: policy.tenantId,
+        runnerId: policy.runnerId,
+        taskId: task.taskId,
+        runId: "run-1",
+        sequence: 3,
+        policyVersion: policy.policyVersion,
+        now: fixedNow,
+        createId: () => "run-cancelled-1",
+        payload: {
+          runId: "run-1",
+          taskId: task.taskId,
+          safeMessage: "cancelled by operator request",
+        },
+      }),
+    ];
+
+    await expect(controlPlane.reportRunnerEvents(events)).resolves.toMatchObject({
+      acceptedEventIds: [
+        "accepted-1",
+        "run-preparing-1",
+        "run-started-1",
+        "run-cancelled-1",
+      ],
+      rejectedEvents: [],
+    });
+    await expect(
+      controlPlane.getAssignment({ tenantId: policy.tenantId, taskId: task.taskId }),
+    ).resolves.toMatchObject({
+      status: "cancelled",
+      latestRunId: "run-1",
+      cancellation: {
+        runId: "run-1",
+        safeMessage: "cancelled by operator request",
+      },
+    });
+  });
+
   it("enforces metadata-only upload boundaries by default", async () => {
     const { controlPlane, policy } = await controlPlaneFixture();
     const task = assignment();

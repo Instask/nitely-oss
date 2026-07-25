@@ -47,11 +47,13 @@ Runner to control plane:
 | `runner.heartbeat` | Reports liveness and capacity. | `status`, `activeRunIds`, `version`. |
 | `task.accepted` | Runner accepted assignment. | `taskId`, `repoId`, `policyVersion`. |
 | `task.rejected` | Runner rejected assignment. | `taskId`, `reason`, `safeMessage`. |
+| `run.preparing` | Runner is preparing local checkout/runtime state. | `runId`, `taskId`, `repoId`, `flowId`. |
 | `run.started` | Local run created. | `runId`, `taskId`, `repoId`, `flowId`. |
 | `stage.updated` | Stage attempt/status update. | `runId`, `stageId`, `attempt`, `status`. |
 | `run.blocked` | Run needs intervention. | `runId`, `stageId`, `blockerCategory`, `safeMessage`. |
 | `run.completed` | Run reached terminal success. | `runId`, `prUrl`, `evidenceSummary`. |
 | `run.failed` | Run reached terminal failure. | `runId`, `failureCategory`, `safeMessage`. |
+| `run.cancelled` | Run reached terminal cancellation. | `runId`, `safeMessage`. |
 | `evidence.reported` | Reports selected evidence metadata. | `runId`, `artifacts`, `redactionStatus`. |
 | `runner.error` | Reports runner-level error. | `errorCategory`, `safeMessage`. |
 

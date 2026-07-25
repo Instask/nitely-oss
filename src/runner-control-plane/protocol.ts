@@ -19,11 +19,13 @@ export type RunnerToControlPlaneEventKind =
   | "runner.heartbeat"
   | "task.accepted"
   | "task.rejected"
+  | "run.preparing"
   | "run.started"
   | "stage.updated"
   | "run.blocked"
   | "run.completed"
   | "run.failed"
+  | "run.cancelled"
   | "evidence.reported"
   | "runner.error";
 
