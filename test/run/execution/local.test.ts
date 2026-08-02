@@ -12,6 +12,8 @@ import {
   LocalExecutionBackend,
   createCodexExecArgs,
   createDefaultAgentRuntimeRegistry,
+  createGrokBuildArgs,
+  createPiAgentArgs,
 } from "../../../src/run/execution/local.js";
 import type { Stage } from "../../../src/flow/schema.js";
 
@@ -248,9 +250,41 @@ describe("LocalExecutionBackend", () => {
     expect(registry.resolve(" codex ").id).toBe("codex");
     expect(registry.resolve("claude").id).toBe("claude");
     expect(registry.resolve("glm").id).toBe("glm");
+    expect(registry.resolve("grok").id).toBe("grok");
+    expect(registry.resolve("pi").id).toBe("pi");
     expect(() => registry.resolve("Codex")).toThrow(
-      /unsupported agent runtime: Codex.*codex.*claude.*glm/s,
+      /unsupported agent runtime: Codex.*codex.*claude.*glm.*grok.*pi/s,
     );
+  });
+
+  it("createGrokBuildArgs builds Grok Build CLI args with optional model", () => {
+    expect(createGrokBuildArgs("/wt", "Do the work.")).toEqual([
+      "--no-auto-update",
+      "--cwd",
+      "/wt",
+      "--always-approve",
+      "-p",
+      "Do the work.",
+    ]);
+    expect(createGrokBuildArgs("/wt", "Do the work.", "grok-4.5")).toEqual([
+      "--no-auto-update",
+      "--cwd",
+      "/wt",
+      "--always-approve",
+      "--model",
+      "grok-4.5",
+      "-p",
+      "Do the work.",
+    ]);
+  });
+
+  it("createPiAgentArgs builds Pi CLI args with optional model", () => {
+    expect(createPiAgentArgs()).toEqual(["-p"]);
+    expect(createPiAgentArgs("openai/gpt-4o")).toEqual([
+      "-p",
+      "--model",
+      "openai/gpt-4o",
+    ]);
   });
 
   it("runs Codex through the registry with existing args and stdin prompt delivery", async () => {
@@ -402,6 +436,60 @@ describe("LocalExecutionBackend", () => {
     expect(calls[0].options.env?.NITELY_GLM_COMMAND).toBe("glm-local");
   });
 
+  it("runs Grok Build with prompt argument delivery", async () => {
+    const calls: SpawnCall[] = [];
+    const backend = new LocalExecutionBackend({
+      env: { NITELY_GROK_COMMAND: "grok-dev" },
+      spawn: createSuccessfulSpawn(calls),
+    });
+
+    await backend.runAgent(
+      { runId: "run-agent", path: "/repo/worktree" },
+      {
+        stage: agentStage({ runtime: "grok", model: "grok-4.5" }),
+        prompt: "Implement with Grok.",
+        attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
+      },
+    );
+
+    expect(calls[0]).toMatchObject({
+      command: "grok-dev",
+      args: createGrokBuildArgs(
+        "/repo/worktree",
+        "Implement with Grok.",
+        "grok-4.5",
+      ),
+      options: { cwd: "/repo/worktree", stdio: ["pipe", "pipe", "pipe"] },
+      stdin: "",
+    });
+    expect(calls[0].options.env?.NITELY_GROK_COMMAND).toBe("grok-dev");
+  });
+
+  it("runs Pi Agent with stdin prompt delivery", async () => {
+    const calls: SpawnCall[] = [];
+    const backend = new LocalExecutionBackend({
+      env: { NITELY_PI_COMMAND: "pi-dev" },
+      spawn: createSuccessfulSpawn(calls),
+    });
+
+    await backend.runAgent(
+      { runId: "run-agent", path: "/repo/worktree" },
+      {
+        stage: agentStage({ runtime: "pi", model: "openai/gpt-4o" }),
+        prompt: "Implement with Pi.",
+        attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
+      },
+    );
+
+    expect(calls[0]).toMatchObject({
+      command: "pi-dev",
+      args: createPiAgentArgs("openai/gpt-4o"),
+      options: { cwd: "/repo/worktree", stdio: ["pipe", "pipe", "pipe"] },
+      stdin: "Implement with Pi.",
+    });
+    expect(calls[0].options.env?.NITELY_PI_COMMAND).toBe("pi-dev");
+  });
+
   it("fails unknown runtimes before spawning an unrelated command", async () => {
     const calls: SpawnCall[] = [];
     const backend = new LocalExecutionBackend({
@@ -417,7 +505,9 @@ describe("LocalExecutionBackend", () => {
           attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
         },
       ),
-    ).rejects.toThrow(/unsupported agent runtime: llama.*codex.*claude.*glm/s);
+    ).rejects.toThrow(
+      /unsupported agent runtime: llama.*codex.*claude.*glm.*grok.*pi/s,
+    );
     expect(calls).toHaveLength(0);
   });
 
@@ -492,6 +582,24 @@ describe("LocalExecutionBackend", () => {
         },
       ),
     ).resolves.toEqual({ available: true });
+    await expect(
+      backend.preflightAgentRuntime(
+        { runId: "run-agent", path: "/repo/worktree" },
+        {
+          stage: agentStage({ runtime: "grok" }),
+          attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
+        },
+      ),
+    ).resolves.toEqual({ available: true });
+    await expect(
+      backend.preflightAgentRuntime(
+        { runId: "run-agent", path: "/repo/worktree" },
+        {
+          stage: agentStage({ runtime: "pi" }),
+          attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
+        },
+      ),
+    ).resolves.toEqual({ available: true });
     expect(calls).toHaveLength(0);
   });
 
@@ -511,7 +619,9 @@ describe("LocalExecutionBackend", () => {
       ),
     ).resolves.toEqual({
       available: false,
-      reason: expect.stringMatching(/unsupported agent runtime: llama.*codex.*claude.*glm/s),
+      reason: expect.stringMatching(
+        /unsupported agent runtime: llama.*codex.*claude.*glm.*grok.*pi/s,
+      ),
     });
     expect(calls).toHaveLength(0);
   });

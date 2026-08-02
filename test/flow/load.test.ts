@@ -833,6 +833,53 @@ describe("loadFlow", () => {
     ]);
   });
 
+  it("loads runtime-variant implement-spec bootstrap flows with expected agent runtimes", async () => {
+    // Keep all runtime-specific implement-spec bootstrap variants in one place
+    // so Codex remains the default while Grok/Pi variants share one regression check.
+    const runtimeVariants: Array<{
+      file: string;
+      name: string;
+      runtime: "grok" | "pi";
+    }> = [
+      {
+        file: "flows/implement-spec-bootstrap-grok.json",
+        name: "implement-spec-bootstrap-grok",
+        runtime: "grok",
+      },
+      {
+        file: "flows/implement-spec-bootstrap-pi.json",
+        name: "implement-spec-bootstrap-pi",
+        runtime: "pi",
+      },
+    ];
+
+    for (const variant of runtimeVariants) {
+      const result = await loadFlow(variant.file, {
+        externalInputs: ["spec", "tech-design"],
+      });
+
+      expect(result.flow.metadata.name).toBe(variant.name);
+      expect(result.graph.order).toEqual([
+        "implement",
+        "test",
+        "review",
+        "publish",
+      ]);
+
+      for (const stage of result.flow.spec.stages) {
+        if (stage.type === "agent") {
+          expect(stage, `${variant.file}:${stage.id}`).toMatchObject({
+            runtime: variant.runtime,
+          });
+          expect(stage, `${variant.file}:${stage.id}`).not.toHaveProperty("model");
+        } else {
+          expect(stage, `${variant.file}:${stage.id}`).not.toHaveProperty("runtime");
+          expect(stage, `${variant.file}:${stage.id}`).not.toHaveProperty("model");
+        }
+      }
+    }
+  });
+
   it("uses blocking review gates in bootstrap flows that publish or update changes", async () => {
     const bootstrapFlowFiles = [
       "google-drive-connector-bootstrap.json",
