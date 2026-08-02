@@ -40,7 +40,7 @@ Implemented on `master`:
 - Agent, command, gate, approval, sync-change, publish-change, and update-change stage types.
 - Built-in issue execution flows finish with a reflection artifact that records
   follow-up issues, duplicates, non-actions, or a clean result.
-- Agent runtime dispatch for Codex, Claude, and GLM through local CLIs.
+- Agent runtime dispatch for Codex, Claude, GLM, Grok Build, and Pi through local CLIs.
 - Bounded retries for failed agent, command, and gate stages.
 - GitHub draft pull request publishing, same-repository PR branch updates,
   operator-driven PR comment rework, and merge-based PR branch sync.
@@ -91,8 +91,9 @@ In progress / planned:
   `provider: "github-cli"` legacy fallback.
 - Local agent CLI and credentials for each `agent` stage runtime you use. Codex
   uses the local `codex` CLI authentication, Claude requires
-  `ANTHROPIC_API_KEY`, and GLM requires one of `NITELY_GLM_API_KEY`,
-  `GLM_API_KEY`, or `ZHIPUAI_API_KEY`.
+  `ANTHROPIC_API_KEY`, GLM requires one of `NITELY_GLM_API_KEY`,
+  `GLM_API_KEY`, or `ZHIPUAI_API_KEY`, Grok Build uses local `grok login` or
+  `XAI_API_KEY`, and Pi uses the local Pi CLI/model configuration.
 
 ## Install
 
@@ -127,6 +128,30 @@ The bootstrap flow accepts a specification and a technical design as local-file 
 
 ```bash
 node dist/index.js run flows/implement-spec-bootstrap.json \
+  --repo . \
+  --input spec=docs/templates/nitely-spec.md \
+  --input tech-design=docs/templates/nitely-technical-plan.md
+```
+
+To dogfood the same bootstrap path with Grok Build instead of the default
+Claude/Codex candidates, use the Grok variant. A real run requires the local
+`grok` CLI (`grok login` or `XAI_API_KEY`); the flow leaves `model` unset so the
+CLI default remains authoritative:
+
+```bash
+node dist/index.js run flows/implement-spec-bootstrap-grok.json \
+  --repo . \
+  --input spec=docs/templates/nitely-spec.md \
+  --input tech-design=docs/templates/nitely-technical-plan.md
+```
+
+To dogfood the same bootstrap path with Pi instead of the default Claude/Codex
+candidates, use the Pi variant. A real run requires the local `pi` CLI
+(configure model/provider auth through the Pi CLI); the flow leaves `model`
+unset so the CLI default remains authoritative:
+
+```bash
+node dist/index.js run flows/implement-spec-bootstrap-pi.json \
   --repo . \
   --input spec=docs/templates/nitely-spec.md \
   --input tech-design=docs/templates/nitely-technical-plan.md
@@ -278,14 +303,21 @@ runtime registry. Supported runtimes are:
 - `glm`: runs `glm chat` and sends the prompt on stdin. Set one of
   `NITELY_GLM_API_KEY`, `GLM_API_KEY`, or `ZHIPUAI_API_KEY`.
   `NITELY_GLM_COMMAND` can override the command name.
+- `grok`: runs `grok --no-auto-update --cwd <worktree> --always-approve`
+  with `-p <prompt>`. Authenticate with local `grok login` or `XAI_API_KEY`.
+  `NITELY_GROK_COMMAND` can override the command name.
+- `pi`: runs `pi -p` and sends the prompt on stdin. Configure Pi's model
+  provider through the local Pi CLI configuration. `NITELY_PI_COMMAND` can
+  override the command name.
 
-The optional `model` field is passed to Codex as `-m <model>` and to Claude/GLM
-as `--model <model>`. Unknown runtimes fail before spawning any command. Known
-runtimes with missing required credentials are preflighted before spawn: a
-single-runtime stage fails early, while an ordered `runtimes` stage records the
-candidate as unavailable and continues to the next candidate. Candidate attempts
-record the selected runtime/model, stdout/stderr logs, context usage, safe
-missing configuration names, and fallback/blocker events in the run evidence.
+The optional `model` field is passed to Codex as `-m <model>` and to Claude,
+GLM, Grok Build, and Pi as `--model <model>`. Unknown runtimes fail before
+spawning any command. Known runtimes with missing required credentials are
+preflighted before spawn: a single-runtime stage fails early, while an ordered
+`runtimes` stage records the candidate as unavailable and continues to the next
+candidate. Candidate attempts record the selected runtime/model, stdout/stderr
+logs, context usage, safe missing configuration names, and fallback/blocker
+events in the run evidence.
 
 Agent stages and review gates can declare connector requirements that must be
 configured before the agent runtime starts:

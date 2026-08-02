@@ -1,0 +1,43 @@
+{
+  "apiVersion": "nitely.dev/v1alpha1",
+  "kind": "Flow",
+  "metadata": {
+    "name": "implement-spec-bootstrap-pi"
+  },
+  "spec": {
+    "maxAttempts": 2,
+    "stages": [
+      {
+        "id": "implement",
+        "type": "agent",
+        "runtime": "pi",
+        "prompt": "Implement the supplied Nitely feature specification and technical design with Pi. Use TDD, keep the change scoped, update docs when behavior changes, and avoid weakening existing tests.",
+        "inputs": ["spec", "tech-design"],
+        "outputs": ["implementation"]
+      },
+      {
+        "id": "test",
+        "type": "command",
+        "command": "pnpm exec vitest run && pnpm run check && pnpm run build",
+        "timeoutMs": 600000,
+        "inputs": ["implementation"],
+        "outputs": ["test-report"]
+      },
+      {
+        "id": "review",
+        "type": "agent",
+        "runtime": "pi",
+        "prompt": "Review the implementation against the specification and technical design with Pi. Check for missing tests, broken CLI contracts, unsafe filesystem behavior, weak event semantics, and incomplete documentation. Do not modify files during review.",
+        "inputs": ["spec", "tech-design", "implementation", "test-report"],
+        "outputs": ["review"]
+      },
+      {
+        "id": "publish",
+        "type": "publish-change",
+        "provider": "github-cli",
+        "inputs": ["implementation", "test-report", "review"],
+        "outputs": ["change-request"]
+      }
+    ]
+  }
+}

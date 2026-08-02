@@ -20,6 +20,7 @@ type RuntimeEnv = NodeJS.ProcessEnv | Record<string, string | undefined>;
 export interface AgentRuntimeLaunchInput {
   worktreePath: string;
   model?: string;
+  prompt: string;
   env: RuntimeEnv;
 }
 
@@ -27,7 +28,7 @@ export interface AgentRuntimeLaunchSpec {
   runtime: string;
   command: string;
   args: string[];
-  promptDelivery: "stdin";
+  promptDelivery: "stdin" | "argument";
 }
 
 export interface AgentRuntimeLauncher {
@@ -94,6 +95,26 @@ export function createCodexExecArgs(
   ];
 }
 
+export function createGrokBuildArgs(
+  worktreePath: string,
+  prompt: string,
+  model?: string,
+): string[] {
+  return [
+    "--no-auto-update",
+    "--cwd",
+    worktreePath,
+    "--always-approve",
+    ...(model ? ["--model", model] : []),
+    "-p",
+    prompt,
+  ];
+}
+
+export function createPiAgentArgs(model?: string): string[] {
+  return ["-p", ...(model ? ["--model", model] : [])];
+}
+
 class DefaultAgentRuntimeRegistry implements AgentRuntimeRegistry {
   private readonly runtimes: Map<string, AgentRuntimeLauncher>;
 
@@ -145,6 +166,24 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
         runtime: "glm",
         command: env.NITELY_GLM_COMMAND ?? "glm",
         args: ["chat", ...(model ? ["--model", model] : [])],
+        promptDelivery: "stdin",
+      }),
+    },
+    {
+      id: "grok",
+      build: ({ worktreePath, model, prompt, env }) => ({
+        runtime: "grok",
+        command: env.NITELY_GROK_COMMAND ?? "grok",
+        args: createGrokBuildArgs(worktreePath, prompt, model),
+        promptDelivery: "argument",
+      }),
+    },
+    {
+      id: "pi",
+      build: ({ model, env }) => ({
+        runtime: "pi",
+        command: env.NITELY_PI_COMMAND ?? "pi",
+        args: createPiAgentArgs(model),
         promptDelivery: "stdin",
       }),
     },
@@ -294,6 +333,7 @@ export class LocalExecutionBackend implements ExecutionBackend {
     const launch = runtime.build({
       worktreePath: cwd,
       model: input.stage.model,
+      prompt: input.prompt,
       env: runtimeEnv,
     });
     return await new Promise<AgentResult>((resolvePromise, reject) => {
@@ -322,7 +362,9 @@ export class LocalExecutionBackend implements ExecutionBackend {
         }
         reject(error);
       });
-      child.stdin.end(input.prompt);
+      child.stdin.end(
+        launch.promptDelivery === "stdin" ? input.prompt : undefined,
+      );
       child.on("error", (error) => {
         if (error.code === "ENOENT") {
           reject(Object.assign(

@@ -33,7 +33,7 @@ SSO、audit logs，以及 customer-hosted runner coordination。
 - Local-file 和 Google Drive 输入 connector。
 - 每次 run 使用独立 Git worktree。
 - `agent`、`command`、`gate`、`approval`、`sync-change`、`publish-change`、`update-change` stage 类型。
-- 通过本地 CLI runtime registry 分发 Codex、Claude 和 GLM agent。
+- 通过本地 CLI runtime registry 分发 Codex、Claude、GLM、Grok Build 和 Pi agent。
 - 失败的 `agent`、`command` 和 `gate` stage 支持有界 retry。
 - 发布 GitHub draft PR、更新同仓库 PR 分支、由 operator 扫描 PR comment
   触发 rework，并用 merge 同步 PR 分支。
@@ -80,7 +80,8 @@ SSO、audit logs，以及 customer-hosted runner coordination。
 - 可选：只有显式使用 `provider: "github-cli"` legacy fallback 时，才需要已登录的 GitHub CLI (`gh`)。
 - 根据所使用的 `agent` stage runtime 配置本地 CLI 和凭据。Codex 使用本地
   `codex` CLI 的登录状态；Claude 需要 `ANTHROPIC_API_KEY`；GLM 需要
-  `NITELY_GLM_API_KEY`、`GLM_API_KEY` 或 `ZHIPUAI_API_KEY` 之一。
+  `NITELY_GLM_API_KEY`、`GLM_API_KEY` 或 `ZHIPUAI_API_KEY` 之一；Grok Build
+  使用本地 `grok login` 或 `XAI_API_KEY`；Pi 使用本地 Pi CLI/模型配置。
 
 ## 安装
 
@@ -115,6 +116,28 @@ bootstrap flow 接收一份 spec 和一份 technical design 作为 local-file �
 
 ```bash
 node dist/index.js run flows/implement-spec-bootstrap.json \
+  --repo . \
+  --input spec=docs/templates/nitely-spec.md \
+  --input tech-design=docs/templates/nitely-technical-plan.md
+```
+
+若要用 Grok Build 而不是默认的 Claude/Codex 候选路径 dogfood 同一 bootstrap
+路径，请使用 Grok 变体。真实运行需要本地 `grok` CLI（`grok login` 或
+`XAI_API_KEY`）；flow 不设置 `model`，因此以 CLI 默认值为准：
+
+```bash
+node dist/index.js run flows/implement-spec-bootstrap-grok.json \
+  --repo . \
+  --input spec=docs/templates/nitely-spec.md \
+  --input tech-design=docs/templates/nitely-technical-plan.md
+```
+
+若要用 Pi 而不是默认的 Claude/Codex 候选路径 dogfood 同一 bootstrap 路径，请
+使用 Pi 变体。真实运行需要本地 `pi` CLI（通过 Pi CLI 配置模型/provider 鉴权）；
+flow 不设置 `model`，因此以 CLI 默认值为准：
+
+```bash
+node dist/index.js run flows/implement-spec-bootstrap-pi.json \
   --repo . \
   --input spec=docs/templates/nitely-spec.md \
   --input tech-design=docs/templates/nitely-technical-plan.md
@@ -178,9 +201,15 @@ runtime registry 精确解析。当前支持：
 - `glm`：运行 `glm chat`，prompt 通过 stdin 传入。需要设置
   `NITELY_GLM_API_KEY`、`GLM_API_KEY` 或 `ZHIPUAI_API_KEY` 之一。
   `NITELY_GLM_COMMAND` 可覆盖命令名。
+- `grok`：运行 `grok --no-auto-update --cwd <worktree> --always-approve`，
+  并以 `-p <prompt>` 传入 prompt。通过本地 `grok login` 或 `XAI_API_KEY`
+  鉴权。`NITELY_GROK_COMMAND` 可覆盖命令名。
+- `pi`：运行 `pi -p`，prompt 通过 stdin 传入。通过本地 Pi CLI 配置模型
+  provider。`NITELY_PI_COMMAND` 可覆盖命令名。
 
 可选的 `model` 字段会作为 `-m <model>` 传给 Codex，作为 `--model <model>`
-传给 Claude/GLM。未知 runtime 会在启动任何命令前失败；已知 runtime 缺少必需凭据时也会提前给出明确错误。
+传给 Claude/GLM/Grok Build/Pi。未知 runtime 会在启动任何命令前失败；已知
+runtime 缺少必需凭据时也会提前给出明确错误。
 
 `agent` stage 和 review gate 可以声明启动 agent runtime 前必须可用的 connector：
 
