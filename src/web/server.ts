@@ -75,6 +75,10 @@ import {
 } from "./repositories.js";
 import { buildManagerDashboard } from "./dashboard.js";
 import {
+  buildAgentStabilityProjection,
+  type AgentStabilityRunInput,
+} from "./agent-stability.js";
+import {
   bootstrapInitialAdmin,
   createSession,
   deleteSession,
@@ -1104,6 +1108,27 @@ async function handleApiRequest(
     return true;
   }
 
+  if (request.method === "GET" && url.pathname === "/api/agent-stability") {
+    const user = await requireUserContext(request, input, homeRepoPath);
+    const [tasks, runs] = await Promise.all([
+      listAllWorkItemViews(repositories, user),
+      listAllRuns(repositories, user),
+    ]);
+    // OSS omits commercial toolchain-preflight enrichment; missing fields → unknown/empty.
+    const agentStabilityRuns: AgentStabilityRunInput[] = runs.map((run) => ({
+      ...run,
+    }));
+    sendJson(response, 200, {
+      agentStability: buildAgentStabilityProjection({
+        runs: agentStabilityRuns,
+        tasks,
+        repositories,
+        now: new Date(),
+      }),
+    });
+    return true;
+  }
+
   if (request.method === "GET" && url.pathname === "/api/tasks") {
     const user = await requireUserContext(request, input, homeRepoPath);
     sendJson(response, 200, { tasks: await listAllWorkItemViews(repositories, user) });
@@ -1721,6 +1746,7 @@ async function handleHtmlRequest(
   if (
     url.pathname === "/" ||
     url.pathname === "/dashboard" ||
+    url.pathname === "/agent-stability" ||
     url.pathname === "/tasks" ||
     url.pathname === "/work-items" ||
     url.pathname === "/flows" ||

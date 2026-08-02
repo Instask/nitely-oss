@@ -115,6 +115,11 @@
         <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12V7"/><path d="M8 12V4"/><path d="M13 12V9"/><path d="M2.5 13.5h11"/></svg>
         <span>Dashboard</span>
       </button>
+      <button data-view="agent-stability" onClick="{{ navTo }}" style="{{ nav.agentStability }}">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 11.5 5.5 8l2.2 2.2L13.5 4.5"/><path d="M10 4.5h3.5V8"/></svg>
+        <span>Stability</span>
+        <span style="margin-left:auto;font-family:'Geist Mono',monospace;font-size:11px;color:var(--faint);font-weight:500;">{{ agentStabilityAttentionCount }}</span>
+      </button>
       <button data-view="tasks" onClick="{{ navTo }}" style="{{ nav.tasks }}">
         <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 4h11M2.5 8h11M2.5 12h7"/></svg>
         <span>Tasks</span>
@@ -244,6 +249,172 @@
               </div>
             </div>
           </aside>
+        </div>
+      </section>
+      </sc-if>
+
+      <!-- ============ AGENT STABILITY ============ -->
+      <sc-if value="{{ isAgentStability }}" hint-placeholder-val="{{ false }}">
+      <section data-screen-label="Agent Stability">
+        <div class="mobile-page-head" style="display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:24px;">
+          <div style="min-width:0;">
+            <h1 style="margin:0 0 5px;font-size:25px;font-weight:600;letter-spacing:-.02em;color:var(--ink);">Agent Stability</h1>
+            <p style="margin:0;font-size:13.5px;color:var(--muted);overflow-wrap:anywhere;">Read-only health of agent runs, blockers, readiness, and OSS extraction candidates.</p>
+          </div>
+          <div style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--muted);white-space:nowrap;">{{ agentStability.generatedAtLabel }}</div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin-bottom:16px;" class="mobile-form">
+          <sc-for list="{{ agentStability.summaryCards }}" as="m" hint-placeholder-count="6">
+            <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;min-width:0;">
+              <div style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ m.label }}</div>
+              <div style="font-family:'Geist Mono',monospace;font-size:23px;font-weight:600;color:var(--ink);margin-top:7px;">{{ m.value }}</div>
+            </div>
+          </sc-for>
+        </div>
+
+        <div class="mobile-detail-layout" style="display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:16px;align-items:start;margin-bottom:16px;">
+          <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;">
+              <h2 style="margin:0;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Attention</h2>
+              <span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--muted);">{{ agentStability.attentionCountLabel }}</span>
+            </div>
+            <sc-if value="{{ agentStability.hasAttention }}" hint-placeholder-val="{{ true }}">
+              <div class="mobile-card-list" style="border:1px solid var(--line-soft);border-radius:10px;overflow:hidden;">
+                <sc-for list="{{ agentStability.attention }}" as="item" hint-placeholder-count="4">
+                  <button data-id="{{ item.runId }}" onClick="{{ openRun }}" class="mobile-grid-row" style="width:100%;display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,.8fr) 72px;gap:10px;align-items:center;padding:11px 12px;border:0;border-bottom:1px solid var(--line-soft);background:transparent;text-align:left;font:inherit;cursor:pointer;">
+                    <div style="min-width:0;">
+                      <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:4px;">
+                        <span style="font-size:11px;font-weight:600;border-radius:999px;padding:2px 7px;background:var(--panel-2);color:var(--ink);">{{ item.status }}</span>
+                        <span style="font-family:'Geist Mono',monospace;font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ item.currentStage }}</span>
+                      </div>
+                      <div style="font-size:13px;font-weight:600;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ item.title }}</div>
+                      <div style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:3px;">{{ item.meta }}</div>
+                    </div>
+                    <div style="font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ item.blockerReason }}</div>
+                    <div style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);text-align:right;">{{ item.ageLabel }}</div>
+                  </button>
+                </sc-for>
+              </div>
+            </sc-if>
+            <sc-if value="{{ agentStability.noAttention }}" hint-placeholder-val="{{ false }}">
+              <div style="border:1px dashed var(--line);border-radius:10px;padding:18px;text-align:center;font-size:12.5px;color:var(--muted);">No blocked, failed, or incomplete runs.</div>
+            </sc-if>
+          </div>
+
+          <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;">
+              <h2 style="margin:0;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Failure clusters</h2>
+              <span style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--muted);">{{ agentStability.clusterCountLabel }}</span>
+            </div>
+            <sc-if value="{{ agentStability.hasClusters }}" hint-placeholder-val="{{ true }}">
+              <div style="display:flex;flex-direction:column;gap:8px;">
+                <sc-for list="{{ agentStability.failureClusters }}" as="cluster" hint-placeholder-count="5">
+                  <div style="display:grid;grid-template-columns:minmax(0,1fr) 48px;gap:10px;align-items:center;border:1px solid var(--line-soft);border-radius:9px;padding:10px 11px;">
+                    <div style="min-width:0;">
+                      <div style="font-family:'Geist Mono',monospace;font-size:12px;font-weight:600;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ cluster.key }}</div>
+                      <div style="font-size:11.5px;color:var(--muted);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ cluster.dimension }} · {{ cluster.value }}</div>
+                    </div>
+                    <div style="font-family:'Geist Mono',monospace;font-size:16px;font-weight:600;color:var(--ink);text-align:right;">{{ cluster.count }}</div>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+            <sc-if value="{{ agentStability.noClusters }}" hint-placeholder-val="{{ false }}">
+              <div style="border:1px dashed var(--line);border-radius:10px;padding:18px;text-align:center;font-size:12.5px;color:var(--muted);">No failure clusters.</div>
+            </sc-if>
+          </div>
+        </div>
+
+        <div class="mobile-detail-layout" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start;margin-bottom:16px;">
+          <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0;">
+            <h2 style="margin:0 0 12px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Runner readiness</h2>
+            <sc-if value="{{ agentStability.hasRunnerReadiness }}" hint-placeholder-val="{{ true }}">
+              <div style="display:flex;flex-direction:column;gap:8px;">
+                <sc-for list="{{ agentStability.runnerReadiness }}" as="runner" hint-placeholder-count="3">
+                  <div style="border:1px solid var(--line-soft);border-radius:9px;padding:10px 11px;min-width:0;">
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:5px;">
+                      <span style="font-size:13px;font-weight:600;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ runner.runtime }}</span>
+                      <span style="font-size:11px;font-weight:600;border-radius:999px;padding:2px 7px;background:var(--panel-2);color:var(--ink);">{{ runner.readiness }}</span>
+                    </div>
+                    <div style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ runner.meta }}</div>
+                    <sc-if value="{{ runner.hasMissingTools }}" hint-placeholder-val="{{ false }}">
+                      <div style="font-size:12px;color:#b45309;margin-top:5px;overflow-wrap:anywhere;">Missing: {{ runner.missingToolsLabel }}</div>
+                    </sc-if>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+            <sc-if value="{{ agentStability.noRunnerReadiness }}" hint-placeholder-val="{{ false }}">
+              <div style="border:1px dashed var(--line);border-radius:10px;padding:18px;text-align:center;font-size:12.5px;color:var(--muted);">No runner readiness signals.</div>
+            </sc-if>
+          </div>
+
+          <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0;">
+            <h2 style="margin:0 0 12px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Change records</h2>
+            <sc-if value="{{ agentStability.hasChangeRecords }}" hint-placeholder-val="{{ true }}">
+              <div style="display:flex;flex-direction:column;gap:8px;">
+                <sc-for list="{{ agentStability.changeRecords }}" as="change" hint-placeholder-count="3">
+                  <div style="border:1px solid var(--line-soft);border-radius:9px;padding:10px 11px;min-width:0;">
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:5px;">
+                      <button data-id="{{ change.runId }}" onClick="{{ openRun }}" style="background:transparent;border:0;padding:0;font:inherit;font-size:13px;font-weight:600;color:var(--ink);cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%;">{{ change.runId }}</button>
+                      <span style="font-size:11px;font-weight:600;border-radius:999px;padding:2px 7px;background:var(--panel-2);color:var(--ink);">{{ change.publicationState }}</span>
+                    </div>
+                    <div style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ change.meta }}</div>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+            <sc-if value="{{ agentStability.noChangeRecords }}" hint-placeholder-val="{{ false }}">
+              <div style="border:1px dashed var(--line);border-radius:10px;padding:18px;text-align:center;font-size:12.5px;color:var(--muted);">No change records.</div>
+            </sc-if>
+          </div>
+        </div>
+
+        <div class="mobile-detail-layout" style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);gap:16px;align-items:start;">
+          <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0;">
+            <h2 style="margin:0 0 12px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Verification</h2>
+            <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:12px;" class="mobile-form">
+              <sc-for list="{{ agentStability.verificationCards }}" as="m" hint-placeholder-count="6">
+                <div style="border:1px solid var(--line-soft);border-radius:9px;padding:10px;min-width:0;">
+                  <div style="font-size:10.5px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ m.label }}</div>
+                  <div style="font-family:'Geist Mono',monospace;font-size:18px;font-weight:600;color:var(--ink);margin-top:5px;">{{ m.value }}</div>
+                </div>
+              </sc-for>
+            </div>
+            <sc-if value="{{ agentStability.hasSelfTests }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;flex-direction:column;gap:7px;">
+                <sc-for list="{{ agentStability.selfTestCandidates }}" as="item" hint-placeholder-count="3">
+                  <button data-id="{{ item.runId }}" onClick="{{ openRun }}" style="width:100%;text-align:left;background:var(--panel-2);border:1px solid var(--line);border-radius:9px;padding:9px 10px;cursor:pointer;font:inherit;min-width:0;">
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                      <span style="font-family:'Geist Mono',monospace;font-size:12px;font-weight:600;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ item.runId }}</span>
+                      <span style="font-size:11px;color:var(--muted);">{{ item.kind }}</span>
+                    </div>
+                    <div style="font-size:11.5px;color:var(--muted);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ item.stagesLabel }}</div>
+                  </button>
+                </sc-for>
+              </div>
+            </sc-if>
+            <sc-if value="{{ agentStability.noSelfTests }}" hint-placeholder-val="{{ true }}">
+              <div style="border:1px dashed var(--line);border-radius:10px;padding:14px;text-align:center;font-size:12.5px;color:var(--muted);">No self-test candidates.</div>
+            </sc-if>
+          </div>
+
+          <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0;">
+            <h2 style="margin:0 0 12px;font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">OSS extraction candidates</h2>
+            <div style="display:flex;flex-direction:column;gap:8px;">
+              <sc-for list="{{ agentStability.ossExtraction }}" as="item" hint-placeholder-count="5">
+                <div style="border:1px solid var(--line-soft);border-radius:9px;padding:11px 12px;min-width:0;">
+                  <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:5px;">
+                    <span style="font-size:13px;font-weight:600;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ item.title }}</span>
+                    <span style="font-size:11px;font-weight:600;border-radius:999px;padding:2px 7px;background:var(--accent-soft);color:var(--ink);">{{ item.status }}</span>
+                  </div>
+                  <div style="font-family:'Geist Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:4px;">{{ item.id }}</div>
+                  <div style="font-size:12px;color:var(--muted);overflow-wrap:anywhere;">{{ item.publicContract }}</div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
         </div>
       </section>
       </sc-if>
@@ -1031,6 +1202,7 @@ class Component extends DCLogic {
       flowDraftStatus: "",
       runs: [],
       providers: [],
+      agentStability: null,
       taskDetails: {},
       flowDetails: {},
       runDetails: {},
@@ -1102,10 +1274,11 @@ class Component extends DCLogic {
   }
 
   async fetchData() {
-    const [tasksRes, reposRes, dashboardRes, flowsRes, templatesRes, runsRes, provRes] = await Promise.all([
+    const [tasksRes, reposRes, dashboardRes, agentStabilityRes, flowsRes, templatesRes, runsRes, provRes] = await Promise.all([
       this.api("/api/tasks"),
       this.api("/api/repositories"),
       this.api("/api/dashboard"),
+      this.api("/api/agent-stability"),
       this.api("/api/flows"),
       this.api("/api/flows/templates"),
       this.api("/api/runs"),
@@ -1115,6 +1288,7 @@ class Component extends DCLogic {
       tasks: tasksRes?.tasks ?? [],
       repositories: reposRes?.repositories ?? [],
       dashboard: dashboardRes?.dashboard ?? null,
+      agentStability: agentStabilityRes?.agentStability ?? null,
       flows: flowsRes?.flows ?? [],
       flowTemplates: templatesRes?.templates ?? [],
       runs: runsRes?.runs ?? [],
@@ -1131,6 +1305,7 @@ class Component extends DCLogic {
     const path = pathname || "/";
     if (path === "/" || path === "/tasks") return { view: "tasks" };
     if (path === "/dashboard") return { view: "dashboard" };
+    if (path === "/agent-stability") return { view: "agent-stability" };
     if (path === "/work-items") return { view: "tasks" };
     if (path === "/flows") return { view: "flows" };
     if (path === "/flows/new") return { view: "flow-new" };
@@ -1148,6 +1323,7 @@ class Component extends DCLogic {
   pathForRoute(route) {
     if (route.view === "work-items") return "/tasks";
     if (route.view === "dashboard") return "/dashboard";
+    if (route.view === "agent-stability") return "/agent-stability";
     if (route.view === "flows") return "/flows";
     if (route.view === "flow-new") return "/flows/new";
     if (route.view === "flow-detail" && route.flowId) return "/flows/" + encodeURIComponent(route.flowId);
@@ -1176,7 +1352,7 @@ class Component extends DCLogic {
       patch.flowDraftStatus = "";
     } else {
       patch.selectedRunId = null;
-      if (route.view === "tasks" || route.view === "dashboard") patch.selectedTaskId = null;
+      if (route.view === "tasks" || route.view === "dashboard" || route.view === "agent-stability") patch.selectedTaskId = null;
     }
     this.setState(patch);
     const path = this.pathForRoute(route);
@@ -2035,6 +2211,101 @@ class Component extends DCLogic {
       outcomeSummaryLabel: (rawDashboard.outcomes?.failedRuns || 0) + " failed · " + (rawDashboard.outcomes?.blockedRuns || 0) + " blocked · " + (rawDashboard.outcomes?.reworkRuns || 0) + " rework",
     });
 
+    const rawAgentStability = this.state.agentStability || {
+      generatedAt: "",
+      summary: { active: 0, blocked: 0, failed: 0, incomplete: 0, completed: 0, total: 0 },
+      attention: [],
+      failureClusters: [],
+      runnerReadiness: [],
+      changeRecords: [],
+      verification: {
+        totalStages: 0,
+        passed: 0,
+        failed: 0,
+        missing: 0,
+        partial: 0,
+        unknown: 0,
+        evidenceReadyRunIds: [],
+        selfTestCandidates: [],
+      },
+      ossExtraction: [],
+    };
+    const agentSummary = rawAgentStability.summary || {};
+    const agentAttention = (rawAgentStability.attention || []).map((item) => ({
+      runId: item.runId,
+      status: item.status || "unknown",
+      currentStage: item.currentStage || "unknown-stage",
+      title: item.taskTitle || item.taskId || item.runId,
+      meta: [item.repoName, item.runId, item.taskId].filter(Boolean).join(" · "),
+      blockerReason: item.blockerReason || "-",
+      ageLabel: item.ageLabel || "unknown age",
+    }));
+    const agentClusters = (rawAgentStability.failureClusters || []).slice(0, 12);
+    const agentRunners = (rawAgentStability.runnerReadiness || []).map((runner) => {
+      const missingTools = runner.missingTools || [];
+      return Object.assign({}, runner, {
+        meta: [runner.model, runner.commandStatus, runner.lastRunId, runner.lastObservedAt].filter(Boolean).join(" · ") || "no recent signal",
+        hasMissingTools: missingTools.length > 0,
+        missingToolsLabel: missingTools.join(", "),
+      });
+    });
+    const agentChanges = (rawAgentStability.changeRecords || []).slice(0, 12).map((change) => ({
+      runId: change.runId,
+      publicationState: change.publicationState || "unknown",
+      meta: [
+        change.branchName,
+        change.headCommit ? String(change.headCommit).slice(0, 7) : "",
+        change.prNumber ? "PR #" + change.prNumber : "",
+        change.changeRequestUrl || "",
+        change.taskId || "",
+      ].filter(Boolean).join(" · ") || change.runId,
+    }));
+    const agentVerification = rawAgentStability.verification || {};
+    const agentSelfTests = (agentVerification.selfTestCandidates || []).slice(0, 8).map((item) => ({
+      runId: item.runId,
+      kind: item.kind || "test",
+      stagesLabel: (item.stages || []).join(", ") || item.kind || "self-test",
+    }));
+    const agentStability = {
+      generatedAtLabel: rawAgentStability.generatedAt
+        ? "as of " + rawAgentStability.generatedAt
+        : "no data",
+      summaryCards: [
+        { label: "Active", value: this.compactNumber(agentSummary.active || 0) },
+        { label: "Blocked", value: this.compactNumber(agentSummary.blocked || 0) },
+        { label: "Failed", value: this.compactNumber(agentSummary.failed || 0) },
+        { label: "Incomplete", value: this.compactNumber(agentSummary.incomplete || 0) },
+        { label: "Completed", value: this.compactNumber(agentSummary.completed || 0) },
+        { label: "Total", value: this.compactNumber(agentSummary.total || 0) },
+      ],
+      attention: agentAttention,
+      hasAttention: agentAttention.length > 0,
+      noAttention: agentAttention.length === 0,
+      attentionCountLabel: agentAttention.length + " items",
+      failureClusters: agentClusters,
+      hasClusters: agentClusters.length > 0,
+      noClusters: agentClusters.length === 0,
+      clusterCountLabel: agentClusters.length + " clusters",
+      runnerReadiness: agentRunners,
+      hasRunnerReadiness: agentRunners.length > 0,
+      noRunnerReadiness: agentRunners.length === 0,
+      changeRecords: agentChanges,
+      hasChangeRecords: agentChanges.length > 0,
+      noChangeRecords: agentChanges.length === 0,
+      verificationCards: [
+        { label: "Stages", value: this.compactNumber(agentVerification.totalStages || 0) },
+        { label: "Passed", value: this.compactNumber(agentVerification.passed || 0) },
+        { label: "Failed", value: this.compactNumber(agentVerification.failed || 0) },
+        { label: "Missing", value: this.compactNumber(agentVerification.missing || 0) },
+        { label: "Partial", value: this.compactNumber(agentVerification.partial || 0) },
+        { label: "Unknown", value: this.compactNumber(agentVerification.unknown || 0) },
+      ],
+      selfTestCandidates: agentSelfTests,
+      hasSelfTests: agentSelfTests.length > 0,
+      noSelfTests: agentSelfTests.length === 0,
+      ossExtraction: rawAgentStability.ossExtraction || [],
+    };
+
     const repositories = this.state.repositories.map((repo) => ({
       id: repo.id,
       name: repo.name || repo.id,
@@ -2274,14 +2545,22 @@ class Component extends DCLogic {
       themeAttr: theme,
       densityAttr: density,
       rootStyle: Object.assign({ "--accent": accent, "--accent-soft": this.hexToRgba(accent, theme === "dark" ? 0.18 : 0.1), minHeight: "100vh", width: "100%", background: "var(--bg)", color: "var(--ink)", fontFamily: "'Geist', ui-sans-serif, system-ui, sans-serif", fontSize: "15px" }, showLogin ? { display: "flex", alignItems: "center", justifyContent: "center", padding: "24px" } : { display: "grid", gridTemplateColumns: "248px minmax(0,1fr)" }),
-      nav: { dashboard: this.navStyle(view === "dashboard"), tasks: this.navStyle(view === "tasks" || view === "task-detail" || view === "run-detail"), flows: this.navStyle(view === "flows" || view === "flow-new" || view === "flow-detail"), providers: this.navStyle(view === "providers") },
+      nav: {
+        dashboard: this.navStyle(view === "dashboard"),
+        agentStability: this.navStyle(view === "agent-stability"),
+        tasks: this.navStyle(view === "tasks" || view === "task-detail" || view === "run-detail"),
+        flows: this.navStyle(view === "flows" || view === "flow-new" || view === "flow-detail"),
+        providers: this.navStyle(view === "providers"),
+      },
       taskCount: this.state.tasks.length,
       flowCount: this.state.flows.length,
       runCount: this.state.runs.length,
+      agentStabilityAttentionCount: (rawAgentStability.attention || []).length,
       providersSummary: configuredCount + "/" + this.state.providers.length,
       providersBar: { width: Math.round((configuredCount / this.state.providers.length) * 100) + "%", height: "100%", background: "var(--accent)", borderRadius: "3px" },
       isTasks: view === "tasks",
       isDashboard: view === "dashboard",
+      isAgentStability: view === "agent-stability",
       isFlows: view === "flows",
       isFlowEditor,
       isRuns: view === "runs",
@@ -2301,7 +2580,7 @@ class Component extends DCLogic {
       flowDraftUnchecked: !report,
       newFlow: this.newFlow, openFlow: this.openFlow, pickTemplate: this.pickTemplate,
       editFlowDraft: this.editFlowDraft, saveFlow: this.saveFlow, runFromFlow: this.runFromFlow,
-      repositories, dashboard, tasks, runs, filteredRuns, hasSessionOwners, providers, selectedTask, selectedRun,
+      repositories, dashboard, agentStability, tasks, runs, filteredRuns, hasSessionOwners, providers, selectedTask, selectedRun,
       navTo: this.navTo, openTask: this.openTask, openRun: this.openRun,
       startRun: this.startRun, planWork: this.planWork, approveSpec: this.approveSpec,
       draftTechnicalDesign: this.draftTechnicalDesign, approveTechDesign: this.approveTechDesign,

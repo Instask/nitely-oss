@@ -23,10 +23,29 @@ describe("Design Component console shell", () => {
     expect(html).toContain("routeFromPath(pathname)");
     expect(html).toContain('path === "/" || path === "/tasks"');
     expect(html).toContain('path === "/dashboard"');
+    expect(html).toContain('path === "/agent-stability"');
     expect(html).toContain('path === "/providers"');
     expect(html).toContain('path.match(/^\\/tasks\\/([^/]+)$/)');
     expect(html).toContain('path.match(/^\\/runs\\/([^/]+)$/)');
     expect(html).toContain("window.addEventListener(\"popstate\"");
+  });
+
+  it("exposes an Agent Stability surface with API fetch hook", async () => {
+    const html = await readFile(consolePath, "utf8");
+    const navBlock = html.match(/<nav[\s\S]*?<\/nav>/)?.[0] ?? "";
+
+    expect(navBlock).toContain('data-view="agent-stability"');
+    expect(html).toContain('data-screen-label="Agent Stability"');
+    expect(html).toContain('path === "/agent-stability"');
+    expect(html).toContain("/api/agent-stability");
+    expect(html).toContain("agentStability");
+    expect(html).toContain("isAgentStability");
+    expect(html).toContain("summaryCards");
+    expect(html).toContain("failureClusters");
+    expect(html).toContain("runnerReadiness");
+    expect(html).toContain("changeRecords");
+    expect(html).toContain("ossExtraction");
+    expect(html).toContain("OSS extraction candidates");
   });
 
   it("exposes a flows surface with editor, validation, and templates", async () => {
