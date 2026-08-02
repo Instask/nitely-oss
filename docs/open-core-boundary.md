@@ -38,7 +38,8 @@ The core should remain available in the public Nitely open source repository:
 - GitHub draft PR publishing and same-repository PR branch updates for local
   runs.
 - Local Web Console basics for tasks, runs, providers, flows, repositories,
-  run details, usage, and evidence.
+  run details, usage, evidence, and Agent Stability (local run health projection
+  via `GET /api/agent-stability` and `/agent-stability`).
 - Documentation for secret boundaries, execution behavior, and evidence
   semantics.
 

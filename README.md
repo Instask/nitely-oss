@@ -495,6 +495,11 @@ specification and technical design content when available, associated sessions,
 change request links, and typed artifact groups. Internally, generic
 `.nitely/work-items` records remain the extensibility model for custom flows;
 `/work-items` aliases back to `/tasks` in the Web Console for compatibility.
+`/agent-stability` is a read-only Agent Stability surface (summary, attention,
+failure clusters, runner readiness, change records, verification evidence, and
+OSS extraction candidates) backed by authenticated `GET /api/agent-stability`.
+Missing toolchain/preflight signals report as `unknown` readiness rather than
+invented commercial modules.
 The **Plan work** form on `/tasks` creates draft tasks from a GitHub issue URL or
 rough prompt through the Planner Agent workflow. On task detail, approve the
 draft spec, draft the technical design, review persisted open questions, approve
