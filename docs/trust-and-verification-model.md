@@ -7,6 +7,16 @@ Its initial wedge is governed spec-to-PR execution: turning approved
 engineering intent into a reviewable change with bounded execution,
 independent checks, human decisions, and durable evidence.
 
+The product definition is four constraints. [Product definition](product.md)
+is the short form:
+
+- Intent is explicit.
+- Execution is constrained.
+- Results require evidence.
+- Humans retain authority.
+
+This document is how a software change earns trust inside those constraints.
+
 ## The Product Thesis
 
 The durable problem is not whether an agent can produce a patch. Code
@@ -96,6 +106,9 @@ secrets and raw context protected by policy and redaction boundaries.
 
 ## Product Decision Checklist
 
+The four constraints in [product.md](product.md) are the pass/fail test. This
+checklist is the same test written as questions.
+
 Use this checklist when evaluating a new feature, flow, or architecture:
 
 1. **Intent clarity:** does it make the approved change and scope explicit?
@@ -145,6 +158,7 @@ Be cautious about:
 
 This model sharpens existing work; it does not replace it:
 
+- [Product definition](product.md) states the four constraints this model serves.
 - [Positioning](positioning.md) describes the governed spec-to-PR wedge and
   boundaries against Agent-workforce products.
 - [Approval-First Ticket-to-PR Product Contract](approval-first-ticket-to-pr.md)
