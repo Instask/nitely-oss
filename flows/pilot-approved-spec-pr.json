@@ -1,0 +1,156 @@
+{
+  "apiVersion": "nitely.dev/v1alpha1",
+  "kind": "Flow",
+  "metadata": {
+    "name": "pilot-approved-spec-pr",
+    "workItemType": "dev.pr",
+    "inputs": [{ "id": "spec" }, { "id": "tech-design" }]
+  },
+  "spec": {
+    "maxAttempts": 2,
+    "stages": [
+      {
+        "id": "plan-tasks",
+        "type": "agent",
+        "runtime": "codex",
+        "prompt": "Decompose the approved specification and technical design into an ordered task-plan.json. Write an artifact.json manifest that declares task-plan.json as the `task-plan` output with mediaType application/json. Use task ids such as T001, include titles, dependencies, paths when known, status pending/completed, and max_iterations no larger than 12.",
+        "inputs": ["spec", "tech-design"],
+        "context": { "fullReadInputs": ["spec", "tech-design"] },
+        "outputs": [
+          {
+            "id": "task-plan",
+            "name": "Task plan",
+            "type": "task-plan",
+            "description": "Ordered task-plan.json with task ids, titles, dependency/completion state, and optional max_iterations.",
+            "mediaType": "application/json"
+          }
+        ]
+      },
+      {
+        "id": "implement",
+        "type": "agent",
+        "runtime": "codex",
+        "maxAttempts": 12,
+        "prompt": "Implement only the current pending task from the task-plan context. Keep the diff scoped, use the repository's existing patterns, add or update tests for changed behavior, write a concise pr-title artifact, and write a conformance-report JSON artifact mapping US/FR/SC/PD/T IDs to implementation evidence for completed work.",
+        "inputs": ["spec", "tech-design", "task-plan"],
+        "outputs": [
+          {
+            "id": "implementation",
+            "name": "Implementation summary",
+            "type": "implementation.summary",
+            "description": "Markdown summary of code changes, affected files, and important implementation decisions.",
+            "mediaType": "text/markdown"
+          },
+          {
+            "id": "pr-title",
+            "name": "Pull request title",
+            "type": "change-request.title",
+            "description": "One-line title to use when publishing or updating the pull request.",
+            "mediaType": "text/plain"
+          },
+          {
+            "id": "conformance-report",
+            "name": "Conformance report",
+            "type": "conformance.report",
+            "description": "Requirement-to-evidence report showing how the implementation satisfies the approved spec.",
+            "mediaType": "application/vnd.nitely.conformance+json",
+            "schema": {
+              "type": "object",
+              "required": ["items"],
+              "properties": {
+                "version": { "type": "number" },
+                "summary": { "type": "string" },
+                "mode": { "type": "string" },
+                "items": { "type": "array" },
+                "scopeDrift": { "type": "array" }
+              }
+            }
+          }
+        ],
+        "taskPlan": {
+          "input": "task-plan",
+          "role": "execute-current",
+          "max_iterations": 12
+        }
+      },
+      {
+        "id": "verify",
+        "type": "command",
+        "command": "pnpm exec vitest run && pnpm run check",
+        "timeoutMs": 600000,
+        "maxAttempts": 12,
+        "inputs": ["task-plan", "implementation"],
+        "outputs": [
+          {
+            "id": "verification-report",
+            "name": "Verification report",
+            "type": "verification.report",
+            "description": "Command output summary listing tests, checks, failures, and any verification caveats.",
+            "mediaType": "text/markdown"
+          }
+        ],
+        "taskPlan": {
+          "input": "task-plan",
+          "role": "verify-advance"
+        }
+      },
+      {
+        "id": "review",
+        "type": "gate",
+        "mode": "review",
+        "runtime": "codex",
+        "prompt": "Review the implementation and conformance report against the approved spec and task plan. Check requirement coverage, success-criterion verification, design-decision evidence from the conformance report, tests, security-sensitive handling, and whether the PR evidence is enough for a human reviewer. Write `Review verdict: pass` only when there are no P0/P1/blocking findings.",
+        "inputs": ["spec", "task-plan", "implementation", "conformance-report", "verification-report"],
+        "outputs": [
+          {
+            "id": "review",
+            "name": "Review verdict",
+            "type": "review.verdict",
+            "description": "Blocking review result with pass/fail verdict and P0/P1 findings when present.",
+            "mediaType": "text/markdown"
+          }
+        ],
+        "taskPlan": {
+          "input": "task-plan",
+          "role": "final"
+        }
+      },
+      {
+        "id": "publish",
+        "type": "publish-change",
+        "provider": "github-cli",
+        "inputs": ["task-plan", "implementation", "conformance-report", "verification-report", "review", "pr-title"],
+        "outputs": [
+          {
+            "id": "change-request",
+            "name": "Change request result",
+            "type": "change-request.result",
+            "description": "Published or updated pull request metadata, including provider, URL, branch, and status.",
+            "mediaType": "text/markdown"
+          }
+        ],
+        "conformance": {
+          "mode": "advisory",
+          "report": "conformance-report"
+        }
+      },
+      {
+        "id": "reflect",
+        "type": "agent",
+        "runtime": "codex",
+        "alwaysRun": true,
+        "prompt": "Reflect on this pilot run. Identify reusable workflow improvements, missing evidence, unclear spec/design inputs, and follow-up issues. If no action is needed, write a clean-result reflection.",
+        "inputs": ["spec", "tech-design", "task-plan", "implementation", "conformance-report", "verification-report", "review", "change-request"],
+        "outputs": [
+          {
+            "id": "reflection",
+            "name": "Reflection",
+            "type": "workflow.reflection",
+            "description": "Post-run workflow reflection listing follow-up issues, duplicates, observations, or a clean result.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      }
+    ]
+  }
+}

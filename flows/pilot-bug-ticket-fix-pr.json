@@ -1,0 +1,118 @@
+{
+  "apiVersion": "nitely.dev/v1alpha1",
+  "kind": "Flow",
+  "metadata": {
+    "name": "pilot-bug-ticket-fix-pr",
+    "workItemType": "dev.pr",
+    "inputs": [{ "id": "bug-ticket" }, { "id": "repo-notes" }]
+  },
+  "spec": {
+    "maxAttempts": 2,
+    "stages": [
+      {
+        "id": "reproduce",
+        "type": "agent",
+        "runtime": "codex",
+        "prompt": "Read the bug ticket and repository notes. Add or update the smallest regression test that fails before the fix. Do not implement the product fix in this stage. Write a regression-test artifact describing the failing test and command.",
+        "inputs": ["bug-ticket", "repo-notes"],
+        "outputs": [
+          {
+            "id": "regression-test",
+            "name": "Regression test",
+            "type": "test.regression",
+            "description": "Description of the failing regression test, command, expected failure, and covered bug behavior.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      },
+      {
+        "id": "fix",
+        "type": "agent",
+        "runtime": "codex",
+        "prompt": "Implement the smallest fix for the bug. Keep the regression test, update related tests if needed, and write a concise pr-title artifact.",
+        "inputs": ["bug-ticket", "repo-notes", "regression-test"],
+        "outputs": [
+          {
+            "id": "implementation",
+            "name": "Implementation summary",
+            "type": "implementation.summary",
+            "description": "Markdown summary of code changes, affected files, and important implementation decisions.",
+            "mediaType": "text/markdown"
+          },
+          {
+            "id": "pr-title",
+            "name": "Pull request title",
+            "type": "change-request.title",
+            "description": "One-line title to use when publishing or updating the pull request.",
+            "mediaType": "text/plain"
+          }
+        ]
+      },
+      {
+        "id": "verify",
+        "type": "command",
+        "command": "pnpm exec vitest run && pnpm run check",
+        "timeoutMs": 600000,
+        "inputs": ["regression-test", "implementation"],
+        "outputs": [
+          {
+            "id": "verification-report",
+            "name": "Verification report",
+            "type": "verification.report",
+            "description": "Command output summary listing tests, checks, failures, and any verification caveats.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      },
+      {
+        "id": "review",
+        "type": "gate",
+        "mode": "review",
+        "runtime": "codex",
+        "prompt": "Review whether the bug is reproduced, the fix is minimal, the regression test proves the behavior, and no adjacent behavior regressed. Write `Review verdict: pass` only when there are no P0/P1/blocking findings.",
+        "inputs": ["bug-ticket", "regression-test", "implementation", "verification-report"],
+        "outputs": [
+          {
+            "id": "review",
+            "name": "Review verdict",
+            "type": "review.verdict",
+            "description": "Blocking review result with pass/fail verdict and P0/P1 findings when present.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      },
+      {
+        "id": "publish",
+        "type": "publish-change",
+        "provider": "github-cli",
+        "inputs": ["regression-test", "implementation", "verification-report", "review", "pr-title"],
+        "outputs": [
+          {
+            "id": "change-request",
+            "name": "Change request result",
+            "type": "change-request.result",
+            "description": "Published or updated pull request metadata, including provider, URL, branch, and status.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      },
+      {
+        "id": "reflect",
+        "type": "agent",
+        "runtime": "codex",
+        "alwaysRun": true,
+        "prompt": "Reflect on this bug-fix pilot run. Note whether the ticket was reproducible, whether the regression evidence was enough, and what follow-up workflow or product issues should be created.",
+        "inputs": ["bug-ticket", "regression-test", "implementation", "verification-report", "review", "change-request"],
+        "outputs": [
+          {
+            "id": "reflection",
+            "name": "Reflection",
+            "type": "workflow.reflection",
+            "description": "Post-run workflow reflection listing follow-up issues, duplicates, observations, or a clean result.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      }
+    ]
+  }
+}

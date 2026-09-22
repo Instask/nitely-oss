@@ -18,6 +18,19 @@ export class WebNotFoundError extends Error {
   }
 }
 
+export class WebRunStartConflictError extends Error {
+  readonly code = "run_start_conflict";
+  readonly status = 409;
+
+  constructor(
+    message: string,
+    readonly runId?: string,
+  ) {
+    super(message);
+    this.name = "WebRunStartConflictError";
+  }
+}
+
 export class WebUnauthorizedError extends Error {
   readonly code = "unauthorized";
   readonly status = 401;
@@ -35,6 +48,16 @@ export class WebForbiddenError extends Error {
   constructor(message = "forbidden") {
     super(message);
     this.name = "WebForbiddenError";
+  }
+}
+
+export class WebCapabilityDeniedError extends Error {
+  readonly code = "capability_denied";
+  readonly status = 403;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "WebCapabilityDeniedError";
   }
 }
 

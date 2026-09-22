@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Authorize a device — Nitely</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+         display: grid; place-items: center; min-height: 100vh; background: #f6f7f9; color: #14161a; }
+  @media (prefers-color-scheme: dark) { body { background: #101215; color: #e8eaed; } }
+  main { width: min(28rem, 92vw); padding: 1.75rem; border-radius: 12px; background: #fff;
+         box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+  @media (prefers-color-scheme: dark) { main { background: #1a1d21; } }
+  h1 { margin: 0 0 .25rem; font-size: 1.15rem; }
+  p { margin: .5rem 0; }
+  .muted { opacity: .7; font-size: .9em; }
+  code { font-family: ui-monospace, monospace; }
+  input { width: 100%; box-sizing: border-box; padding: .6rem .7rem; font: inherit;
+          font-family: ui-monospace, monospace; letter-spacing: .12em; text-transform: uppercase;
+          border: 1px solid rgba(128,128,128,.4); border-radius: 8px; background: transparent; color: inherit; }
+  .row { display: flex; gap: .6rem; margin-top: 1rem; }
+  button { flex: 1; padding: .6rem 1rem; font: inherit; border-radius: 8px; cursor: pointer;
+           border: 1px solid rgba(128,128,128,.4); background: transparent; color: inherit; }
+  button.primary { background: #2f6feb; border-color: #2f6feb; color: #fff; }
+  button[disabled] { opacity: .5; cursor: default; }
+  ul { margin: .5rem 0; padding-left: 1.2rem; }
+  .high-impact { font-weight: 600; }
+  .high-impact-tag { font-weight: 400; opacity: .85; }
+  .status { margin-top: 1rem; padding: .7rem .8rem; border-radius: 8px; background: rgba(128,128,128,.12); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Authorize a device</h1>
+  <p class="muted">A command line client is asking for an API token for this server.</p>
+
+  <div id="signed-out" hidden>
+    <div class="status">You need to sign in as an administrator before you can approve this request.</div>
+    <div class="row"><a class="primary" href="/" style="flex:1;text-align:center;padding:.6rem 1rem;border-radius:8px;background:#2f6feb;color:#fff;text-decoration:none;">Sign in</a></div>
+  </div>
+
+  <div id="not-admin" hidden>
+    <div class="status">Only an administrator can approve a device. You are signed in as <span id="who"></span>.</div>
+  </div>
+
+  <form id="form" hidden>
+    <p><label for="code">Enter the code shown in your terminal</label></p>
+    <input id="code" name="code" autocomplete="off" spellcheck="false" placeholder="XXXX-XXXX" maxlength="9" required>
+
+    <div id="details" hidden>
+      <p>Requesting client: <strong id="detail-client"></strong></p>
+      <p>Will be able to:</p>
+      <ul id="detail-capabilities"></ul>
+      <p id="detail-high-impact" class="status" hidden>The capabilities marked high impact let this client change things, not just read them.</p>
+    </div>
+    <p id="detail-status" class="muted" hidden></p>
+
+    <div class="row">
+      <button type="button" id="deny">Deny</button>
+      <button type="submit" class="primary" id="approve" disabled>Approve</button>
+    </div>
+  </form>
+
+  <div id="status" class="status" hidden></div>
+</main>
+<script>
+(function () {
+  var form = document.getElementById("form");
+  var input = document.getElementById("code");
+  var status = document.getElementById("status");
+  var approve = document.getElementById("approve");
+  var deny = document.getElementById("deny");
+  var details = document.getElementById("details");
+  var detailClient = document.getElementById("detail-client");
+  var detailCapabilities = document.getElementById("detail-capabilities");
+  var detailHighImpact = document.getElementById("detail-high-impact");
+  var detailStatus = document.getElementById("detail-status");
+
+  input.value = new URLSearchParams(location.search).get("code") || "";
+
+  function show(element) { element.hidden = false; }
+  function hide(element) { element.hidden = true; }
+  function say(message) { status.textContent = message; status.hidden = false; }
+
+  var isAdmin = false;
+  var detailsLoaded = false;
+  var detailsRequestToken = 0;
+
+  function setDetailStatus(message) {
+    if (message) {
+      detailStatus.textContent = message;
+      show(detailStatus);
+    } else {
+      detailStatus.textContent = "";
+      hide(detailStatus);
+    }
+  }
+
+  // Never leave a stale, previously-loaded request on screen for a code the
+  // operator has since changed: clear the details and disable Approve first,
+  // then (if there's a full code to look up) fetch fresh ones.
+  function clearDetails() {
+    detailsLoaded = false;
+    approve.disabled = true;
+    hide(details);
+    detailClient.textContent = "";
+    while (detailCapabilities.firstChild) {
+      detailCapabilities.removeChild(detailCapabilities.firstChild);
+    }
+    hide(detailHighImpact);
+  }
+
+  function refreshDetails() {
+    clearDetails();
+    setDetailStatus("");
+    if (!isAdmin) return;
+    var code = input.value;
+    // Only look up once a full code is present; avoids spamming the
+    // lookup (and its shared rate limit) on every keystroke.
+    if (code.replace(/[^0-9a-zA-Z]/g, "").length !== 8) return;
+
+    var token = ++detailsRequestToken;
+    setDetailStatus("Looking up the request…");
+    fetch("/api/device-authorizations/" + encodeURIComponent(code), {
+      headers: { accept: "application/json" }
+    })
+      .then(function (response) {
+        return response.json().then(function (body) { return { ok: response.ok, body: body }; });
+      })
+      .then(function (result) {
+        if (token !== detailsRequestToken) return; // Superseded by a newer code.
+        if (!result.ok) {
+          setDetailStatus("That code was not found or is no longer pending.");
+          return;
+        }
+        var record = result.body || {};
+        detailClient.textContent = String(record.clientName || "");
+        var capabilities = Array.isArray(record.capabilities) ? record.capabilities : [];
+        // `allowHighImpact` only says the client would permit a high-impact
+        // capability, not that it asked for one — warning off that flag warns
+        // on read-only requests too, and a banner that fires on everything
+        // teaches admins to click past it. Mark the capabilities that actually
+        // carry the risk, and warn only when the request contains one.
+        var highImpact = Array.isArray(record.highImpactCapabilities)
+          ? record.highImpactCapabilities.map(String)
+          : [];
+        var sawHighImpact = false;
+        capabilities.forEach(function (capability) {
+          var name = String(capability);
+          var item = document.createElement("li");
+          item.textContent = name;
+          if (highImpact.indexOf(name) !== -1) {
+            sawHighImpact = true;
+            item.className = "high-impact";
+            var tag = document.createElement("span");
+            tag.className = "high-impact-tag";
+            tag.textContent = " — high impact";
+            item.appendChild(tag);
+          }
+          detailCapabilities.appendChild(item);
+        });
+        if (sawHighImpact) show(detailHighImpact);
+        setDetailStatus("");
+        show(details);
+        detailsLoaded = true;
+        approve.disabled = false;
+      })
+      .catch(function () {
+        if (token !== detailsRequestToken) return;
+        setDetailStatus("Could not reach the server.");
+      });
+  }
+
+  fetch("/api/session", { headers: { accept: "application/json" } })
+    .then(function (response) { return response.json(); })
+    .then(function (session) {
+      if (!session.user) { show(document.getElementById("signed-out")); return; }
+      if (session.user.role !== "admin") {
+        document.getElementById("who").textContent = session.user.email;
+        show(document.getElementById("not-admin"));
+        return;
+      }
+      isAdmin = true;
+      show(form);
+      refreshDetails();
+    })
+    .catch(function () { say("Could not reach the server."); });
+
+  input.addEventListener("input", refreshDetails);
+
+  function decide(decision) {
+    approve.disabled = true;
+    deny.disabled = true;
+    fetch("/api/device-authorizations/approve", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userCode: input.value, decision: decision })
+    })
+      .then(function (response) {
+        return response.json().then(function (body) { return { ok: response.ok, body: body }; });
+      })
+      .then(function (result) {
+        if (!result.ok) {
+          var error = result.body && result.body.error;
+          say((error && error.message) || "That code was not accepted.");
+          deny.disabled = false;
+          approve.disabled = !detailsLoaded;
+          return;
+        }
+        form.hidden = true;
+        say(result.body.status === "approved"
+          ? "Approved. Your terminal will pick up the token in a few seconds."
+          : "Denied. Nothing was issued.");
+      })
+      .catch(function () {
+        say("Could not reach the server.");
+        deny.disabled = false;
+        approve.disabled = !detailsLoaded;
+      });
+  }
+
+  form.addEventListener("submit", function (event) { event.preventDefault(); decide("approve"); });
+  deny.addEventListener("click", function () { decide("deny"); });
+})();
+</script>
+</body>
+</html>

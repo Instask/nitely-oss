@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 
 import { redactUnknown } from "./redaction.js";
@@ -69,4 +69,28 @@ export async function writeContextManifest(input: {
   };
   await writeFile(path, JSON.stringify(manifest, null, 2), "utf8");
   return path;
+}
+
+export async function readContextManifest(input: {
+  runDirectory: string;
+}): Promise<ContextManifest | undefined> {
+  try {
+    const content = await readFile(
+      resolve(input.runDirectory, "context-manifest.json"),
+      "utf8",
+    );
+    const parsed = JSON.parse(content) as Partial<ContextManifest>;
+    return {
+      version: 1,
+      runId: typeof parsed.runId === "string" ? parsed.runId : "",
+      generatedAt:
+        typeof parsed.generatedAt === "string" ? parsed.generatedAt : "",
+      entries: Array.isArray(parsed.entries) ? parsed.entries : [],
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
 }

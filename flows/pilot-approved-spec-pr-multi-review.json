@@ -1,0 +1,210 @@
+{
+  "apiVersion": "nitely.dev/v1alpha1",
+  "kind": "Flow",
+  "metadata": {
+    "name": "pilot-approved-spec-pr-multi-review",
+    "workItemType": "dev.pr",
+    "inputs": [{ "id": "spec" }, { "id": "tech-design" }]
+  },
+  "spec": {
+    "maxAttempts": 2,
+    "stages": [
+      {
+        "id": "plan-tasks",
+        "type": "agent",
+        "runtime": "codex",
+        "prompt": "Decompose the approved specification and technical design into an ordered task-plan.json. Write an artifact.json manifest that declares task-plan.json as the `task-plan` output with mediaType application/json. Use task ids such as T001, include titles, dependencies, paths when known, status pending/completed, and max_iterations no larger than 12.",
+        "inputs": ["spec", "tech-design"],
+        "context": { "fullReadInputs": ["spec", "tech-design"] },
+        "outputs": [
+          {
+            "id": "task-plan",
+            "name": "Task plan",
+            "type": "task-plan",
+            "description": "Ordered task-plan.json with task ids, titles, dependency/completion state, and optional max_iterations.",
+            "mediaType": "application/json"
+          }
+        ]
+      },
+      {
+        "id": "implement",
+        "type": "agent",
+        "runtime": "codex",
+        "maxAttempts": 12,
+        "prompt": "Implement only the current pending task from the task-plan context. Keep the diff scoped, use the repository's existing patterns, add or update tests for changed behavior, write a concise pr-title artifact, and write a conformance-report JSON artifact mapping US/FR/SC/PD/T IDs to implementation evidence for completed work.",
+        "inputs": ["spec", "tech-design", "task-plan"],
+        "outputs": [
+          {
+            "id": "implementation",
+            "name": "Implementation summary",
+            "type": "implementation.summary",
+            "description": "Markdown summary of code changes, affected files, and important implementation decisions.",
+            "mediaType": "text/markdown"
+          },
+          {
+            "id": "pr-title",
+            "name": "Pull request title",
+            "type": "change-request.title",
+            "description": "One-line title to use when publishing or updating the pull request.",
+            "mediaType": "text/plain"
+          },
+          {
+            "id": "conformance-report",
+            "name": "Conformance report",
+            "type": "conformance.report",
+            "description": "Requirement-to-evidence report showing how the implementation satisfies the approved spec.",
+            "mediaType": "application/vnd.nitely.conformance+json",
+            "schema": {
+              "type": "object",
+              "required": ["items"],
+              "properties": {
+                "version": { "type": "number" },
+                "summary": { "type": "string" },
+                "mode": { "type": "string" },
+                "items": { "type": "array" },
+                "scopeDrift": { "type": "array" }
+              }
+            }
+          }
+        ],
+        "taskPlan": {
+          "input": "task-plan",
+          "role": "execute-current",
+          "max_iterations": 12
+        }
+      },
+      {
+        "id": "verify",
+        "type": "command",
+        "command": "pnpm exec vitest run && pnpm run check",
+        "timeoutMs": 600000,
+        "maxAttempts": 12,
+        "inputs": ["task-plan", "implementation"],
+        "outputs": [
+          {
+            "id": "verification-report",
+            "name": "Verification report",
+            "type": "verification.report",
+            "description": "Command output summary listing tests, checks, failures, and any verification caveats.",
+            "mediaType": "text/markdown"
+          }
+        ],
+        "taskPlan": {
+          "input": "task-plan",
+          "role": "verify-advance"
+        }
+      },
+      {
+        "id": "review-correctness",
+        "type": "gate",
+        "mode": "review",
+        "name": "Correctness review",
+        "runtime": "codex",
+        "blocking": false,
+        "prompt": "Review only for correctness. Try to refute the implementation: find inputs, states, or orderings where it produces a wrong result, loses data, or breaks an existing caller. Check error paths, boundary values, concurrency, and whether the tests would actually catch a regression. Do not restate the design and do not repeat security or spec-conformance concerns; other reviewers own those. Write `Review verdict: approved` only when you found no P0/P1 correctness defect, otherwise `Review verdict: needs_fix` with a `Reason:` line and one `path/file.ext:line: problem` line per finding.",
+        "inputs": ["task-plan", "implementation", "verification-report"],
+        "outputs": [
+          {
+            "id": "review-correctness",
+            "name": "Correctness review verdict",
+            "type": "review.verdict",
+            "description": "Independent correctness review with an explicit verdict and P0/P1 findings when present.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      },
+      {
+        "id": "review-security",
+        "type": "gate",
+        "mode": "review",
+        "name": "Security review",
+        "runtime": "codex",
+        "blocking": false,
+        "prompt": "Review only for security. Try to refute the implementation's safety: look for injection, path traversal, unsafe deserialization, secret or credential exposure, missing authorization checks, unsafe temporary files, and newly widened trust boundaries. Judge the diff as written, not as intended. Do not repeat correctness or spec-conformance concerns; other reviewers own those. Write `Review verdict: approved` only when you found no P0/P1 security defect, otherwise `Review verdict: needs_fix` with a `Reason:` line and one `path/file.ext:line: problem` line per finding.",
+        "inputs": ["implementation", "verification-report"],
+        "outputs": [
+          {
+            "id": "review-security",
+            "name": "Security review verdict",
+            "type": "review.verdict",
+            "description": "Independent security review with an explicit verdict and P0/P1 findings when present.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      },
+      {
+        "id": "review-spec-conformance",
+        "type": "gate",
+        "mode": "review",
+        "name": "Spec conformance review",
+        "runtime": "codex",
+        "blocking": false,
+        "prompt": "Review only for conformance to the approved specification. Check that every requirement and success criterion the conformance report claims is actually evidenced by the change, that nothing out of scope was added, and that the PR evidence is enough for a human reviewer. Do not repeat correctness or security concerns; other reviewers own those. Write `Review verdict: approved` only when you found no P0/P1 conformance gap, otherwise `Review verdict: needs_fix` (or `Review verdict: needs_rework_spec` when the specification itself is the problem) with a `Reason:` line, a `Target artifact:` line when you can name one, and one `path/file.ext:line: problem` line per finding.",
+        "inputs": ["spec", "implementation", "conformance-report"],
+        "outputs": [
+          {
+            "id": "review-spec-conformance",
+            "name": "Spec conformance review verdict",
+            "type": "review.verdict",
+            "description": "Independent specification-conformance review with an explicit verdict and P0/P1 findings when present.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      },
+      {
+        "id": "review",
+        "type": "gate",
+        "mode": "review-aggregate",
+        "name": "Aggregated review",
+        "perspectives": [
+          "review-correctness",
+          "review-security",
+          "review-spec-conformance"
+        ],
+        "inputs": [
+          "spec",
+          "task-plan",
+          "implementation",
+          "review-correctness",
+          "review-security",
+          "review-spec-conformance"
+        ],
+        "outputs": [
+          {
+            "id": "review",
+            "name": "Aggregated review verdict",
+            "type": "review.verdict",
+            "description": "Single blocking verdict merging every review perspective, failing closed on any missing verdict or critical finding.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      },
+      {
+        "id": "publish",
+        "type": "publish-change",
+        "provider": "github-cli",
+        "inputs": [
+          "task-plan",
+          "implementation",
+          "conformance-report",
+          "verification-report",
+          "review",
+          "pr-title"
+        ],
+        "outputs": [
+          {
+            "id": "change-request",
+            "name": "Change request result",
+            "type": "change-request.result",
+            "description": "Published or updated pull request metadata, including provider, URL, branch, and status.",
+            "mediaType": "text/markdown"
+          }
+        ],
+        "conformance": {
+          "mode": "advisory",
+          "report": "conformance-report"
+        }
+      }
+    ]
+  }
+}

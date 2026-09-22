@@ -16,6 +16,14 @@ interface EventRow {
   created_at: string;
 }
 
+export type SynchronousTransactionOperation<T> = (() => T) & (
+  [T] extends [never]
+    ? unknown
+    : [Extract<T, PromiseLike<unknown>>] extends [never]
+      ? unknown
+      : never
+);
+
 function toStoredEvent(row: EventRow): StoredRunEvent {
   return {
     sequence: Number(row.sequence),
@@ -79,6 +87,38 @@ export class EventStore {
     return toStoredEvent(row);
   }
 
+  transaction<T>(
+    operation: SynchronousTransactionOperation<T>,
+  ): T {
+    if (Object.prototype.toString.call(operation) === "[object AsyncFunction]") {
+      throw new Error("EventStore transaction callback must be synchronous");
+    }
+    this.#database.exec("BEGIN IMMEDIATE;");
+    try {
+      const result = operation();
+      if (
+        ((typeof result === "object" && result !== null) ||
+          typeof result === "function") &&
+        typeof (result as unknown as PromiseLike<unknown>).then === "function"
+      ) {
+        void Promise.resolve(result as unknown as PromiseLike<unknown>).catch(
+          () => undefined,
+        );
+        throw new Error("EventStore transaction callback must be synchronous");
+      }
+      this.#database.exec("COMMIT;");
+      return result;
+    } catch (error) {
+      try {
+        this.#database.exec("ROLLBACK;");
+      } catch {
+        // Preserve the operation failure; rollback is best-effort if SQLite
+        // has already ended the transaction.
+      }
+      throw error;
+    }
+  }
+
   list(runId: string): StoredRunEvent[] {
     const rows = this.#database
       .prepare("SELECT * FROM events WHERE run_id = ? ORDER BY sequence")
@@ -105,6 +145,13 @@ export class EventStore {
       `)
       .all() as unknown as Array<{ run_id: string }>;
     return rows.map((row) => row.run_id);
+  }
+
+  deleteRun(runId: string): number {
+    const result = this.#database
+      .prepare("DELETE FROM events WHERE run_id = ?")
+      .run(runId);
+    return Number(result.changes);
   }
 
   close(): void {

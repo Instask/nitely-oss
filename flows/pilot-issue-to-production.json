@@ -1,0 +1,313 @@
+{
+  "apiVersion": "nitely.dev/v1alpha1",
+  "kind": "Flow",
+  "metadata": {
+    "name": "pilot-issue-to-production",
+    "workItemType": "dev.pr",
+    "inputs": [
+      { "id": "issue" },
+      { "id": "repo-notes" },
+      { "id": "release-runbook" }
+    ]
+  },
+  "spec": {
+    "maxAttempts": 2,
+    "stages": [
+      {
+        "id": "draft-spec",
+        "type": "agent",
+        "runtime": "codex",
+        "prompt": "Turn the issue and repository notes into a structured specification. Capture acceptance criteria, non-goals, risks, and open questions. Do not implement product code.",
+        "inputs": ["issue", "repo-notes"],
+        "outputs": [
+          {
+            "id": "spec",
+            "name": "Approved specification candidate",
+            "type": "specification.document",
+            "description": "Structured feature specification with acceptance criteria, non-goals, risks, and open questions.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      },
+      {
+        "id": "approve-spec",
+        "type": "approval",
+        "prompt": "Approve the generated specification before technical design starts.",
+        "inputs": ["spec"],
+        "outputs": []
+      },
+      {
+        "id": "draft-tech-design",
+        "type": "agent",
+        "runtime": "codex",
+        "prompt": "Create a repository-grounded technical design for the approved specification. Cover implementation steps, test strategy, release impact, and open technical risks. Do not implement product code.",
+        "inputs": ["spec", "repo-notes"],
+        "context": { "fullReadInputs": ["spec"] },
+        "outputs": [
+          {
+            "id": "tech-design",
+            "name": "Technical design",
+            "type": "technical-design.document",
+            "description": "Repository-grounded technical design covering implementation, verification, release, and operational risks.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      },
+      {
+        "id": "approve-tech-design",
+        "type": "approval",
+        "prompt": "Approve the technical design before task planning and implementation start.",
+        "inputs": ["tech-design"],
+        "outputs": []
+      },
+      {
+        "id": "plan-tasks",
+        "type": "agent",
+        "runtime": "codex",
+        "prompt": "Decompose the approved specification and technical design into an ordered task-plan.json with at most 12 tasks. Write an artifact.json manifest declaring task-plan.json as the task-plan output. Use stable task ids, dependencies, paths when known, and pending/completed status. Set max_iterations to 24: 12 initial task iterations plus 12 shared rework iterations.",
+        "inputs": ["spec", "tech-design"],
+        "context": { "fullReadInputs": ["spec", "tech-design"] },
+        "outputs": [
+          {
+            "id": "task-plan",
+            "name": "Task plan",
+            "type": "task-plan",
+            "description": "Ordered task-plan.json with task ids, titles, dependency/completion state, and optional max_iterations.",
+            "mediaType": "application/json"
+          }
+        ]
+      },
+      {
+        "id": "implement",
+        "type": "agent",
+        "runtime": "codex",
+        "maxAttempts": 24,
+        "prompt": "Implement only the current pending task. Keep the diff scoped, follow repository conventions, update tests for changed behavior, write a concise pull request title, and emit conformance evidence for completed requirements.",
+        "inputs": ["spec", "tech-design", "task-plan"],
+        "outputs": [
+          {
+            "id": "implementation",
+            "name": "Implementation summary",
+            "type": "implementation.summary",
+            "description": "Markdown summary of code changes, affected files, and important implementation decisions.",
+            "mediaType": "text/markdown"
+          },
+          {
+            "id": "pr-title",
+            "name": "Pull request title",
+            "type": "change-request.title",
+            "description": "One-line title to use when publishing or updating the pull request.",
+            "mediaType": "text/plain"
+          },
+          {
+            "id": "conformance-report",
+            "name": "Conformance report",
+            "type": "conformance.report",
+            "description": "Requirement-to-evidence report showing how the implementation satisfies the approved spec.",
+            "mediaType": "application/vnd.nitely.conformance+json",
+            "schema": {
+              "type": "object",
+              "required": ["items"],
+              "properties": {
+                "version": { "type": "number" },
+                "summary": { "type": "string" },
+                "mode": { "type": "string" },
+                "items": { "type": "array" },
+                "scopeDrift": { "type": "array" }
+              }
+            }
+          }
+        ],
+        "taskPlan": {
+          "input": "task-plan",
+          "role": "execute-current",
+          "max_iterations": 24,
+          "max_tasks": 12
+        }
+      },
+      {
+        "id": "verify",
+        "type": "command",
+        "command": "pnpm exec vitest run && pnpm run check",
+        "timeoutMs": 600000,
+        "maxAttempts": 24,
+        "inputs": ["task-plan", "implementation"],
+        "outputs": [
+          {
+            "id": "verification-report",
+            "name": "Verification report",
+            "type": "verification.report",
+            "description": "Command output summary listing tests, checks, failures, and any verification caveats.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      },
+      {
+        "id": "spec-review",
+        "type": "gate",
+        "mode": "review",
+        "runtime": "codex",
+        "maxAttempts": 24,
+        "prompt": "Review the current task implementation and verification evidence against the approved specification. Write `Review verdict: pass` only when the task satisfies the specification with no blocking finding. Write `Review verdict: fail` for any unmet requirement, unsupported scope change, or blocking finding.",
+        "inputs": ["spec", "task-plan", "implementation", "verification-report"],
+        "outputs": [
+          {
+            "id": "spec-review",
+            "name": "Specification review",
+            "type": "review.spec",
+            "description": "Per-task review verdict confirming implementation and verification evidence satisfy the approved specification.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      },
+      {
+        "id": "quality-review",
+        "type": "gate",
+        "mode": "review",
+        "runtime": "codex",
+        "maxAttempts": 24,
+        "prompt": "Review the current task for correctness, tests, maintainability, security-sensitive handling, and blocking P0/P1 findings. Write `Review verdict: pass` only when the specification review and this quality review both pass. Write `Review verdict: fail` for any blocking finding.",
+        "inputs": ["task-plan", "implementation", "verification-report", "spec-review"],
+        "outputs": [
+          {
+            "id": "quality-review",
+            "name": "Quality review",
+            "type": "review.quality",
+            "description": "Per-task quality verdict covering correctness, tests, maintainability, and blocking findings.",
+            "mediaType": "text/markdown"
+          }
+        ],
+        "taskPlan": {
+          "input": "task-plan",
+          "role": "verify-advance",
+          "max_iterations": 24,
+          "max_tasks": 12
+        }
+      },
+      {
+        "id": "final-review",
+        "type": "gate",
+        "mode": "review",
+        "runtime": "codex",
+        "maxAttempts": 24,
+        "prompt": "Perform a holistic review after every planned task has passed specification and quality review. Write `Review verdict: pass` only when the approved design, requirement conformance, and completed task plan are ready for draft pull request publication. Write `Review verdict: fail` for any blocking finding.",
+        "inputs": ["spec", "tech-design", "task-plan", "conformance-report", "quality-review"],
+        "outputs": [
+          {
+            "id": "final-review",
+            "name": "Final review",
+            "type": "review.final",
+            "description": "Holistic final verdict confirming the completed task plan is ready for draft pull request publication.",
+            "mediaType": "text/markdown"
+          }
+        ],
+        "taskPlan": {
+          "input": "task-plan",
+          "role": "final",
+          "max_tasks": 12
+        }
+      },
+      {
+        "id": "publish",
+        "type": "publish-change",
+        "provider": "github-cli",
+        "inputs": ["implementation", "pr-title", "conformance-report", "verification-report", "final-review"],
+        "outputs": [
+          {
+            "id": "change-request",
+            "name": "Change request result",
+            "type": "change-request.result",
+            "description": "Published or updated pull request metadata, including provider, URL, branch, and status.",
+            "mediaType": "text/markdown"
+          }
+        ],
+        "conformance": {
+          "mode": "advisory",
+          "report": "conformance-report"
+        }
+      },
+      {
+        "id": "release-readiness-review",
+        "type": "gate",
+        "mode": "review",
+        "runtime": "codex",
+        "prompt": "Review the draft pull request and release runbook for production readiness. Write `Review verdict: pass` only when verification, final-review evidence, rollback expectations, and production smoke checks are ready for release approval. Write `Review verdict: fail` for any blocking finding.",
+        "inputs": ["release-runbook", "change-request", "final-review"],
+        "outputs": [
+          {
+            "id": "release-readiness-review",
+            "name": "Release readiness review",
+            "type": "review.release-readiness",
+            "description": "Release-candidate verdict covering the draft pull request, runbook, evidence, rollback, and smoke-check readiness.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      },
+      {
+        "id": "approve-release",
+        "type": "approval",
+        "prompt": "Approve this release candidate and runbook before the production adapter runs.",
+        "inputs": ["release-runbook", "change-request", "release-readiness-review"],
+        "outputs": []
+      },
+      {
+        "id": "release",
+        "type": "command",
+        "command": "./scripts/nitely/release-production",
+        "timeoutMs": 1800000,
+        "maxAttempts": 1,
+        "inputs": ["release-runbook", "change-request", "release-readiness-review"],
+        "outputs": [
+          {
+            "id": "release-report",
+            "name": "Release report",
+            "type": "release.report",
+            "description": "Atomic release adapter report covering merge, rollback baseline, deployment, outcome, and rollback when required.",
+            "mediaType": "text/markdown"
+          },
+          {
+            "id": "smoke-report",
+            "name": "Smoke report",
+            "type": "smoke.report",
+            "description": "Production smoke-check evidence emitted by the repository-owned release adapter.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      },
+      {
+        "id": "post-release-review",
+        "type": "gate",
+        "mode": "review",
+        "runtime": "codex",
+        "prompt": "Review the atomic release and production smoke evidence against the approved runbook. Write `Review verdict: pass` only when the release and smoke evidence satisfy the runbook with no blocking follow-up. Write `Review verdict: fail` for any release failure, unresolved rollback, smoke-check gap, or blocking follow-up.",
+        "inputs": ["release-runbook", "change-request", "release-report", "smoke-report"],
+        "outputs": [
+          {
+            "id": "post-release-review",
+            "name": "Post-release review",
+            "type": "review.post-release",
+            "description": "Post-release verdict reconciling release and smoke evidence with the approved runbook.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      },
+      {
+        "id": "reflect",
+        "type": "agent",
+        "runtime": "codex",
+        "alwaysRun": true,
+        "prompt": "Reflect on the complete issue-to-production run. Preserve actionable follow-ups, duplicates, issue closeout, and improvements to specifications, implementation, review, release, rollback, smoke checks, and observability. Write a clean result when no action remains.",
+        "inputs": ["issue", "spec", "tech-design", "task-plan", "change-request", "release-report", "smoke-report", "post-release-review"],
+        "outputs": [
+          {
+            "id": "reflection",
+            "name": "Reflection",
+            "type": "workflow.reflection",
+            "description": "Post-run workflow reflection listing follow-up issues, duplicates, observations, or a clean result.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      }
+    ]
+  }
+}

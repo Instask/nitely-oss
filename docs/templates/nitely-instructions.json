@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "instructions": [
+    {
+      "id": "implementation",
+      "title": "Implementation standards",
+      "appliesTo": "agent",
+      "include": ["src/**"],
+      "exclude": ["**/*.test.ts"],
+      "text": "Follow existing module boundaries, add focused tests for behavior changes, and keep unrelated refactors out of the change."
+    },
+    {
+      "id": "review",
+      "title": "Review standards",
+      "appliesTo": "review",
+      "include": ["**/*"],
+      "text": "Check correctness, tests, security-sensitive handling, and whether evidence is enough for a human reviewer."
+    }
+  ]
+}

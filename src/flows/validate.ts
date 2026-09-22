@@ -2,11 +2,17 @@ import { FlowValidationError, parseFlowDocument } from "../flow/load.js";
 import { flowWorkItemType } from "../flow/schema.js";
 import { assertWorkItemTypeAllowed } from "../work-items/governance.js";
 import { WebInputError } from "../web/errors.js";
+import {
+  summarizeFlowArtifactGraph,
+  type FlowArtifactGraphView,
+} from "./artifact-graph.js";
+import { lintFlowProduction } from "./lint.js";
 
 export interface FlowValidationReport {
   valid: boolean;
   errors: string[];
   warnings: string[];
+  artifactGraph?: FlowArtifactGraphView;
 }
 
 function outputIdOf(output: unknown): string | undefined {
@@ -78,18 +84,20 @@ export async function validateFlowDocument(
     loaded = parseFlowDocument(content, {
       externalInputs: inferExternalInputs(content),
     });
+    warnings.push(...lintFlowProduction(loaded.flow));
   } catch (error) {
     if (error instanceof FlowValidationError) {
       return { valid: false, errors: error.errors, warnings };
     }
     throw error;
   }
+  const artifactGraph = summarizeFlowArtifactGraph(loaded.flow, loaded.graph);
 
   try {
     await assertWorkItemTypeAllowed({
       repoPath,
       workItemType: flowWorkItemType(loaded.flow),
-      flow: loaded.flow,
+      loaded,
     });
   } catch (error) {
     if (error instanceof WebInputError) {
@@ -99,5 +107,5 @@ export async function validateFlowDocument(
     }
   }
 
-  return { valid: errors.length === 0, errors, warnings };
+  return { valid: errors.length === 0, errors, warnings, artifactGraph };
 }

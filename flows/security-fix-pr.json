@@ -1,0 +1,68 @@
+{
+  "apiVersion": "nitely.dev/v1alpha1",
+  "kind": "Flow",
+  "metadata": {
+    "name": "security-fix-pr",
+    "workItemType": "dev.pr",
+    "inputs": [{ "id": "finding" }, { "id": "repo-notes" }]
+  },
+  "spec": {
+    "maxAttempts": 2,
+    "stages": [
+      {
+        "id": "triage",
+        "type": "gate",
+        "mode": "security",
+        "inputs": ["finding"],
+        "outputs": [
+          {
+            "id": "security-assessment",
+            "type": "security.assessment",
+            "description": "Deterministic classification of the security finding before code changes."
+          }
+        ]
+      },
+      {
+        "id": "fix",
+        "type": "agent",
+        "runtime": "codex",
+        "prompt": "Fix only the supported security finding described by the finding and security-assessment artifacts. Keep the change minimal, preserve behavior, add or update regression tests that prove the vulnerability is fixed, and write a concise pr-title artifact. Do not broaden scope beyond the assessed class and affected files without explaining the assumption in the implementation artifact.",
+        "inputs": ["finding", "repo-notes", "security-assessment"],
+        "outputs": ["implementation", "pr-title"]
+      },
+      {
+        "id": "verify",
+        "type": "command",
+        "command": "pnpm exec vitest run && pnpm run check",
+        "timeoutMs": 600000,
+        "inputs": ["security-assessment", "implementation"],
+        "outputs": ["verification-report"]
+      },
+      {
+        "id": "review",
+        "type": "gate",
+        "mode": "review",
+        "runtime": "codex",
+        "prompt": "Review the security fix against the finding, security assessment, implementation, and verification report. Check that the vulnerability class is supported, the fix is minimal, affected files match the assessment or the implementation explains deviations, regression tests or explicit verification evidence prove the fix, and no new secret handling or input-validation risk was introduced. Write `Review verdict: pass` only when there are no P0/P1/blocking findings.",
+        "inputs": ["finding", "security-assessment", "implementation", "verification-report"],
+        "outputs": ["review"]
+      },
+      {
+        "id": "publish",
+        "type": "publish-change",
+        "provider": "github-cli",
+        "inputs": ["security-assessment", "implementation", "verification-report", "review", "pr-title"],
+        "outputs": ["change-request"]
+      },
+      {
+        "id": "reflect",
+        "type": "agent",
+        "runtime": "codex",
+        "alwaysRun": true,
+        "prompt": "Reflect on this security-fix run. Record supported class, unsupported reason if blocked, affected files, verification evidence, review result, assumptions, and follow-up issues for unsupported classes or missing tooling.",
+        "inputs": ["finding", "security-assessment", "implementation", "verification-report", "review", "change-request"],
+        "outputs": ["reflection"]
+      }
+    ]
+  }
+}

@@ -1,0 +1,481 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/nitely-prod-web-systemd-install [options]
+
+Install a user-systemd unit for the Nitely production Web server.
+
+Options:
+  --remote HOST          SSH target. Default: jerry@100.96.111.79
+  --prod-dir PATH       Production checkout. Default: /home/jerry/nitely
+  --port NUMBER         Web port. Default: 4173
+  --host HOST           Web bind host. Default: 127.0.0.1
+  --trusted-proxy       Declare an external trusted TLS reverse-proxy boundary.
+  --node-bin PATH       Production Node bin directory. Default: /home/jerry/.nvm/versions/node/v24.17.0/bin
+  --restart-script PATH Restart helper wrapper. Default: /home/jerry/bin/nitely-prod-web-restart
+  --unit-name NAME      User-systemd unit name. Default: nitely-web
+  --replace-existing    Back up and replace an existing unit after security review.
+  --no-start            Install the unit and wrapper without restarting it.
+  --print-unit          Print the unit that would be installed, then exit.
+  -h, --help            Show this help.
+
+Environment variables with the same names are also supported:
+  NITELY_DEPLOY_REMOTE, NITELY_PROD_DIR, NITELY_PROD_WEB_PORT,
+  NITELY_PROD_WEB_HOST, NITELY_PROD_WEB_TRUSTED_PROXY,
+  NITELY_PROD_NODE_BIN, NITELY_PROD_RESTART, NITELY_PROD_WEB_UNIT
+USAGE
+}
+
+remote="${NITELY_DEPLOY_REMOTE:-jerry@100.96.111.79}"
+prod_dir="${NITELY_PROD_DIR:-/home/jerry/nitely}"
+port="${NITELY_PROD_WEB_PORT:-4173}"
+host="${NITELY_PROD_WEB_HOST:-127.0.0.1}"
+trusted_proxy="${NITELY_PROD_WEB_TRUSTED_PROXY:-no}"
+node_bin="${NITELY_PROD_NODE_BIN:-/home/jerry/.nvm/versions/node/v24.17.0/bin}"
+restart_script="${NITELY_PROD_RESTART:-/home/jerry/bin/nitely-prod-web-restart}"
+unit_name="${NITELY_PROD_WEB_UNIT:-nitely-web}"
+start_after_install="yes"
+print_unit="no"
+replace_existing="no"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --remote)
+      remote="${2:?--remote requires a value}"
+      shift 2
+      ;;
+    --prod-dir)
+      prod_dir="${2:?--prod-dir requires a value}"
+      shift 2
+      ;;
+    --port)
+      port="${2:?--port requires a value}"
+      shift 2
+      ;;
+    --host)
+      host="${2:?--host requires a value}"
+      shift 2
+      ;;
+    --trusted-proxy)
+      trusted_proxy="yes"
+      shift
+      ;;
+    --node-bin)
+      node_bin="${2:?--node-bin requires a value}"
+      shift 2
+      ;;
+    --restart-script)
+      restart_script="${2:?--restart-script requires a value}"
+      shift 2
+      ;;
+    --unit-name)
+      unit_name="${2:?--unit-name requires a value}"
+      shift 2
+      ;;
+    --replace-existing)
+      replace_existing="yes"
+      shift
+      ;;
+    --no-start)
+      start_after_install="no"
+      shift
+      ;;
+    --print-unit)
+      print_unit="yes"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'unknown option: %s\n\n' "$1" >&2
+      usage >&2
+      exit 64
+      ;;
+  esac
+done
+
+trusted_proxy_normalized="$(printf '%s' "$trusted_proxy" | tr '[:upper:]' '[:lower:]')"
+case "$trusted_proxy_normalized" in
+  yes|true|1)
+    trusted_proxy="yes"
+    ;;
+  no|false|0|'')
+    trusted_proxy="no"
+    ;;
+  *)
+    printf 'invalid trusted-proxy setting: %s; expected true or false\n' "$trusted_proxy" >&2
+    exit 64
+    ;;
+esac
+
+is_loopback_host() {
+  local value first second third fourth extra octet
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$value" == \[* || "$value" == *\] ]]; then
+    if [[ "$value" != \[*\] ]]; then
+      return 1
+    fi
+    value="${value:1:${#value}-2}"
+  fi
+  case "$value" in
+    localhost|localhost.|::1|0:0:0:0:0:0:0:1)
+      return 0
+      ;;
+  esac
+  if [[ "$value" =~ ^0(:0){0,5}::1$ ]]; then
+    return 0
+  fi
+  IFS=. read -r first second third fourth extra <<< "$value"
+  if [[ "$first" != "127" || -n "${extra:-}" ]]; then
+    return 1
+  fi
+  for octet in "$second" "$third" "$fourth"; do
+    if [[ ! "$octet" =~ ^(0|[1-9][0-9]{0,2})$ ]] || (( 10#$octet > 255 )); then
+      return 1
+    fi
+  done
+}
+
+if ! is_loopback_host "$host" && [[ "$trusted_proxy" != "yes" ]]; then
+  printf 'non-loopback --host %s requires --trusted-proxy\n' "$host" >&2
+  exit 64
+fi
+
+case "$port" in
+  ''|*[!0-9]*)
+    printf 'invalid --port %s; expected a positive integer\n' "$port" >&2
+    exit 64
+    ;;
+  *)
+    if [[ "$port" -lt 1 || "$port" -gt 65535 ]]; then
+      printf 'invalid --port %s; expected 1-65535\n' "$port" >&2
+      exit 64
+    fi
+    ;;
+esac
+
+unit_name="${unit_name%.service}"
+unit_file="${unit_name}.service"
+
+if [[ -z "$unit_name" ]]; then
+  printf 'invalid --unit-name; expected a non-empty unit name\n' >&2
+  exit 64
+fi
+
+render_unit() {
+  cat <<UNIT
+# X-Nitely-Managed-Unit: production-web-v2
+[Unit]
+Description=Nitely production Web
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${prod_dir}
+Environment=NODE_ENV=production
+Environment=NITELY_WEB_AUTH=required
+Environment=PATH=${node_bin}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+UNIT
+  if [[ "$trusted_proxy" == "yes" ]]; then
+    cat <<'UNIT'
+Environment=NITELY_WEB_TRUSTED_PROXY=true
+Environment=NITELY_WEB_SECURE_COOKIE=true
+UNIT
+  fi
+  cat <<UNIT
+ExecStartPre=/usr/bin/mkdir -p ${prod_dir}/.nitely
+ExecStart=${node_bin}/node ${prod_dir}/dist/index.js web --home ${prod_dir} --host ${host} --port ${port} --auth required
+Restart=on-failure
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=20
+StandardOutput=append:${prod_dir}/.nitely/web.log
+StandardError=append:${prod_dir}/.nitely/web.log
+
+[Install]
+WantedBy=default.target
+UNIT
+}
+
+if [[ "$print_unit" == "yes" ]]; then
+  render_unit
+  exit 0
+fi
+
+ssh "$remote" bash -s -- "$prod_dir" "$port" "$host" "$trusted_proxy" "$node_bin" "$restart_script" "$unit_name" "$start_after_install" "$replace_existing" <<'REMOTE_SCRIPT'
+set -euo pipefail
+
+prod_dir="$1"
+port="$2"
+host="$3"
+trusted_proxy="$4"
+node_bin="$5"
+restart_script="$6"
+unit_name="${7%.service}"
+start_after_install="$8"
+replace_existing="$9"
+unit_file="${unit_name}.service"
+
+if [[ ! -e "$prod_dir/.git" ]]; then
+  printf 'production checkout is not a git worktree: %s\n' "$prod_dir" >&2
+  exit 66
+fi
+
+if [[ ! -x "$node_bin/node" ]]; then
+  printf 'production node is missing or not executable: %s/node\n' "$node_bin" >&2
+  exit 66
+fi
+
+if ! command -v systemctl >/dev/null 2>&1; then
+  printf 'systemctl is not available on the remote host\n' >&2
+  exit 69
+fi
+
+if ! systemctl --user show-environment >/dev/null 2>&1; then
+  printf 'user systemd manager is not available for this SSH session\n' >&2
+  exit 69
+fi
+
+systemd_user_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+unit_path="$systemd_user_dir/$unit_file"
+mkdir -p "$systemd_user_dir" "$prod_dir/.nitely" "$(dirname "$restart_script")"
+effective_fragment=""
+effective_dropins=""
+external_effective_dropins="no"
+if [[ -e "$unit_path" || -L "$unit_path" ]]; then
+  systemctl --user daemon-reload
+  effective_fragment="$(
+    systemctl --user show "$unit_file" --property=FragmentPath --value 2>/dev/null || true
+  )"
+  effective_dropins="$(
+    systemctl --user show "$unit_file" --property=DropInPaths --value 2>/dev/null || true
+  )"
+  for dropin in $effective_dropins; do
+    case "$dropin" in
+      "${unit_path}.d/"*)
+        ;;
+      *)
+        external_effective_dropins="yes"
+        ;;
+    esac
+  done
+fi
+
+is_loopback_host() {
+  local value first second third fourth extra octet
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$value" == \[* || "$value" == *\] ]]; then
+    if [[ "$value" != \[*\] ]]; then
+      return 1
+    fi
+    value="${value:1:${#value}-2}"
+  fi
+  case "$value" in
+    localhost|localhost.|::1|0:0:0:0:0:0:0:1)
+      return 0
+      ;;
+  esac
+  if [[ "$value" =~ ^0(:0){0,5}::1$ ]]; then
+    return 0
+  fi
+  IFS=. read -r first second third fourth extra <<< "$value"
+  if [[ "$first" != "127" || -n "${extra:-}" ]]; then
+    return 1
+  fi
+  for octet in "$second" "$third" "$fourth"; do
+    if [[ ! "$octet" =~ ^(0|[1-9][0-9]{0,2})$ ]] || (( 10#$octet > 255 )); then
+      return 1
+    fi
+  done
+}
+
+last_environment_value() {
+  local name="$1"
+  sed -nE "s/^Environment=[\"']?${name}=([^\"'[:space:]]+)[\"']?$/\\1/p" "$unit_path" | tail -n 1
+}
+
+classify_existing_unit() {
+  local auth_value trusted_proxy_value secure_cookie_value exec_start_count exec_start host_value
+  if [[ ! -f "$unit_path" || -L "$unit_path" ]] ||
+     [[ "$effective_fragment" != "$unit_path" ]] ||
+     [[ -n "$effective_dropins" ]] ||
+     grep -Eq '^(EnvironmentFile|UnsetEnvironment)=' "$unit_path" ||
+     compgen -G "${unit_path}.d/*.conf" >/dev/null; then
+    printf 'unknown\n'
+    return
+  fi
+  exec_start_count="$(grep -Ec '^ExecStart=.+' "$unit_path" || true)"
+  if [[ "$exec_start_count" != "1" ]]; then
+    printf 'unknown\n'
+    return
+  fi
+  exec_start="$(grep -E '^ExecStart=.+' "$unit_path")"
+  if [[ ! "$exec_start" =~ ^ExecStart=[^[:space:]]*/node[[:space:]]+[^[:space:]]*/dist/index\.js[[:space:]]+web([[:space:]]|$) ]]; then
+    printf 'unknown\n'
+    return
+  fi
+  auth_value="$(last_environment_value NITELY_WEB_AUTH)"
+  if [[ "$auth_value" != "required" ]] &&
+     [[ ! "$exec_start" =~ --auth=required([[:space:]]|$) ]] &&
+     [[ ! "$exec_start" =~ --auth[[:space:]]+required([[:space:]]|$) ]]; then
+    printf 'insecure\n'
+    return
+  fi
+  host_value="$(printf '%s\n' "$exec_start" | sed -nE 's/.*--host(=|[[:space:]]+)([^[:space:]]+).*/\2/p')"
+  host_value="${host_value%\"}"
+  host_value="${host_value#\"}"
+  host_value="${host_value%\'}"
+  host_value="${host_value#\'}"
+  if [[ -z "$host_value" ]]; then
+    printf 'unknown\n'
+    return
+  fi
+  if is_loopback_host "$host_value"; then
+    printf 'secure\n'
+    return
+  fi
+  trusted_proxy_value="$(last_environment_value NITELY_WEB_TRUSTED_PROXY)"
+  secure_cookie_value="$(last_environment_value NITELY_WEB_SECURE_COOKIE)"
+  if [[ "$trusted_proxy_value" == "true" || "$trusted_proxy_value" == "1" ]] &&
+     [[ "$secure_cookie_value" == "true" || "$secure_cookie_value" == "1" ]]; then
+    printf 'secure\n'
+  else
+    printf 'insecure\n'
+  fi
+}
+
+render_unit() {
+cat <<UNIT
+# X-Nitely-Managed-Unit: production-web-v2
+[Unit]
+Description=Nitely production Web
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${prod_dir}
+Environment=NODE_ENV=production
+Environment=NITELY_WEB_AUTH=required
+Environment=PATH=${node_bin}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+UNIT
+if [[ "$trusted_proxy" == "yes" ]]; then
+cat <<'UNIT'
+Environment=NITELY_WEB_TRUSTED_PROXY=true
+Environment=NITELY_WEB_SECURE_COOKIE=true
+UNIT
+fi
+cat <<UNIT
+ExecStartPre=/usr/bin/mkdir -p ${prod_dir}/.nitely
+ExecStart=${node_bin}/node ${prod_dir}/dist/index.js web --home ${prod_dir} --host ${host} --port ${port} --auth required
+Restart=on-failure
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=20
+StandardOutput=append:${prod_dir}/.nitely/web.log
+StandardError=append:${prod_dir}/.nitely/web.log
+
+[Install]
+WantedBy=default.target
+UNIT
+}
+
+unit_action="installed"
+if [[ -e "$unit_path" || -L "$unit_path" ]]; then
+  existing_security="$(classify_existing_unit)"
+  if [[ "$existing_security" == "secure" && "$replace_existing" != "yes" ]]; then
+    unit_action="preserved"
+    printf 'preserving existing secure Nitely Web unit and its effective configuration: %s\n' "$unit_path" >&2
+  elif [[ "$replace_existing" != "yes" ]]; then
+    printf 'refusing to accept or overwrite insecure existing or unclassifiable Nitely Web unit: %s\n' "$unit_path" >&2
+    printf 'inspect the effective unit and rerun with --replace-existing to back it up and install the secure unit\n' >&2
+    exit 78
+  else
+    if [[ "$effective_fragment" != "$unit_path" ]]; then
+      printf 'refusing to replace an existing unit whose effective fragment is not the managed user unit: %s\n' "${effective_fragment:-unknown}" >&2
+      exit 78
+    fi
+    if [[ "$external_effective_dropins" == "yes" ]]; then
+      printf 'external effective drop-in paths are active; --replace-existing will not replace them\n' >&2
+      exit 78
+    fi
+    unit_action="replaced"
+    backup_suffix="$(date -u +%Y%m%dT%H%M%SZ).$$"
+    unit_backup="${unit_path}.bak.${backup_suffix}"
+    cp -a -- "$unit_path" "$unit_backup"
+    if [[ -d "${unit_path}.d" ]]; then
+      cp -a -- "${unit_path}.d" "${unit_path}.d.bak.${backup_suffix}"
+      rm -rf -- "${unit_path}.d"
+    fi
+    printf 'warning: backed up and replacing existing Nitely Web unit after explicit --replace-existing: %s\n' "$unit_backup" >&2
+  fi
+fi
+
+if [[ "$unit_action" != "preserved" ]]; then
+  unit_tmp="${unit_path}.tmp.$$"
+  trap 'rm -f -- "$unit_tmp"' EXIT
+  render_unit > "$unit_tmp"
+  chmod 600 "$unit_tmp"
+  mv -f -- "$unit_tmp" "$unit_path"
+  trap - EXIT
+fi
+
+cat > "$restart_script" <<WRAPPER
+#!/usr/bin/env bash
+set -euo pipefail
+systemctl --user restart "$unit_file"
+systemctl --user is-active --quiet "$unit_file"
+pid="\$(systemctl --user show "$unit_file" --property=MainPID --value || true)"
+printf 'nitely prod web restarted unit=%s pid=%s\\n' "$unit_file" "\${pid:-unknown}"
+WRAPPER
+chmod +x "$restart_script"
+
+systemctl --user daemon-reload
+systemctl --user enable "$unit_file"
+
+if [[ "$start_after_install" == "yes" && "$unit_action" == "preserved" ]]; then
+  systemctl --user restart "$unit_file"
+  systemctl --user is-active --quiet "$unit_file"
+elif [[ "$start_after_install" == "yes" ]]; then
+  systemctl --user stop "$unit_file" >/dev/null 2>&1 || true
+  old_pid=""
+  if [[ -f "$prod_dir/.nitely/web.pid" ]]; then
+    old_pid="$(cat "$prod_dir/.nitely/web.pid" || true)"
+  fi
+  port_pids="$(ss -ltnp 2>/dev/null | sed -n "s/.*:${port} .*pid=\([0-9]*\).*/\1/p" | sort -u || true)"
+  for pid in $old_pid $port_pids; do
+    if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid"
+    fi
+  done
+  for _ in $(seq 1 20); do
+    if ! ss -ltnp 2>/dev/null | grep -q ":${port} "; then
+      break
+    fi
+    sleep 0.25
+  done
+  systemctl --user restart "$unit_file"
+  systemctl --user is-active --quiet "$unit_file"
+fi
+
+main_pid="$(systemctl --user show "$unit_file" --property=MainPID --value || true)"
+
+printf 'Nitely production Web systemd unit installed\n'
+printf '  unit=%s\n' "$unit_file"
+printf '  unit_action=%s\n' "$unit_action"
+printf '  unit_path=%s\n' "$unit_path"
+printf '  restart_script=%s\n' "$restart_script"
+printf '  prod_dir=%s\n' "$prod_dir"
+if [[ "$unit_action" == "preserved" ]]; then
+  printf '  security=existing-secure-configuration-preserved\n'
+else
+  printf '  port=%s\n' "$port"
+  printf '  host=%s\n' "$host"
+  printf '  auth=required\n'
+  printf '  trusted_proxy=%s\n' "$trusted_proxy"
+fi
+printf '  main_pid=%s\n' "${main_pid:-unknown}"
+REMOTE_SCRIPT

@@ -1,10 +1,14 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { CONFORMANCE_REPORT_MEDIA_TYPE } from "../../src/conformance/report.js";
+import { createContextKnowledgeEntry } from "../../src/context-kg/store.js";
 import { EventStore } from "../../src/events/store.js";
+import { feedbackMemoryEntryId } from "../../src/review-feedback/memory.js";
 import { getRunDetail, listRuns } from "../../src/web/runs.js";
 
 async function writeJson(path: string, value: unknown) {
@@ -18,6 +22,10 @@ describe("web run projection", () => {
     return new EventStore(join(repoPath, ".nitely/events.db"));
   }
 
+  function recentIso(offsetMs = 0): string {
+    return new Date(Date.now() + offsetMs).toISOString();
+  }
+
   it("lists run metadata and projects evidence and logs for details", async () => {
     const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
     const runDirectory = join(repoPath, ".nitely/runs/run-1");
@@ -27,6 +35,11 @@ describe("web run projection", () => {
       flowName: "implement-spec-bootstrap",
       branchName: "nitely/run-1",
       ownerId: "usr_owner",
+      runEligibilityOverride: {
+        actor: "operator",
+        reason: "accepted dependency risk",
+        acceptedReasonCodes: ["dependency.incomplete:upstream"],
+      },
       worktreePath: `${runDirectory}/worktree`,
       completedStages: ["implement"],
       inputs: {
@@ -43,6 +56,38 @@ describe("web run projection", () => {
         commentUrl: "https://github.com/Instask/nitely/pull/15#issuecomment-100",
         authorLogin: "alice",
         action: "rework",
+        feedback: {
+          schemaVersion: 1,
+          id: "github:Instask/nitely#15:comment:100",
+          source: "github-pr-discussion",
+          action: "rework",
+          instruction: "fix auth",
+          raw: {
+            provider: "github",
+            kind: "issue-comment",
+            commentId: "100",
+            commentUrl: "https://github.com/Instask/nitely/pull/15#issuecomment-100",
+            body: "@nitely rework fix auth",
+            authorLogin: "alice",
+            createdAt: "2026-06-20T00:00:00Z",
+          },
+          route: {
+            target: "implementation",
+            confidence: "inferred",
+            reason: "Default route for code, tests, or localized PR review feedback.",
+            requiresOperatorApproval: false,
+          },
+          lineage: {
+            provider: "github",
+            owner: "Instask",
+            repository: "nitely",
+            prNumber: 15,
+            prUrl: "https://github.com/Instask/nitely/pull/15",
+            priorRunId: "run-prev",
+            ingestedAt: "2026-06-20T00:01:00.000Z",
+          },
+          memoryProposals: [],
+        },
         priorRunId: "run-prev",
       },
       changeRequestUrl: "https://github.com/example/repo/pull/1",
@@ -58,6 +103,53 @@ describe("web run projection", () => {
       "stderr text",
       "utf8",
     );
+    await writeJson(join(runDirectory, "reproducibility.json"), {
+      version: 1,
+      runId: "run-1",
+      generatedAt: "2026-07-08T00:00:00.000Z",
+      replayability: "diagnostic-only",
+      repo: { path: repoPath, headCommit: "abc123" },
+      flow: { name: "implement-spec-bootstrap" },
+      inputs: [],
+      context: {
+        policySha256: "sha256:policy",
+        constitution: { loaded: false, path: ".nitely/constitution.md" },
+        projectInstructions: {
+          loaded: false,
+          path: ".nitely/instructions.json",
+        },
+      },
+      runtimes: [],
+      commands: [],
+      skills: [],
+      providers: [],
+      environment: {
+        nodeVersion: "v24.0.0",
+        platform: "darwin",
+        arch: "arm64",
+      },
+      nonDeterministicFactors: [],
+      missingReplayPrerequisites: ["repo head commit could not be resolved"],
+    });
+    await writeJson(join(runDirectory, "toolchain-preflight.json"), {
+      version: 1,
+      runId: "run-1",
+      generatedAt: "2026-07-08T00:00:00.000Z",
+      repoPath,
+      worktreePath: `${runDirectory}/worktree`,
+      executionBackend: "local",
+      commandEnvironment: {
+        envSource: "execution-backend-env",
+        shellMode: "non-login sh -c",
+        pathEntryCount: 2,
+        repairs: [],
+      },
+      toolchainFiles: [{ path: "package.json", kind: "node-package" }],
+      executables: [
+        { name: "git", available: true, path: "/usr/bin/git" },
+        { name: "pnpm", available: false },
+      ],
+    });
 
     await expect(listRuns(repoPath)).resolves.toMatchObject([
       {
@@ -65,11 +157,22 @@ describe("web run projection", () => {
         status: "completed",
         branchName: "nitely/run-1",
         ownerId: "usr_owner",
+        runEligibilityOverride: {
+          actor: "operator",
+          reason: "accepted dependency risk",
+          acceptedReasonCodes: ["dependency.incomplete:upstream"],
+        },
         completedStages: ["implement"],
         trigger: {
           type: "github-pr-comment",
           commentId: "100",
           authorLogin: "alice",
+        },
+        reviewFeedback: {
+          id: "github:Instask/nitely#15:comment:100",
+          route: {
+            target: "implementation",
+          },
         },
       },
     ]);
@@ -79,6 +182,11 @@ describe("web run projection", () => {
       flowName: "implement-spec-bootstrap",
       branchName: "nitely/run-1",
       ownerId: "usr_owner",
+      runEligibilityOverride: {
+        actor: "operator",
+        reason: "accepted dependency risk",
+        acceptedReasonCodes: ["dependency.incomplete:upstream"],
+      },
       worktreePath: `${runDirectory}/worktree`,
       completedStages: ["implement"],
       trigger: {
@@ -86,7 +194,35 @@ describe("web run projection", () => {
         commentId: "100",
         commentUrl: "https://github.com/Instask/nitely/pull/15#issuecomment-100",
       },
+      reviewFeedback: {
+        action: "rework",
+        instruction: "fix auth",
+        route: {
+          target: "implementation",
+          confidence: "inferred",
+        },
+        lineage: {
+          priorRunId: "run-prev",
+        },
+      },
       evidence: "Evidence body",
+      reproducibility: {
+        replayability: "diagnostic-only",
+        manifestPath: join(runDirectory, "reproducibility.json"),
+        summary: "missing prerequisites prevent replay",
+        missingReplayPrerequisites: ["repo head commit could not be resolved"],
+        nonDeterministicFactors: [],
+      },
+      toolchainPreflight: {
+        runId: "run-1",
+        executionBackend: "local",
+        commandEnvironment: {
+          envSource: "execution-backend-env",
+          shellMode: "non-login sh -c",
+          repairs: [],
+        },
+        toolchainFiles: [{ path: "package.json", kind: "node-package" }],
+      },
       logs: [
         {
           stageId: "implement",
@@ -147,6 +283,100 @@ describe("web run projection", () => {
     });
   });
 
+  it("enriches review feedback memory proposals with context-kg entry state", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
+    const runDirectory = join(repoPath, ".nitely/runs/run-memory");
+    const feedbackId = "github:Instask/nitely#15:comment:memory";
+    await mkdir(runDirectory, { recursive: true });
+    await writeJson(join(runDirectory, "run.json"), {
+      runId: "run-memory",
+      flowName: "rework-pr-bootstrap",
+      completedStages: ["implement"],
+      inputs: {},
+      trigger: {
+        type: "github-pr-comment",
+        feedback: {
+          schemaVersion: 1,
+          id: feedbackId,
+          source: "github-pr-discussion",
+          action: "rework",
+          instruction: "memory: prefer local preflight",
+          raw: {
+            provider: "github",
+            kind: "issue-comment",
+            commentId: "memory",
+            commentUrl: "https://github.com/Instask/nitely/pull/15#issuecomment-memory",
+            body: "@nitely rework memory: prefer local preflight",
+            authorLogin: "alice",
+            createdAt: "2026-06-20T00:00:00Z",
+          },
+          route: {
+            target: "memory",
+            confidence: "explicit",
+            reason: "Instruction explicitly targets reusable project memory.",
+            requiresOperatorApproval: true,
+          },
+          lineage: {
+            provider: "github",
+            owner: "Instask",
+            repository: "nitely",
+            prNumber: 15,
+            prUrl: "https://github.com/Instask/nitely/pull/15",
+            ingestedAt: "2026-06-20T00:01:00.000Z",
+          },
+          memoryProposals: [
+            {
+              category: "feedback",
+              title: "Original reviewer guidance",
+              body: "Original body",
+              status: "proposed",
+              tags: ["review-feedback", "memory"],
+              keywords: ["memory"],
+              source: {
+                type: "review",
+                uri: "https://github.com/Instask/nitely/pull/15#issuecomment-memory",
+              },
+            },
+          ],
+        },
+      },
+    });
+    const entryId = feedbackMemoryEntryId({ id: feedbackId }, 0);
+    await createContextKnowledgeEntry(
+      repoPath,
+      {
+        category: "feedback",
+        title: "Approved reviewer guidance",
+        body: "Prefer local preflight checks before publishing.",
+        status: "approved",
+        tags: ["review-feedback"],
+        keywords: ["preflight"],
+        source: {
+          type: "review",
+          uri: "https://github.com/Instask/nitely/pull/15#issuecomment-memory",
+          runId: "run-memory",
+        },
+      },
+      { createId: () => entryId, now: () => "2026-06-20T00:02:00.000Z" },
+    );
+
+    await expect(getRunDetail(repoPath, "run-memory")).resolves.toMatchObject({
+      reviewFeedback: {
+        memoryProposals: [
+          {
+            contextKnowledgeEntryId: entryId,
+            contextKnowledgeStatus: "approved",
+            contextKnowledgeVersion: 1,
+            title: "Approved reviewer guidance",
+            body: "Prefer local preflight checks before publishing.",
+            tags: ["review-feedback"],
+            keywords: ["preflight"],
+          },
+        ],
+      },
+    });
+  });
+
   it("returns event-projected sessions with timelines, context manifest, and PR metadata", async () => {
     const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
     await mkdir(join(repoPath, ".nitely"), { recursive: true });
@@ -161,11 +391,16 @@ describe("web run projection", () => {
     store.append({
       runId: "run-events",
       type: "run.created",
-      createdAt: "2026-06-19T00:00:00.000Z",
+      createdAt: recentIso(),
       payload: {
         flowName: "implement-spec-bootstrap",
         flowPath: "flows/implement-spec-bootstrap.json",
         ownerId: "usr_events",
+        runEligibilityOverride: {
+          actor: "operator",
+          reason: "accepted dependency risk",
+          acceptedReasonCodes: ["dependency.incomplete:upstream"],
+        },
         branchName: "nitely/run-events",
         baseBranch: "main",
         inputs: {
@@ -186,7 +421,7 @@ describe("web run projection", () => {
     store.append({
       runId: "run-events",
       type: "workspace.created",
-      createdAt: "2026-06-19T00:00:01.000Z",
+      createdAt: recentIso(1_000),
       payload: { worktreePath: join(runDirectory, "worktree") },
     });
     store.append({
@@ -194,7 +429,7 @@ describe("web run projection", () => {
       type: "stage.started",
       stageId: "implement",
       attempt: 1,
-      createdAt: "2026-06-19T00:00:02.000Z",
+      createdAt: recentIso(2_000),
       payload: { attemptDirectory: join(runDirectory, "stages/implement/1") },
     });
     store.append({
@@ -202,11 +437,20 @@ describe("web run projection", () => {
       type: "command.completed",
       stageId: "implement",
       attempt: 1,
-      createdAt: "2026-06-19T00:00:03.000Z",
+      createdAt: recentIso(3_000),
       payload: {
         command: "pnpm test",
         stdout: "event stdout",
         stderr: "",
+        environmentRepairs: [
+          {
+            id: "python-to-python3-compatibility-shim",
+            description:
+              "Added a python compatibility shim that delegates to python3 because python was unavailable.",
+            scope: "outside-worktree",
+            path: "/tmp/nitely-python-compat-test",
+          },
+        ],
       },
     });
     store.append({
@@ -214,7 +458,7 @@ describe("web run projection", () => {
       type: "gate.completed",
       stageId: "implement",
       attempt: 1,
-      createdAt: "2026-06-19T00:00:04.000Z",
+      createdAt: recentIso(4_000),
       payload: {
         gate: {
           id: "implement-gate",
@@ -232,7 +476,7 @@ describe("web run projection", () => {
       runId: "run-events",
       type: "artifact.published",
       stageId: "implement",
-      createdAt: "2026-06-19T00:00:05.000Z",
+      createdAt: recentIso(5_000),
       payload: {
         artifact: {
           id: "implementation",
@@ -249,8 +493,13 @@ describe("web run projection", () => {
       expect.objectContaining({
         runId: "run-events",
         sessionId: "run-events",
-        status: "interrupted",
+        status: "running",
         ownerId: "usr_events",
+        runEligibilityOverride: {
+          actor: "operator",
+          reason: "accepted dependency risk",
+          acceptedReasonCodes: ["dependency.incomplete:upstream"],
+        },
         flowName: "implement-spec-bootstrap",
         flowPath: "flows/implement-spec-bootstrap.json",
         branchName: "nitely/run-events",
@@ -264,7 +513,12 @@ describe("web run projection", () => {
     await expect(getRunDetail(repoPath, "run-events")).resolves.toMatchObject({
       runId: "run-events",
       sessionId: "run-events",
-      status: "interrupted",
+      status: "running",
+      runEligibilityOverride: {
+        actor: "operator",
+        reason: "accepted dependency risk",
+        acceptedReasonCodes: ["dependency.incomplete:upstream"],
+      },
       contextManifest: [
         {
           id: "spec",
@@ -277,14 +531,15 @@ describe("web run projection", () => {
       timeline: [
         {
           stageId: "implement",
-          status: "interrupted",
+          status: "started",
+          state: "gate-checking",
           gate: {
             id: "implement-gate",
             status: "passed",
             mode: "deterministic",
           },
           attempts: 1,
-          startedAt: "2026-06-19T00:00:02.000Z",
+          startedAt: expect.any(String),
           attemptDirectory: join(runDirectory, "stages/implement/1"),
           outputPath: join(runDirectory, "stages/implement/1/output.md"),
           artifactManifestPath: join(
@@ -294,6 +549,20 @@ describe("web run projection", () => {
           stdoutPath: join(runDirectory, "stages/implement/1/stdout.log"),
           stderrPath: join(runDirectory, "stages/implement/1/stderr.log"),
           generatedArtifactPaths: ["stages/implement/1/implementation.md"],
+          details: {
+            fields: expect.arrayContaining([
+              expect.objectContaining({
+                label: "Environment repairs",
+                value: expect.stringContaining("Added a python compatibility shim"),
+              }),
+            ]),
+            events: expect.arrayContaining([
+              expect.objectContaining({
+                type: "command.completed",
+                summary: expect.stringContaining("repairs 1"),
+              }),
+            ]),
+          },
         },
       ],
       gates: [
@@ -312,6 +581,157 @@ describe("web run projection", () => {
           command: "pnpm test",
           stdout: "event stdout",
           stderr: "",
+        },
+      ],
+    });
+  });
+
+  it("returns declared workflow progress including pending future stages", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
+    const runDirectory = join(repoPath, ".nitely/runs/run-workflow-progress");
+    await mkdir(join(runDirectory, "stages/spec/1"), { recursive: true });
+    await mkdir(join(runDirectory, "stages/approve/1"), { recursive: true });
+    const store = await createEventStore(repoPath);
+    store.append({
+      runId: "run-workflow-progress",
+      type: "run.created",
+      createdAt: "2026-06-24T00:00:00.000Z",
+      payload: {
+        flowName: "issue-to-pr",
+        workflowStages: [
+          {
+            id: "spec",
+            type: "agent",
+            inputs: ["issue"],
+            outputs: ["spec"],
+            maxAttempts: 2,
+          },
+          {
+            id: "approve",
+            type: "approval",
+            inputs: ["spec"],
+            outputs: [],
+            maxAttempts: 1,
+          },
+          {
+            id: "implement",
+            type: "agent",
+            inputs: ["spec"],
+            outputs: ["change"],
+            maxAttempts: 3,
+          },
+        ],
+      },
+    });
+    store.append({
+      runId: "run-workflow-progress",
+      type: "stage.started",
+      stageId: "spec",
+      attempt: 1,
+      createdAt: "2026-06-24T00:00:01.000Z",
+      payload: {
+        type: "agent",
+        attemptDirectory: join(runDirectory, "stages/spec/1"),
+      },
+    });
+    store.append({
+      runId: "run-workflow-progress",
+      type: "artifact.published",
+      stageId: "spec",
+      createdAt: "2026-06-24T00:00:02.000Z",
+      payload: {
+        artifact: {
+          id: "spec",
+          producer: "spec",
+          path: "stages/spec/1/spec.md",
+          mediaType: "text/markdown",
+        },
+      },
+    });
+    store.append({
+      runId: "run-workflow-progress",
+      type: "stage.completed",
+      stageId: "spec",
+      attempt: 1,
+      createdAt: "2026-06-24T00:00:03.000Z",
+      payload: {},
+    });
+    store.append({
+      runId: "run-workflow-progress",
+      type: "stage.started",
+      stageId: "approve",
+      attempt: 1,
+      createdAt: "2026-06-24T00:00:04.000Z",
+      payload: {
+        type: "approval",
+        attemptDirectory: join(runDirectory, "stages/approve/1"),
+      },
+    });
+    store.append({
+      runId: "run-workflow-progress",
+      type: "approval.requested",
+      stageId: "approve",
+      attempt: 1,
+      createdAt: "2026-06-24T00:00:05.000Z",
+      payload: {
+        approvalId: "approve-1",
+        prompt: "Approve the generated spec.",
+      },
+    });
+    store.close();
+
+    await expect(getRunDetail(repoPath, "run-workflow-progress")).resolves.toMatchObject({
+      currentStage: "approve",
+      currentStageState: "awaiting-approval",
+      workflowProgress: [
+        {
+          stageId: "spec",
+          label: "spec",
+          stageType: "agent",
+          state: "completed",
+          status: "completed",
+          attempts: 1,
+          current: false,
+          maxAttempts: 2,
+          inputs: ["issue"],
+          outputs: ["spec"],
+          artifacts: [
+            {
+              id: "spec",
+              path: "stages/spec/1/spec.md",
+            },
+          ],
+        },
+        {
+          stageId: "approve",
+          label: "approve",
+          stageType: "approval",
+          state: "awaiting-approval",
+          status: "awaiting-approval",
+          attempts: 1,
+          current: true,
+          maxAttempts: 1,
+          inputs: ["spec"],
+          outputs: [],
+          approval: {
+            id: "approve-1",
+            status: "pending",
+            prompt: "Approve the generated spec.",
+          },
+          nextAction: "Approve or reject the pending gate.",
+        },
+        {
+          stageId: "implement",
+          label: "implement",
+          stageType: "agent",
+          state: "pending",
+          status: "pending",
+          attempts: 0,
+          current: false,
+          maxAttempts: 3,
+          inputs: ["spec"],
+          outputs: ["change"],
+          nextAction: "Waiting for upstream stages.",
         },
       ],
     });
@@ -501,7 +921,7 @@ describe("web run projection", () => {
           stageId: "review",
           status: "blocked",
           state: "blocked",
-          blocker,
+          blocker: expect.objectContaining(blocker),
           latestOutput: expect.stringContaining("usage limit"),
         }),
       ],
@@ -724,7 +1144,7 @@ describe("web run projection", () => {
       store.append({
         runId: "run-live",
         type: "run.created",
-        createdAt: "2026-06-20T00:00:00.000Z",
+        createdAt: recentIso(),
         payload: { flowName: "implement-spec-bootstrap" },
       });
       store.append({
@@ -732,7 +1152,7 @@ describe("web run projection", () => {
         type: "stage.started",
         stageId: "implement",
         attempt: 2,
-        createdAt: "2026-06-20T00:00:01.000Z",
+        createdAt: recentIso(1_000),
         payload: { attemptDirectory, type: "agent" },
       });
       store.close();
@@ -740,6 +1160,7 @@ describe("web run projection", () => {
       await expect(listRuns(repoPath)).resolves.toEqual([
         expect.objectContaining({
           runId: "run-live",
+          status: "running",
           currentStage: "implement",
           currentAttempt: 2,
           currentStageState: "running",
@@ -747,6 +1168,7 @@ describe("web run projection", () => {
         }),
       ]);
       await expect(getRunDetail(repoPath, "run-live")).resolves.toMatchObject({
+        status: "running",
         currentStage: "implement",
         currentAttempt: 2,
         currentStageState: "running",
@@ -767,6 +1189,550 @@ describe("web run projection", () => {
         process.env.NITELY_WEB_OUTPUT_TOKEN = previousToken;
       }
     }
+  });
+
+  it("projects a stale open attempt as interrupted for run summaries and details", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
+    const store = await createEventStore(repoPath);
+    store.append({
+      runId: "run-stale",
+      type: "run.created",
+      createdAt: "2000-01-01T00:00:00.000Z",
+      payload: { flowName: "implement-spec-bootstrap" },
+    });
+    store.append({
+      runId: "run-stale",
+      type: "stage.started",
+      stageId: "implement",
+      attempt: 1,
+      createdAt: "2000-01-01T00:00:01.000Z",
+      payload: { type: "agent" },
+    });
+    store.append({
+      runId: "run-stale",
+      type: "stage.context.usage",
+      stageId: "implement",
+      attempt: 1,
+      createdAt: "2000-01-01T00:00:02.000Z",
+      payload: {
+        promptBytes: 1200,
+        approxTokens: 300,
+        inputBytesInlined: 800,
+        inputBytesSaved: 5000,
+        inputCount: 2,
+      },
+    });
+    store.append({
+      runId: "run-stale",
+      type: "change.evidence.refresh_failed",
+      createdAt: recentIso(),
+      payload: { reason: "unrelated run-level activity" },
+    });
+    store.close();
+
+    await expect(listRuns(repoPath)).resolves.toEqual([
+      expect.objectContaining({
+        runId: "run-stale",
+        status: "interrupted",
+        currentStage: "implement",
+        currentAttempt: 1,
+        currentStageState: "interrupted",
+        recovery: expect.objectContaining({
+          needsRecovery: true,
+          state: "stale",
+          stale: true,
+          reason: "open attempt exceeded stale threshold",
+          stageId: "implement",
+          attempt: 1,
+          latestEventAt: "2000-01-01T00:00:02.000Z",
+        }),
+      }),
+    ]);
+    await expect(getRunDetail(repoPath, "run-stale")).resolves.toMatchObject({
+      runId: "run-stale",
+      status: "interrupted",
+      currentStage: "implement",
+      currentAttempt: 1,
+      currentStageState: "interrupted",
+      recovery: expect.objectContaining({
+        needsRecovery: true,
+        state: "stale",
+        stale: true,
+        reason: "open attempt exceeded stale threshold",
+        stageId: "implement",
+        attempt: 1,
+        latestEventAt: "2000-01-01T00:00:02.000Z",
+      }),
+      timeline: [
+        expect.objectContaining({
+          stageId: "implement",
+          state: "interrupted",
+          currentAttempt: 1,
+        }),
+      ],
+    });
+  });
+
+  it("replaces numeric output with a live process and artifact-readiness summary", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
+    const runDirectory = join(repoPath, ".nitely/runs/run-operator-live");
+    const attemptDirectory = join(runDirectory, "stages/test/1");
+    await mkdir(attemptDirectory, { recursive: true });
+    await writeFile(join(attemptDirectory, "stdout.log"), "stdout not captured\n79,337\n", "utf8");
+    const store = await createEventStore(repoPath);
+    store.append({
+      runId: "run-operator-live",
+      type: "run.created",
+      createdAt: recentIso(),
+      payload: {
+        flowName: "operator-live",
+        branchName: "nitely/run-operator-live",
+        workflowStages: [
+          {
+            id: "test",
+            type: "command",
+            command: "pnpm test --runInBand",
+            inputs: [],
+            outputs: ["junit", "coverage"],
+          },
+        ],
+      },
+    });
+    store.append({
+      runId: "run-operator-live",
+      type: "stage.started",
+      stageId: "test",
+      attempt: 1,
+      createdAt: recentIso(1_000),
+      payload: { type: "command", attemptDirectory },
+    });
+    store.append({
+      runId: "run-operator-live",
+      type: "stage.heartbeat",
+      stageId: "test",
+      attempt: 1,
+      createdAt: recentIso(2_000),
+      payload: { count: 1 },
+    });
+    store.append({
+      runId: "run-operator-live",
+      type: "artifact.published",
+      stageId: "test",
+      attempt: 1,
+      createdAt: recentIso(3_000),
+      payload: {
+        artifact: {
+          id: "junit",
+          producer: "test",
+          mediaType: "application/xml",
+          path: "stages/test/1/junit.xml",
+        },
+      },
+    });
+    store.close();
+
+    await expect(listRuns(repoPath)).resolves.toEqual([
+      expect.objectContaining({
+        runId: "run-operator-live",
+        status: "running",
+        statusSummary: expect.stringMatching(
+          /Running test attempt 1.*pnpm test --runInBand.*process active.*artifacts 1\/2 ready/i,
+        ),
+        latestOutputSummary: expect.not.stringMatching(/^79,337$/),
+        currentProcess: expect.objectContaining({
+          kind: "command",
+          command: "pnpm test --runInBand",
+          state: "running",
+          alive: true,
+        }),
+        currentArtifactReadiness: {
+          status: "partial",
+          declaredIds: ["junit", "coverage"],
+          readyIds: ["junit"],
+          missingIds: ["coverage"],
+        },
+      }),
+    ]);
+    await expect(getRunDetail(repoPath, "run-operator-live")).resolves.toMatchObject({
+      timeline: [
+        expect.objectContaining({
+          stageId: "test",
+          process: expect.objectContaining({
+            command: "pnpm test --runInBand",
+            state: "running",
+            alive: true,
+          }),
+          artifactReadiness: {
+            status: "partial",
+            declaredIds: ["junit", "coverage"],
+            readyIds: ["junit"],
+            missingIds: ["coverage"],
+          },
+        }),
+      ],
+    });
+  });
+
+  it("distinguishes pending, ready, and missing declared artifacts", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
+    const store = await createEventStore(repoPath);
+    const appendCreated = (runId: string, createdAt: string): void => {
+      store.append({
+        runId,
+        type: "run.created",
+        createdAt,
+        payload: {
+          flowName: "artifact-readiness",
+          workflowStages: [
+            {
+              id: "build",
+              type: "command",
+              command: "pnpm build",
+              inputs: [],
+              outputs: ["bundle"],
+            },
+          ],
+        },
+      });
+    };
+
+    appendCreated("run-artifact-pending", recentIso());
+    store.append({
+      runId: "run-artifact-pending",
+      type: "stage.ready",
+      stageId: "build",
+      createdAt: recentIso(1_000),
+      payload: { type: "command" },
+    });
+
+    for (const [runId, publishArtifact] of [
+      ["run-artifact-ready", true],
+      ["run-artifact-missing", false],
+    ] as const) {
+      appendCreated(runId, recentIso());
+      store.append({
+        runId,
+        type: "stage.started",
+        stageId: "build",
+        attempt: 1,
+        createdAt: recentIso(1_000),
+        payload: { type: "command" },
+      });
+      if (publishArtifact) {
+        store.append({
+          runId,
+          type: "artifact.published",
+          stageId: "build",
+          attempt: 1,
+          createdAt: recentIso(2_000),
+          payload: {
+            artifact: {
+              id: "bundle",
+              producer: "build",
+              mediaType: "application/octet-stream",
+              path: "stages/build/1/bundle.tgz",
+            },
+          },
+        });
+      }
+      store.append({
+        runId,
+        type: "stage.completed",
+        stageId: "build",
+        attempt: 1,
+        createdAt: recentIso(3_000),
+        payload: {},
+      });
+      store.append({
+        runId,
+        type: "run.completed",
+        createdAt: recentIso(4_000),
+        payload: {},
+      });
+    }
+    store.close();
+
+    for (const [runId, status, readyIds, missingIds] of [
+      ["run-artifact-pending", "pending", [], ["bundle"]],
+      ["run-artifact-ready", "ready", ["bundle"], []],
+      ["run-artifact-missing", "missing", [], ["bundle"]],
+    ] as const) {
+      await expect(getRunDetail(repoPath, runId)).resolves.toMatchObject({
+        currentArtifactReadiness: {
+          status,
+          declaredIds: ["bundle"],
+          readyIds,
+          missingIds,
+        },
+        timeline: [
+          expect.objectContaining({
+            stageId: "build",
+            artifactReadiness: {
+              status,
+              declaredIds: ["bundle"],
+              readyIds,
+              missingIds,
+            },
+          }),
+        ],
+      });
+    }
+  });
+
+  it("explains runtime fallback in the operator status summary", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
+    const store = await createEventStore(repoPath);
+    store.append({
+      runId: "run-fallback-summary",
+      type: "run.created",
+      createdAt: recentIso(),
+      payload: {
+        flowName: "fallback",
+        workflowStages: [
+          { id: "implement", type: "agent", inputs: [], outputs: ["implementation"] },
+        ],
+      },
+    });
+    store.append({
+      runId: "run-fallback-summary",
+      type: "stage.started",
+      stageId: "implement",
+      attempt: 1,
+      createdAt: recentIso(1_000),
+      payload: { type: "agent", runtime: "claude", runtimeCandidateIndex: 0, runtimeCandidateCount: 2 },
+    });
+    store.append({
+      runId: "run-fallback-summary",
+      type: "stage.runtime.fallback",
+      stageId: "implement",
+      attempt: 1,
+      createdAt: recentIso(2_000),
+      payload: {
+        failedRuntime: "claude",
+        nextRuntime: "codex",
+        blocker: { reason: "agent_usage_limit", message: "usage limit reached" },
+      },
+    });
+    store.append({
+      runId: "run-fallback-summary",
+      type: "stage.started",
+      stageId: "implement",
+      attempt: 2,
+      createdAt: recentIso(3_000),
+      payload: { type: "agent", runtime: "codex", runtimeCandidateIndex: 1, runtimeCandidateCount: 2 },
+    });
+    store.close();
+
+    await expect(listRuns(repoPath)).resolves.toEqual([
+      expect.objectContaining({
+        runId: "run-fallback-summary",
+        statusSummary: expect.stringMatching(
+          /Fell back from claude to codex.*usage limit reached.*Running implement attempt 2/i,
+        ),
+        currentProcess: expect.objectContaining({
+          kind: "agent",
+          runtime: "codex",
+          state: "running",
+          alive: true,
+        }),
+      }),
+    ]);
+  });
+
+  it("surfaces a persisted recovery patch for a stale interrupted attempt", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
+    const runDirectory = join(repoPath, ".nitely/runs/run-recovery-summary");
+    await writeJson(join(runDirectory, "recovery.json"), {
+      version: 1,
+      runId: "run-recovery-summary",
+      stageId: "implement",
+      attempt: 1,
+      capturedAt: "2026-07-14T00:00:30.000Z",
+      baseSha: "a".repeat(40),
+      headSha: "b".repeat(40),
+      status: "partial",
+      patchPath: "recovery.patch",
+      patchBytes: 33,
+      patchSha256: "c".repeat(64),
+      changedPaths: ["src/a.ts", "src/b.ts"],
+      untrackedPaths: ["src/b.ts"],
+      omitted: [{ path: "large.bin", reason: "file exceeds limit" }],
+    });
+    await writeFile(join(runDirectory, "recovery.patch"), "diff --git a/src/a.ts b/src/a.ts\n", "utf8");
+    const store = await createEventStore(repoPath);
+    store.append({
+      runId: "run-recovery-summary",
+      type: "run.created",
+      createdAt: "2000-01-01T00:00:00.000Z",
+      payload: {
+        flowName: "recovery",
+        workflowStages: [
+          { id: "implement", type: "agent", inputs: [], outputs: ["implementation"] },
+        ],
+      },
+    });
+    store.append({
+      runId: "run-recovery-summary",
+      type: "stage.started",
+      stageId: "implement",
+      attempt: 1,
+      createdAt: "2000-01-01T00:00:01.000Z",
+      payload: { type: "agent", runtime: "codex" },
+    });
+    store.close();
+
+    await expect(getRunDetail(repoPath, "run-recovery-summary")).resolves.toMatchObject({
+      status: "interrupted",
+      statusSummary: expect.stringMatching(
+        /Interrupted implement attempt 1.*recovery patch partial.*2 changed files/i,
+      ),
+      currentProcess: expect.objectContaining({
+        kind: "agent",
+        runtime: "codex",
+        state: "interrupted",
+        alive: false,
+      }),
+      recoveryArtifact: {
+        status: "partial",
+        path: "recovery.patch",
+        metadataPath: "recovery.json",
+        capturedAt: "2026-07-14T00:00:30.000Z",
+        baseSha: "a".repeat(40),
+        headSha: "b".repeat(40),
+        patchBytes: 33,
+        patchSha256: "c".repeat(64),
+        changedPaths: ["src/a.ts", "src/b.ts"],
+        untrackedPaths: ["src/b.ts"],
+        omittedCount: 1,
+      },
+    });
+  });
+
+  it("groups branch, commit, and PR in a published run summary", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
+    const store = await createEventStore(repoPath);
+    store.append({
+      runId: "run-published-summary",
+      type: "run.created",
+      createdAt: recentIso(),
+      payload: {
+        flowName: "publish",
+        branchName: "nitely/run-published-summary",
+        workflowStages: [
+          { id: "publish", type: "publish-change", inputs: [], outputs: [] },
+        ],
+      },
+    });
+    store.append({
+      runId: "run-published-summary",
+      type: "stage.started",
+      stageId: "publish",
+      attempt: 1,
+      createdAt: recentIso(1_000),
+      payload: { type: "publish-change" },
+    });
+    store.append({
+      runId: "run-published-summary",
+      type: "change.published",
+      stageId: "publish",
+      attempt: 1,
+      createdAt: recentIso(2_000),
+      payload: {
+        url: "https://github.com/Instask/nitely/pull/500",
+        branchName: "nitely/run-published-summary",
+        headCommit: "0123456789abcdef0123456789abcdef01234567",
+        changeRequest: {
+          provider: "github",
+          url: "https://github.com/Instask/nitely/pull/500",
+          number: 500,
+          owner: "Instask",
+          repository: "nitely",
+          baseBranch: "main",
+          headBranch: "nitely/run-published-summary",
+          draft: false,
+        },
+      },
+    });
+    store.append({
+      runId: "run-published-summary",
+      type: "stage.completed",
+      stageId: "publish",
+      attempt: 1,
+      createdAt: recentIso(3_000),
+      payload: {},
+    });
+    store.append({
+      runId: "run-published-summary",
+      type: "run.completed",
+      createdAt: recentIso(4_000),
+      payload: { changeRequestUrl: "https://github.com/Instask/nitely/pull/500" },
+    });
+    store.close();
+
+    await expect(listRuns(repoPath)).resolves.toEqual([
+      expect.objectContaining({
+        runId: "run-published-summary",
+        status: "completed",
+        statusSummary:
+          "Published PR #500 from nitely/run-published-summary at 0123456.",
+        publication: {
+          state: "published",
+          branchName: "nitely/run-published-summary",
+          headCommit: "0123456789abcdef0123456789abcdef01234567",
+          changeRequestUrl: "https://github.com/Instask/nitely/pull/500",
+          prNumber: 500,
+        },
+        currentProcess: expect.objectContaining({
+          kind: "publish-change",
+          state: "finished",
+          alive: false,
+        }),
+      }),
+    ]);
+  });
+
+  it("projects a stale open review gate attempt as interrupted", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
+    const store = await createEventStore(repoPath);
+    store.append({
+      runId: "run-stale-review",
+      type: "run.created",
+      createdAt: "2000-01-01T00:00:00.000Z",
+      payload: { flowName: "review-flow" },
+    });
+    store.append({
+      runId: "run-stale-review",
+      type: "stage.started",
+      stageId: "review",
+      attempt: 2,
+      createdAt: "2000-01-01T00:00:01.000Z",
+      payload: { type: "gate" },
+    });
+    store.close();
+
+    await expect(listRuns(repoPath)).resolves.toEqual([
+      expect.objectContaining({
+        runId: "run-stale-review",
+        status: "interrupted",
+        currentStage: "review",
+        currentAttempt: 2,
+        currentStageState: "interrupted",
+      }),
+    ]);
+    await expect(getRunDetail(repoPath, "run-stale-review")).resolves.toMatchObject({
+      runId: "run-stale-review",
+      status: "interrupted",
+      currentStage: "review",
+      currentAttempt: 2,
+      currentStageState: "interrupted",
+      timeline: [
+        expect.objectContaining({
+          stageId: "review",
+          state: "interrupted",
+          currentAttempt: 2,
+        }),
+      ],
+    });
   });
 
   it("exposes ready projected stages as pending current stage state", async () => {
@@ -873,13 +1839,93 @@ describe("web run projection", () => {
     });
   });
 
+  it("keeps the terminal workflow stage current when reflection finalizers run later", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
+    const store = await createEventStore(repoPath);
+    store.append({
+      runId: "run-finalizer-status",
+      type: "run.created",
+      createdAt: "2026-06-26T14:13:59.000Z",
+      payload: { flowName: "flow" },
+    });
+    store.append({
+      runId: "run-finalizer-status",
+      type: "stage.started",
+      stageId: "publish",
+      attempt: 1,
+      createdAt: "2026-06-26T14:14:00.000Z",
+      payload: { type: "agent" },
+    });
+    store.append({
+      runId: "run-finalizer-status",
+      type: "stage.failed",
+      stageId: "publish",
+      attempt: 1,
+      createdAt: "2026-06-26T14:14:01.000Z",
+      payload: { error: "gh pr create failed" },
+    });
+    store.append({
+      runId: "run-finalizer-status",
+      type: "run.failed",
+      createdAt: "2026-06-26T14:14:02.000Z",
+      payload: { error: "publish failed" },
+    });
+    store.append({
+      runId: "run-finalizer-status",
+      type: "stage.started",
+      stageId: "reflect",
+      attempt: 1,
+      createdAt: "2026-06-26T14:14:03.000Z",
+      payload: { type: "agent" },
+    });
+    store.append({
+      runId: "run-finalizer-status",
+      type: "stage.completed",
+      stageId: "reflect",
+      attempt: 1,
+      createdAt: "2026-06-26T14:14:04.000Z",
+      payload: {},
+    });
+    store.close();
+
+    await expect(listRuns(repoPath)).resolves.toEqual([
+      expect.objectContaining({
+        runId: "run-finalizer-status",
+        status: "failed",
+        currentStage: "publish",
+        currentAttempt: 1,
+        currentStageState: "failed",
+        finalizerStage: "reflect",
+        finalizerStageState: "completed",
+      }),
+    ]);
+    await expect(getRunDetail(repoPath, "run-finalizer-status")).resolves.toMatchObject({
+      status: "failed",
+      currentStage: "publish",
+      currentAttempt: 1,
+      currentStageState: "failed",
+      finalizerStage: "reflect",
+      finalizerStageState: "completed",
+      timeline: [
+        expect.objectContaining({
+          stageId: "publish",
+          state: "failed",
+        }),
+        expect.objectContaining({
+          stageId: "reflect",
+          state: "completed",
+        }),
+      ],
+    });
+  });
+
   it("projects gate stages as gate-checking while gate data is latest", async () => {
     const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
     const store = await createEventStore(repoPath);
     store.append({
       runId: "run-gate",
       type: "run.created",
-      createdAt: "2026-06-20T00:00:00.000Z",
+      createdAt: recentIso(),
       payload: { flowName: "flow" },
     });
     store.append({
@@ -887,7 +1933,7 @@ describe("web run projection", () => {
       type: "stage.started",
       stageId: "review-gate",
       attempt: 1,
-      createdAt: "2026-06-20T00:00:01.000Z",
+      createdAt: recentIso(1_000),
       payload: { type: "gate" },
     });
     store.append({
@@ -895,14 +1941,14 @@ describe("web run projection", () => {
       type: "gate.completed",
       stageId: "review-gate",
       attempt: 1,
-      createdAt: "2026-06-20T00:00:02.000Z",
+      createdAt: recentIso(2_000),
       payload: {
         gate: {
           id: "review-gate",
           stageId: "review-gate",
           mode: "review",
           status: "failed",
-          createdAt: "2026-06-20T00:00:02.000Z",
+          createdAt: recentIso(2_000),
         },
       },
     });
@@ -965,12 +2011,25 @@ describe("web run projection", () => {
           maxAttempts: 3,
           action,
           reason: `${action} requested`,
-          ...(action === "rework" ? { targetArtifact: "implementation" } : {}),
+          ...(action === "rework"
+            ? {
+                targetStage: "implement",
+                targetArtifact: "implementation",
+                reworkRequest: {
+                  targetStage: "implement",
+                  targetArtifact: "implementation",
+                  reason: "rework requested",
+                  sourceStage: "review",
+                  sourceAttempt: 1,
+                },
+              }
+            : {}),
         },
       });
       store.close();
 
-      await expect(getRunDetail(repoPath, `run-${action}`)).resolves.toMatchObject({
+      const detail = await getRunDetail(repoPath, `run-${action}`);
+      expect(detail).toMatchObject({
         currentStage: "implement",
         currentAttempt: 1,
         currentStageState: expectedState,
@@ -983,8 +2042,89 @@ describe("web run projection", () => {
           }),
         ],
       });
+      if (action === "rework") {
+        expect(detail.latestDecision).toMatchObject({
+          targetStage: "implement",
+          targetArtifact: "implementation",
+          reworkRequest: expect.objectContaining({
+            targetStage: "implement",
+          }),
+        });
+        expect(detail.timeline[0]?.details?.events).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "orchestrator.decision",
+              summary: expect.stringContaining("target stage implement"),
+            }),
+          ]),
+        );
+      }
     },
   );
+
+  it("summarizes review verdict routing in stage event timelines", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
+    const store = await createEventStore(repoPath);
+    store.append({
+      runId: "run-review-verdict",
+      type: "run.created",
+      createdAt: "2026-06-20T00:00:00.000Z",
+      payload: { flowName: "flow" },
+    });
+    store.append({
+      runId: "run-review-verdict",
+      type: "stage.started",
+      stageId: "review",
+      attempt: 1,
+      createdAt: "2026-06-20T00:00:01.000Z",
+      payload: { type: "gate" },
+    });
+    store.append({
+      runId: "run-review-verdict",
+      type: "gate.completed",
+      stageId: "review",
+      attempt: 1,
+      createdAt: "2026-06-20T00:00:02.000Z",
+      payload: {
+        gate: {
+          id: "review",
+          stageId: "review",
+          mode: "review",
+          status: "failed",
+          reason: "implementation misses behavior",
+          createdAt: "2026-06-20T00:00:02.000Z",
+          reviewOutput: {
+            id: "review",
+            path: "stages/review/1/review.md",
+            filename: "review.md",
+            mediaType: "text/markdown",
+            content: "Review verdict: needs_fix\n",
+            truncated: false,
+            verdict: {
+              verdict: "needs_fix",
+              targetStage: "implement",
+              targetArtifact: "implementation",
+            },
+          },
+        },
+      },
+    });
+    store.close();
+
+    const detail = await getRunDetail(repoPath, "run-review-verdict");
+    expect(detail.timeline[0]?.details?.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "gate.completed",
+          summary: expect.stringContaining("verdict needs_fix"),
+        }),
+        expect.objectContaining({
+          type: "gate.completed",
+          summary: expect.stringContaining("target stage implement"),
+        }),
+      ]),
+    );
+  });
 
   it("keeps persisted latest output visible after projected run completion", async () => {
     const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
@@ -1153,6 +2293,136 @@ describe("web run projection", () => {
     });
   });
 
+  it("ignores an unsafe Artifact registry and falls back to the context manifest", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
+    const runDirectory = join(repoPath, ".nitely/runs/run-unsafe-registry");
+    await writeJson(join(runDirectory, "run.json"), {
+      runId: "run-unsafe-registry",
+      status: "completed",
+      completedStages: ["implement"],
+      inputs: {},
+    });
+    await writeJson(join(runDirectory, "context-manifest.json"), {
+      version: 1,
+      runId: "run-unsafe-registry",
+      generatedAt: "2026-06-20T00:00:00.000Z",
+      entries: [{
+        id: "implementation",
+        kind: "generated-artifact",
+        connector: "generated",
+        sourceUri: "stages/implement/1/implementation.md",
+        mediaType: "text/markdown",
+        filename: "implementation.md",
+        runRelativePath: "stages/implement/1/implementation.md",
+        policy: { decision: "allowed" },
+      }],
+    });
+    const outsideMarker = "outside-registry-must-not-be-read";
+    const outsideRegistry = join(repoPath, "outside-artifacts.json");
+    await writeJson(outsideRegistry, {
+      runId: "run-unsafe-registry",
+      artifacts: [{
+        id: outsideMarker,
+        producer: "outside",
+        mediaType: "text/plain",
+      }],
+    });
+    await symlink(outsideRegistry, join(runDirectory, "artifacts.json"));
+
+    const detail = await getRunDetail(repoPath, "run-unsafe-registry");
+
+    expect(detail.artifacts).toEqual([
+      expect.objectContaining({
+        id: "implementation",
+        producer: "generated",
+        path: "stages/implement/1/implementation.md",
+      }),
+    ]);
+    expect(JSON.stringify(detail)).not.toContain(outsideMarker);
+  });
+
+  it("reconciles Artifact registry enrichment with canonical event metadata", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
+    const runDirectory = join(repoPath, ".nitely/runs/run-reconciled-artifacts");
+    await mkdir(runDirectory, { recursive: true });
+    await writeJson(join(runDirectory, "artifacts.json"), {
+      runId: "run-reconciled-artifacts",
+      artifacts: [
+        {
+          id: "implementation",
+          name: "Registry enrichment",
+          producer: "implement",
+          mediaType: "text/plain",
+          path: "stale/output.md",
+          sha256: "a".repeat(64),
+          size: 17,
+        },
+        {
+          id: "registry-only",
+          producer: "review",
+          mediaType: "application/json",
+        },
+      ],
+    });
+    const store = await createEventStore(repoPath);
+    store.append({
+      runId: "run-reconciled-artifacts",
+      type: "run.created",
+      payload: { flowName: "artifact-reconciliation", repoPath, inputs: {} },
+    });
+    store.append({
+      runId: "run-reconciled-artifacts",
+      type: "artifact.published",
+      stageId: "implement",
+      attempt: 1,
+      payload: {
+        artifact: {
+          id: "implementation",
+          producer: "implement",
+          mediaType: "text/markdown",
+          path: "stages/implement/1/output.md",
+          sha256: "b".repeat(64),
+        },
+      },
+    });
+    store.append({
+      runId: "run-reconciled-artifacts",
+      type: "artifact.published",
+      stageId: "publish",
+      attempt: 1,
+      payload: {
+        artifact: {
+          id: "event-only",
+          producer: "publish",
+          mediaType: "application/vnd.nitely.change+json",
+        },
+      },
+    });
+    store.close();
+
+    const detail = await getRunDetail(repoPath, "run-reconciled-artifacts");
+
+    expect(detail.artifacts).toEqual([
+      expect.objectContaining({
+        id: "implementation",
+        name: "Registry enrichment",
+        producer: "implement",
+        mediaType: "text/markdown",
+        path: "stages/implement/1/output.md",
+        sha256: "b".repeat(64),
+        size: 17,
+      }),
+      expect.objectContaining({
+        id: "registry-only",
+        producer: "review",
+      }),
+      expect.objectContaining({
+        id: "event-only",
+        producer: "publish",
+      }),
+    ]);
+  });
+
   it("returns durable artifact registry metadata in run details with redaction", async () => {
     const previousSecret = process.env.NITELY_ARTIFACT_SECRET_TOKEN;
     process.env.NITELY_ARTIFACT_SECRET_TOKEN = "artifact-secret-value";
@@ -1275,6 +2545,211 @@ describe("web run projection", () => {
     );
     expect(effect?.detail.changeRequestUrl).toBe(
       "https://github.com/example/repo/pull/7",
+    );
+  });
+
+  it("exposes conformance report findings in run details", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
+    const runDirectory = join(repoPath, ".nitely/runs/run-conformance");
+    const attemptDirectory = join(runDirectory, "stages/implement/1");
+    await mkdir(attemptDirectory, { recursive: true });
+    const reportContent = JSON.stringify({
+      version: 1,
+      summary: "FR covered; SC requires manual verification.",
+      items: [
+        {
+          id: "FR-001",
+          status: "satisfied",
+          evidence: ["parser updated"],
+          files: ["src/parser.ts"],
+          tests: ["pnpm test"],
+          artifacts: ["implementation"],
+        },
+        {
+          id: "SC-001",
+          status: "not_verified",
+          rationale: "Manual browser check pending.",
+        },
+      ],
+      scopeDrift: [
+        {
+          severity: "blocking",
+          description: "Touched an adjacent helper.",
+          files: ["src/helper.ts"],
+        },
+      ],
+    });
+    await writeFile(
+      join(attemptDirectory, "conformance-report.json"),
+      reportContent,
+      "utf8",
+    );
+    const reportSha256 = createHash("sha256")
+      .update(reportContent)
+      .digest("hex");
+    await writeJson(join(runDirectory, "artifacts.json"), {
+      runId: "run-conformance",
+      artifacts: [
+        {
+          id: "conformance-report",
+          type: "conformance.report",
+          producer: "implement",
+          path: "stages/implement/1/conformance-report.json",
+          mediaType: CONFORMANCE_REPORT_MEDIA_TYPE,
+          sha256: reportSha256,
+          size: Buffer.byteLength(reportContent),
+        },
+      ],
+    });
+    const store = await createEventStore(repoPath);
+    store.append({
+      runId: "run-conformance",
+      type: "run.created",
+      createdAt: "2026-06-24T00:00:00.000Z",
+      payload: {
+        flowName: "conformance-flow",
+        flowDocument: JSON.stringify({
+          apiVersion: "nitely.dev/v1alpha1",
+          kind: "Flow",
+          metadata: { name: "conformance-flow" },
+          spec: {
+            stages: [
+              {
+                id: "implement",
+                type: "agent",
+                runtime: "mock",
+                prompt: "Implement.",
+                inputs: [],
+                outputs: [
+                  {
+                    id: "conformance-report",
+                    type: "conformance.report",
+                    mediaType: CONFORMANCE_REPORT_MEDIA_TYPE,
+                  },
+                ],
+              },
+              {
+                id: "publish",
+                type: "publish-change",
+                provider: "github",
+                inputs: ["conformance-report"],
+                outputs: ["change-request"],
+                conformance: {
+                  mode: "advisory",
+                  report: "conformance-report",
+                  required: ["FR-001", "SC-001", "PD-001"],
+                },
+              },
+            ],
+          },
+        }),
+        inputs: {},
+      },
+    });
+    store.append({
+      runId: "run-conformance",
+      type: "stage.started",
+      stageId: "implement",
+      attempt: 1,
+      createdAt: "2026-06-24T00:00:01.000Z",
+      payload: {
+        type: "agent",
+        attemptDirectory,
+      },
+    });
+    store.append({
+      runId: "run-conformance",
+      type: "artifact.published",
+      stageId: "implement",
+      createdAt: "2026-06-24T00:00:02.000Z",
+      payload: {
+        artifact: {
+          id: "conformance-report",
+          type: "conformance.report",
+          producer: "implement",
+          path: "stages/implement/1/conformance-report.json",
+          mediaType: CONFORMANCE_REPORT_MEDIA_TYPE,
+        },
+      },
+    });
+    store.append({
+      runId: "run-conformance",
+      type: "stage.completed",
+      stageId: "implement",
+      attempt: 1,
+      createdAt: "2026-06-24T00:00:03.000Z",
+      payload: {},
+    });
+    store.close();
+
+    const previousSecret = process.env.TEST_SECRET_TOKEN;
+    process.env.TEST_SECRET_TOKEN = "implement";
+    const detail = await (async () => {
+      try {
+        return await getRunDetail(repoPath, "run-conformance", {
+          redactionSecrets: [reportSha256.slice(0, 8)],
+        });
+      } finally {
+        if (previousSecret === undefined) {
+          delete process.env.TEST_SECRET_TOKEN;
+        } else {
+          process.env.TEST_SECRET_TOKEN = previousSecret;
+        }
+      }
+    })();
+
+    expect(detail.conformance).toEqual([
+      expect.objectContaining({
+        reportId: "conformance-report",
+        stageId: "publish",
+        policy: {
+          mode: "advisory",
+          reportId: "conformance-report",
+          requiredIds: ["FR-001", "SC-001", "PD-001"],
+        },
+        artifact: expect.objectContaining({
+          id: "conformance-report",
+          path: "stages/[REDACTED]/1/conformance-report.json",
+        }),
+        report: expect.objectContaining({
+          summary: "FR covered; SC requires manual verification.",
+          items: [
+            expect.objectContaining({ id: "FR-001", status: "satisfied" }),
+            expect.objectContaining({ id: "SC-001", status: "not_verified" }),
+          ],
+        }),
+      }),
+    ]);
+    expect(detail.conformance[0]?.findings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          severity: "warning",
+          code: "missing-required-id",
+          itemId: "PD-001",
+        }),
+        expect.objectContaining({
+          severity: "warning",
+          code: "unsatisfied-item",
+          itemId: "SC-001",
+        }),
+        expect.objectContaining({
+          severity: "warning",
+          code: "scope-drift",
+        }),
+      ]),
+    );
+    expect(detail.conformance[0]?.findings).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "invalid-report" }),
+      ]),
+    );
+    expect(detail.artifacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "conformance-report",
+          sha256: reportSha256,
+        }),
+      ]),
     );
   });
 
@@ -1478,6 +2953,68 @@ describe("web run projection", () => {
           resumedFrom: "run-parent",
         },
       ],
+    });
+  });
+
+  it("returns projected trace checkpoints in run details", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
+    await mkdir(join(repoPath, ".nitely"), { recursive: true });
+    const store = new EventStore(join(repoPath, ".nitely/events.db"));
+    store.append({
+      runId: "run-checkpoints",
+      type: "run.created",
+      createdAt: "2026-07-08T00:00:00.000Z",
+      payload: { flowName: "flow" },
+    });
+    store.append({
+      runId: "run-checkpoints",
+      type: "workspace.created",
+      createdAt: "2026-07-08T00:00:01.000Z",
+      payload: { worktreePath: "/tmp/worktree" },
+    });
+    store.append({
+      runId: "run-checkpoints",
+      type: "stage.started",
+      stageId: "implement",
+      attempt: 1,
+      createdAt: "2026-07-08T00:00:02.000Z",
+      payload: { type: "agent" },
+    });
+    store.append({
+      runId: "run-checkpoints",
+      type: "stage.blocked",
+      stageId: "implement",
+      attempt: 1,
+      createdAt: "2026-07-08T00:00:03.000Z",
+      payload: { reason: "usage-limit" },
+    });
+    store.append({
+      runId: "run-checkpoints",
+      type: "run.blocked",
+      createdAt: "2026-07-08T00:00:04.000Z",
+      payload: { reason: "usage-limit" },
+    });
+    store.close();
+
+    await expect(getRunDetail(repoPath, "run-checkpoints")).resolves.toMatchObject({
+      trace: {
+        checkpoints: [
+          expect.objectContaining({ kind: "run-created" }),
+          expect.objectContaining({ kind: "workspace-created" }),
+          expect.objectContaining({
+            kind: "stage-attempt",
+            status: "candidate",
+            action: "resume-run",
+          }),
+          expect.objectContaining({ kind: "terminal" }),
+        ],
+        resumableCheckpoints: [
+          expect.objectContaining({
+            kind: "stage-attempt",
+            stageId: "implement",
+          }),
+        ],
+      },
     });
   });
 
@@ -1769,5 +3306,51 @@ describe("web run projection", () => {
         },
       ],
     });
+  });
+
+  it("counts review severities only from findings, not pass or prose mentions", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
+    const runDirectory = join(repoPath, ".nitely/runs/run-review-severities");
+    await mkdir(join(runDirectory, "stages/review/1"), { recursive: true });
+    await mkdir(join(runDirectory, "stages/review/2"), { recursive: true });
+    await mkdir(join(runDirectory, "stages/review/3"), { recursive: true });
+    await writeJson(join(runDirectory, "run.json"), {
+      runId: "run-review-severities",
+      status: "completed",
+      completedStages: ["review"],
+      inputs: {},
+    });
+    await writeFile(
+      join(runDirectory, "stages/review/1/review.md"),
+      "Review verdict: pass\n\nNo P0/P1/blocking findings.\n",
+      "utf8",
+    );
+    await writeFile(
+      join(runDirectory, "stages/review/2/review.md"),
+      "## Findings\n\n### P1 - Missing regression test\n\n### P0 - Data loss risk\n",
+      "utf8",
+    );
+    await writeFile(
+      join(runDirectory, "stages/review/3/review.md"),
+      "This review considered P0/P1 labels and blocking risk, but does not report findings.\n",
+      "utf8",
+    );
+
+    const detail = await getRunDetail(repoPath, "run-review-severities");
+
+    expect(detail.reviewFindings).toMatchObject([
+      {
+        attempt: "1",
+        severities: { none: 1 },
+      },
+      {
+        attempt: "2",
+        severities: { P0: 1, P1: 1 },
+      },
+      {
+        attempt: "3",
+        severities: {},
+      },
+    ]);
   });
 });

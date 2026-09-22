@@ -34,10 +34,27 @@ interface ResourceFile {
   sizeBytes: number;
 }
 
-interface ParsedSkillFile {
+export interface ParsedSkillFile {
   name: string;
   description: string;
   body: string;
+}
+
+export interface ValidatedSkillResource {
+  relativePath: string;
+  absolutePath: string;
+  mediaType?: string;
+  sizeBytes: number;
+}
+
+export interface ValidatedSkillDirectory {
+  id: string;
+  name: string;
+  description: string;
+  sourcePath: string;
+  contentHash: string;
+  body: string;
+  resources: ValidatedSkillResource[];
 }
 
 function toPosixPath(path: string): string {
@@ -73,18 +90,17 @@ function skillError(stageId: string, skillId: string, message: string): Error {
   return new Error(`stage "${stageId}" skill "${skillId}": ${message}`);
 }
 
-function parseFrontmatter(input: {
-  skillId: string;
-  stageId: string;
+function parseSkillDocument(input: {
   content: string;
+  error: (message: string) => Error;
 }): ParsedSkillFile {
   const lines = input.content.split(/\r?\n/);
   if (lines[0] !== "---") {
-    throw skillError(input.stageId, input.skillId, "has malformed frontmatter");
+    throw input.error("has malformed frontmatter");
   }
   const endIndex = lines.findIndex((line, index) => index > 0 && line === "---");
   if (endIndex < 0) {
-    throw skillError(input.stageId, input.skillId, "has malformed frontmatter");
+    throw input.error("has malformed frontmatter");
   }
 
   const fields = new Map<string, string>();
@@ -92,33 +108,18 @@ function parseFrontmatter(input: {
     if (line.trim() === "") continue;
     const match = /^([A-Za-z0-9_.-]+):\s*(.*)$/.exec(line);
     if (!match) {
-      throw skillError(input.stageId, input.skillId, "has malformed frontmatter");
+      throw input.error("has malformed frontmatter");
     }
     fields.set(match[1], match[2].trim());
   }
 
   const name = fields.get("name") ?? "";
   if (!name) {
-    throw skillError(
-      input.stageId,
-      input.skillId,
-      "missing required frontmatter field: name",
-    );
+    throw input.error("missing required frontmatter field: name");
   }
   const description = fields.get("description") ?? "";
   if (!description) {
-    throw skillError(
-      input.stageId,
-      input.skillId,
-      "missing required frontmatter field: description",
-    );
-  }
-  if (name !== input.skillId) {
-    throw skillError(
-      input.stageId,
-      input.skillId,
-      `name mismatch: expected "${input.skillId}", found "${name}"`,
-    );
+    throw input.error("missing required frontmatter field: description");
   }
 
   const bodyLines = lines.slice(endIndex + 1);
@@ -127,10 +128,29 @@ function parseFrontmatter(input: {
   }
   const body = bodyLines.join("\n");
   if (body.trim() === "") {
-    throw skillError(input.stageId, input.skillId, "body must not be empty");
+    throw input.error("body must not be empty");
   }
 
   return { name, description, body };
+}
+
+function parseFrontmatter(input: {
+  skillId: string;
+  stageId: string;
+  content: string;
+}): ParsedSkillFile {
+  const parsed = parseSkillDocument({
+    content: input.content,
+    error: (message) => skillError(input.stageId, input.skillId, message),
+  });
+  if (parsed.name !== input.skillId) {
+    throw skillError(
+      input.stageId,
+      input.skillId,
+      `name mismatch: expected "${input.skillId}", found "${parsed.name}"`,
+    );
+  }
+  return parsed;
 }
 
 async function collectResourceFiles(input: {
@@ -138,6 +158,7 @@ async function collectResourceFiles(input: {
   skillId: string;
   skillDirectory: string;
   directory: string;
+  errorRoot?: string;
 }): Promise<ResourceFile[]> {
   requirePathInside(input.skillDirectory, input.directory, "skill resource path");
   const entries = await readdir(input.directory, { withFileTypes: true });
@@ -153,7 +174,7 @@ async function collectResourceFiles(input: {
     requirePathInside(input.skillDirectory, absolutePath, "skill resource path");
     const details = await lstat(absolutePath);
     const pathForError = repoRelativePath(
-      resolve(input.skillDirectory, "..", "..", ".."),
+      input.errorRoot ?? resolve(input.skillDirectory, "..", "..", ".."),
       absolutePath,
     );
     if (details.isSymbolicLink()) {
@@ -199,6 +220,54 @@ function hashSkill(skillBytes: Buffer, resources: ResourceFile[]): string {
     hash.update(resource.bytes);
   }
   return hash.digest("hex");
+}
+
+export async function validateSkillDirectory(input: {
+  skillDirectory: string;
+  skillId?: string;
+  stageId?: string;
+  includeResources?: boolean;
+  errorRoot?: string;
+}): Promise<ValidatedSkillDirectory> {
+  const skillDirectory = resolve(input.skillDirectory);
+  const sourcePath = join(skillDirectory, "SKILL.md");
+  const skillBytes = await readFile(sourcePath);
+  const parsed = parseSkillDocument({
+    content: skillBytes.toString("utf8"),
+    error: (message) => new Error(`skill import: ${message}`),
+  });
+  const skillId = input.skillId ?? parsed.name;
+  const stageId = input.stageId ?? "import";
+  if (!IDENTIFIER_PATTERN.test(skillId)) {
+    throw new Error(`skill import: invalid skill id "${skillId}"`);
+  }
+  if (parsed.name !== skillId) {
+    throw new Error(`skill import: name mismatch: expected "${skillId}", found "${parsed.name}"`);
+  }
+  const resources = input.includeResources === false
+    ? []
+    : await collectResourceFiles({
+      stageId,
+      skillId,
+      skillDirectory,
+      directory: skillDirectory,
+      errorRoot: input.errorRoot,
+    });
+
+  return {
+    id: skillId,
+    name: parsed.name,
+    description: parsed.description,
+    sourcePath,
+    contentHash: hashSkill(skillBytes, resources),
+    body: parsed.body,
+    resources: resources.map((resource) => ({
+      relativePath: resource.relativePath,
+      absolutePath: resource.absolutePath,
+      mediaType: mediaTypeForPath(resource.relativePath),
+      sizeBytes: resource.sizeBytes,
+    })),
+  };
 }
 
 async function loadSkill(input: {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  GitHubApiError,
   GitHubCliScmProvider,
   GitHubScmProvider,
   MissingGitHubTokenError,
@@ -27,6 +28,15 @@ describe("GitHubScmProvider", () => {
   it("parses GitHub pull request URLs and numbers", () => {
     expect(
       parseGitHubPullRequestTarget("https://github.com/Instask/nitely/pull/22"),
+    ).toEqual({
+      owner: "Instask",
+      repository: "nitely",
+      number: 22,
+    });
+    expect(
+      parseGitHubPullRequestTarget(
+        "https://github.com/Instask/nitely/pull/22/files?diff=split",
+      ),
     ).toEqual({
       owner: "Instask",
       repository: "nitely",
@@ -71,6 +81,328 @@ describe("GitHubScmProvider", () => {
     );
   });
 
+  it("reads pull request merge status from the GitHub API", async () => {
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const provider = new GitHubScmProvider({
+      env: { NITELY_GITHUB_TOKEN: "nitely-token" },
+      fetch: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return new Response(
+          JSON.stringify({
+            html_url: "https://github.com/Instask/nitely/pull/195",
+            state: "closed",
+            merged: true,
+          }),
+          { status: 200 },
+        );
+      },
+    });
+
+    await expect(
+      provider.getChangeRequestStatus({
+        target: "https://github.com/Instask/nitely/pull/195",
+      }),
+    ).resolves.toEqual({
+      provider: "github",
+      url: "https://github.com/Instask/nitely/pull/195",
+      state: "closed",
+      merged: true,
+    });
+    expect(requests).toEqual([
+      {
+        url: "https://api.github.com/repos/Instask/nitely/pulls/195",
+        init: expect.objectContaining({
+          method: "GET",
+          headers: expect.objectContaining({
+            Authorization: "Bearer nitely-token",
+            Accept: "application/vnd.github+json",
+          }),
+        }),
+      },
+    ]);
+  });
+
+  it("classifies GitHub API errors", async () => {
+    const cases: Array<{
+      status: number;
+      body: string;
+      headers?: Record<string, string>;
+      kind: GitHubApiError["kind"];
+    }> = [
+      { status: 401, body: "Bad credentials", kind: "auth" },
+      { status: 403, body: "Resource not accessible by integration", kind: "permission" },
+      {
+        status: 403,
+        body: "API rate limit exceeded",
+        headers: { "x-ratelimit-remaining": "0" },
+        kind: "rate-limit",
+      },
+      { status: 404, body: "Not Found", kind: "not-found" },
+      { status: 409, body: "Conflict", kind: "conflict" },
+      { status: 422, body: "Validation Failed", kind: "validation" },
+      { status: 500, body: "Server Error", kind: "unknown" },
+    ];
+
+    for (const testCase of cases) {
+      const provider = new GitHubScmProvider({
+        env: { NITELY_GITHUB_TOKEN: "nitely-token" },
+        fetch: async () =>
+          new Response(testCase.body, {
+            status: testCase.status,
+            headers: testCase.headers,
+          }),
+      });
+
+      let caught: unknown;
+      try {
+        await provider.getChangeRequestStatus({
+          target: "https://github.com/Instask/nitely/pull/195",
+        });
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(GitHubApiError);
+      expect(caught).toMatchObject({
+        kind: testCase.kind,
+        status: testCase.status,
+        operation: "pull request status lookup",
+        details: testCase.body,
+      });
+      expect((caught as Error).message).toContain(`(${testCase.kind})`);
+    }
+  });
+
+  it("lists open and closed repository issues across pages and filters pull requests", async () => {
+    const requests: string[] = [];
+    const provider = new GitHubScmProvider({
+      env: { NITELY_GITHUB_TOKEN: "nitely-token" },
+      git: async (_cwd, args) =>
+        args[0] === "remote" ? "git@github.com:Instask/nitely.git\n" : "",
+      fetch: async (url) => {
+        const requestUrl = String(url);
+        requests.push(requestUrl);
+        if (requestUrl.endsWith("/issues?state=all&per_page=100")) {
+          return new Response(
+            JSON.stringify([
+              {
+                number: 10,
+                html_url: "https://github.com/Instask/nitely/issues/10",
+                title: "T001: Parse tasks",
+                body: "body",
+                state: "open",
+              },
+              {
+                number: 11,
+                html_url: "https://github.com/Instask/nitely/pull/11",
+                title: "Not an issue",
+                body: "",
+                state: "open",
+                pull_request: { url: "https://api.github.com/pulls/11" },
+              },
+            ]),
+            {
+              status: 200,
+              headers: {
+                Link: '<https://api.github.com/repos/Instask/nitely/issues?state=all&page=2&per_page=100>; rel="next"',
+              },
+            },
+          );
+        }
+        return new Response(
+          JSON.stringify([
+            {
+              number: 12,
+              html_url: "https://github.com/Instask/nitely/issues/12",
+              title: "T002: Verify tasks",
+              body: "closed body",
+              state: "closed",
+            },
+          ]),
+          { status: 200 },
+        );
+      },
+    });
+    const repository = await provider.resolveRepository({
+      repoPath: "/repo",
+      remoteName: "origin",
+    });
+
+    await expect(
+      provider.listRepositoryIssues({
+        repoPath: "/repo",
+        remoteName: "origin",
+        repository,
+      }),
+    ).resolves.toEqual([
+      {
+        provider: "github",
+        owner: "Instask",
+        repository: "nitely",
+        number: 10,
+        url: "https://github.com/Instask/nitely/issues/10",
+        title: "T001: Parse tasks",
+        body: "body",
+        state: "open",
+      },
+      {
+        provider: "github",
+        owner: "Instask",
+        repository: "nitely",
+        number: 12,
+        url: "https://github.com/Instask/nitely/issues/12",
+        title: "T002: Verify tasks",
+        body: "closed body",
+        state: "closed",
+      },
+    ]);
+    expect(requests).toEqual([
+      "https://api.github.com/repos/Instask/nitely/issues?state=all&per_page=100",
+      "https://api.github.com/repos/Instask/nitely/issues?state=all&page=2&per_page=100",
+    ]);
+  });
+
+  it("creates repository issues and issue comments through the same-repository API", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const provider = new GitHubScmProvider({
+      env: { NITELY_GITHUB_TOKEN: "nitely-token" },
+      git: async (_cwd, args) =>
+        args[0] === "remote" ? "git@github.com:Instask/nitely.git\n" : "",
+      fetch: async (url, init) => {
+        requests.push({ url: String(url), init });
+        if (init?.method === "POST" && String(url).endsWith("/issues")) {
+          return new Response(
+            JSON.stringify({
+              number: 20,
+              html_url: "https://github.com/Instask/nitely/issues/20",
+              title: "T001: Parse tasks",
+              body: "issue body",
+              state: "open",
+            }),
+            { status: 201 },
+          );
+        }
+        if (init?.method === "POST") {
+          return new Response(
+            JSON.stringify({
+              id: 30,
+              html_url: "https://github.com/Instask/nitely/issues/20#issuecomment-30",
+              body: "run evidence",
+              user: { login: "nitely" },
+              created_at: "2026-07-14T00:00:00Z",
+            }),
+            { status: 201 },
+          );
+        }
+        if (init?.method === "PATCH") {
+          return new Response(
+            JSON.stringify({
+              id: 30,
+              html_url: "https://github.com/Instask/nitely/issues/20#issuecomment-30",
+              body: "updated run evidence",
+              user: { login: "nitely" },
+              created_at: "2026-07-14T00:00:00Z",
+              updated_at: "2026-07-14T00:00:01Z",
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(
+          JSON.stringify([
+            {
+              id: 29,
+              html_url: "https://github.com/Instask/nitely/issues/20#issuecomment-29",
+              body: "older evidence",
+              user: { login: "nitely" },
+              created_at: "2026-07-13T00:00:00Z",
+            },
+          ]),
+          { status: 200 },
+        );
+      },
+    });
+    const repository = await provider.resolveRepository({
+      repoPath: "/repo",
+      remoteName: "origin",
+    });
+
+    const issue = await provider.createRepositoryIssue({
+      repoPath: "/repo",
+      remoteName: "origin",
+      repository,
+      title: "T001: Parse tasks",
+      body: "issue body",
+    });
+    const listed = await provider.listRepositoryIssueComments({
+      repoPath: "/repo",
+      remoteName: "origin",
+      repository,
+      issueNumber: issue.number,
+    });
+    const created = await provider.createRepositoryIssueComment({
+      repoPath: "/repo",
+      remoteName: "origin",
+      repository,
+      issueNumber: issue.number,
+      body: "run evidence",
+    });
+    const updated = await provider.updateRepositoryIssueComment({
+      repoPath: "/repo",
+      remoteName: "origin",
+      repository,
+      commentId: created.id,
+      body: "updated run evidence",
+    });
+
+    expect(issue.number).toBe(20);
+    expect(listed).toMatchObject([{ id: "29", body: "older evidence" }]);
+    expect(created).toMatchObject({ id: "30", body: "run evidence" });
+    expect(updated).toMatchObject({ id: "30", body: "updated run evidence" });
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
+      title: "T001: Parse tasks",
+      body: "issue body",
+    });
+    expect(JSON.parse(String(requests[2]?.init?.body))).toEqual({
+      body: "run evidence",
+    });
+    expect(requests[3]?.url).toBe(
+      "https://api.github.com/repos/Instask/nitely/issues/comments/30",
+    );
+    expect(requests[3]?.init?.method).toBe("PATCH");
+    expect(JSON.parse(String(requests[3]?.init?.body))).toEqual({
+      body: "updated run evidence",
+    });
+  });
+
+  it("rejects mismatched issue repositories before token lookup or HTTP", async () => {
+    let fetchCalls = 0;
+    const provider = new GitHubScmProvider({
+      env: {},
+      git: async (_cwd, args) =>
+        args[0] === "remote" ? "git@github.com:Instask/nitely.git\n" : "",
+      fetch: async () => {
+        fetchCalls += 1;
+        return new Response("{}", { status: 201 });
+      },
+    });
+
+    await expect(
+      provider.createRepositoryIssue({
+        repoPath: "/repo",
+        remoteName: "origin",
+        repository: {
+          provider: "github",
+          owner: "Other",
+          repository: "nitely",
+          url: "https://github.com/Other/nitely",
+        },
+        title: "T001: Unsafe",
+        body: "must not write",
+      }),
+    ).rejects.toThrow("does not match configured repository");
+    expect(fetchCalls).toBe(0);
+  });
+
   it("pushes the branch and creates a draft pull request through the GitHub API", async () => {
     const gitCalls: Array<{ cwd: string; args: string[] }> = [];
     const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
@@ -80,6 +412,15 @@ describe("GitHubScmProvider", () => {
         gitCalls.push({ cwd, args });
         if (args[0] === "remote") {
           return "git@github.com:Instask/nitely.git\n";
+        }
+        if (args[0] === "ls-remote" && args[3] === "refs/heads/main") {
+          return "aaa111\trefs/heads/main\n";
+        }
+        if (args[0] === "ls-remote" && args[3] === "refs/heads/nitely/run-1") {
+          return "bbb222\trefs/heads/nitely/run-1\n";
+        }
+        if (args[0] === "rev-list") {
+          return "1\n";
         }
         return "";
       },
@@ -120,22 +461,48 @@ describe("GitHubScmProvider", () => {
         cwd: "/repo/.nitely/worktree",
         args: ["push", "-u", "origin", "nitely/run-1"],
       },
+      {
+        cwd: "/repo/.nitely/worktree",
+        args: ["ls-remote", "--heads", "origin", "refs/heads/main"],
+      },
+      {
+        cwd: "/repo/.nitely/worktree",
+        args: ["ls-remote", "--heads", "origin", "refs/heads/nitely/run-1"],
+      },
+      {
+        cwd: "/repo/.nitely/worktree",
+        args: [
+          "fetch",
+          "--no-tags",
+          "origin",
+          "refs/heads/main",
+          "refs/heads/nitely/run-1",
+        ],
+      },
+      {
+        cwd: "/repo/.nitely/worktree",
+        args: ["rev-list", "--count", "aaa111..bbb222"],
+      },
     ]);
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(3);
     expect(requests[0]?.url).toBe(
       "https://api.github.com/repos/Instask/nitely/pulls?state=open&head=Instask%3Anitely%2Frun-1&base=main&per_page=1",
     );
     expect(requests[0]?.init?.method).toBe("GET");
     expect(requests[1]?.url).toBe(
+      "https://api.github.com/repos/Instask/nitely/pulls?state=open&head=Instask%3Anitely%2Frun-1&per_page=1",
+    );
+    expect(requests[1]?.init?.method).toBe("GET");
+    expect(requests[2]?.url).toBe(
       "https://api.github.com/repos/Instask/nitely/pulls",
     );
-    expect(requests[1]?.init?.method).toBe("POST");
-    expect(requests[1]?.init?.headers).toMatchObject({
+    expect(requests[2]?.init?.method).toBe("POST");
+    expect(requests[2]?.init?.headers).toMatchObject({
       Authorization: "Bearer nitely-token",
       Accept: "application/vnd.github+json",
       "Content-Type": "application/json",
     });
-    expect(JSON.parse(String(requests[1]?.init?.body))).toEqual({
+    expect(JSON.parse(String(requests[2]?.init?.body))).toEqual({
       title: "Nitely: test",
       head: "nitely/run-1",
       base: "main",
@@ -155,8 +522,93 @@ describe("GitHubScmProvider", () => {
     });
   });
 
-  it("reuses an existing pull request through the GitHub API", async () => {
-    const requests: Array<{ url: string; method: string | undefined }> = [];
+  it("recovers when GitHub API create fails because a pull request already exists", async () => {
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    let listLookups = 0;
+    const provider = new GitHubScmProvider({
+      env: { NITELY_GITHUB_TOKEN: "nitely-token" },
+      git: async (_cwd, args) => {
+        if (args[0] === "remote") {
+          return "git@github.com:Instask/nitely.git\n";
+        }
+        if (args[0] === "ls-remote" && args[3] === "refs/heads/main") {
+          return "aaa111\trefs/heads/main\n";
+        }
+        if (args[0] === "ls-remote" && args[3] === "refs/heads/nitely/run-1") {
+          return "bbb222\trefs/heads/nitely/run-1\n";
+        }
+        if (args[0] === "rev-list") {
+          return "1\n";
+        }
+        return "";
+      },
+      fetch: async (url, init) => {
+        requests.push({ url: String(url), init });
+        if (init?.method === "POST") {
+          return new Response(
+            JSON.stringify({
+              message: "Validation Failed",
+              errors: [
+                {
+                  message: "A pull request already exists for Instask:nitely/run-1.",
+                },
+              ],
+            }),
+            { status: 422 },
+          );
+        }
+        if (init?.method === "PATCH") {
+          return new Response("{}", { status: 200 });
+        }
+        // Pre-create lookups miss; post-create recovery finds the PR.
+        listLookups += 1;
+        if (listLookups <= 2) {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        return new Response(
+          JSON.stringify([
+            {
+              html_url: "https://github.com/Instask/nitely/pull/42",
+              number: 42,
+              draft: true,
+              base: { ref: "main" },
+              head: { ref: "nitely/run-1" },
+            },
+          ]),
+          { status: 200 },
+        );
+      },
+    });
+
+    const result = await provider.publishChange({
+      repoPath: "/repo",
+      worktreePath: "/repo/.nitely/worktree",
+      remoteName: "origin",
+      baseBranch: "main",
+      headBranch: "nitely/run-1",
+      title: "Nitely: race",
+      body: "Evidence body",
+    });
+
+    expect(result).toMatchObject({
+      provider: "github",
+      url: "https://github.com/Instask/nitely/pull/42",
+      number: 42,
+      baseBranch: "main",
+      headBranch: "nitely/run-1",
+      draft: true,
+      outcome: "updated",
+      metadataUpdate: {
+        transport: "github-rest-api",
+        outcome: "updated",
+        fields: ["title", "body"],
+      },
+    });
+    expect(requests.some((request) => request.init?.method === "POST")).toBe(true);
+  });
+
+  it("reuses an existing pull request through the GitHub API and refreshes metadata", async () => {
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
     const provider = new GitHubScmProvider({
       env: { NITELY_GITHUB_TOKEN: "nitely-token" },
       git: async (_cwd, args) => {
@@ -166,7 +618,10 @@ describe("GitHubScmProvider", () => {
         return "";
       },
       fetch: async (url, init) => {
-        requests.push({ url: String(url), method: init?.method });
+        requests.push({ url: String(url), init });
+        if (init?.method === "PATCH") {
+          return new Response("{}", { status: 200 });
+        }
         return new Response(
           JSON.stringify([
             {
@@ -188,12 +643,27 @@ describe("GitHubScmProvider", () => {
       headBranch: "nitely/2026-06-23T012659386Z-de754f18",
       title: "Nitely: retry",
       body: "Evidence body",
+      bodyPath: "/repo/.nitely/runs/run-1/evidence.md",
     });
 
     expect(requests).toEqual([
       {
         url: "https://api.github.com/repos/Instask/nitely/pulls?state=open&head=Instask%3Anitely%2F2026-06-23T012659386Z-de754f18&base=master&per_page=1",
-        method: "GET",
+        init: expect.objectContaining({ method: "GET" }),
+      },
+      {
+        url: "https://api.github.com/repos/Instask/nitely/pulls/158",
+        init: expect.objectContaining({
+          method: "PATCH",
+          headers: expect.objectContaining({
+            Authorization: "Bearer nitely-token",
+            "Content-Type": "application/json",
+          }),
+          body: JSON.stringify({
+            title: "Nitely: retry",
+            body: "Evidence body",
+          }),
+        }),
       },
     ]);
     expect(result).toEqual({
@@ -206,20 +676,39 @@ describe("GitHubScmProvider", () => {
       headBranch: "nitely/2026-06-23T012659386Z-de754f18",
       draft: false,
       outcome: "reused",
+      metadataUpdate: {
+        transport: "github-rest-api",
+        outcome: "updated",
+        fields: ["title", "body"],
+      },
     });
   });
 
   it("reuses an existing draft pull request through the GitHub API", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
     const provider = new GitHubScmProvider({
       env: { NITELY_GITHUB_TOKEN: "nitely-token" },
       git: async (_cwd, args) => {
         if (args[0] === "remote") {
           return "https://github.com/Instask/nitely.git\n";
         }
+        if (args[0] === "ls-remote" && args[3] === "refs/heads/main") {
+          return "aaa111\trefs/heads/main\n";
+        }
+        if (args[0] === "ls-remote" && args[3] === "refs/heads/nitely/run-2") {
+          return "bbb222\trefs/heads/nitely/run-2\n";
+        }
+        if (args[0] === "rev-list") {
+          return "1\n";
+        }
         return "";
       },
-      fetch: async () =>
-        new Response(
+      fetch: async (url, init) => {
+        requests.push({ url: String(url), init });
+        if (init?.method === "PATCH") {
+          return new Response("{}", { status: 200 });
+        }
+        return new Response(
           JSON.stringify([
             {
               html_url: "https://github.com/Instask/nitely/pull/159",
@@ -228,7 +717,8 @@ describe("GitHubScmProvider", () => {
             },
           ]),
           { status: 200 },
-        ),
+        );
+      },
     });
 
     await expect(
@@ -245,7 +735,28 @@ describe("GitHubScmProvider", () => {
       url: "https://github.com/Instask/nitely/pull/159",
       draft: true,
       outcome: "reused",
+      metadataUpdate: {
+        transport: "github-rest-api",
+        outcome: "updated",
+        fields: ["title", "body"],
+      },
     });
+    expect(requests).toEqual([
+      {
+        url: "https://api.github.com/repos/Instask/nitely/pulls?state=open&head=Instask%3Anitely%2Frun-draft&base=master&per_page=1",
+        init: expect.objectContaining({ method: "GET" }),
+      },
+      {
+        url: "https://api.github.com/repos/Instask/nitely/pulls/159",
+        init: expect.objectContaining({
+          method: "PATCH",
+          body: JSON.stringify({
+            title: "Nitely: retry",
+            body: "Evidence body",
+          }),
+        }),
+      },
+    ]);
   });
 
   it("uses GITHUB_TOKEN as a compatibility fallback", async () => {
@@ -255,6 +766,15 @@ describe("GitHubScmProvider", () => {
       git: async (_cwd, args) => {
         if (args[0] === "remote") {
           return "https://github.com/Instask/nitely.git\n";
+        }
+        if (args[0] === "ls-remote" && args[3] === "refs/heads/main") {
+          return "aaa111\trefs/heads/main\n";
+        }
+        if (args[0] === "ls-remote" && args[3] === "refs/heads/nitely/run-2") {
+          return "bbb222\trefs/heads/nitely/run-2\n";
+        }
+        if (args[0] === "rev-list") {
+          return "1\n";
         }
         return "";
       },
@@ -297,6 +817,15 @@ describe("GitHubScmProvider", () => {
       git: async (_cwd, args) => {
         if (args[0] === "remote") {
           return "https://github.com/Instask/nitely.git\n";
+        }
+        if (args[0] === "ls-remote" && args[3] === "refs/heads/main") {
+          return "aaa111\trefs/heads/main\n";
+        }
+        if (args[0] === "ls-remote" && args[3] === "refs/heads/nitely/run-3") {
+          return "bbb222\trefs/heads/nitely/run-3\n";
+        }
+        if (args[0] === "rev-list") {
+          return "1\n";
         }
         return "";
       },
@@ -905,6 +1434,62 @@ describe("GitHubScmProvider", () => {
       number: 22,
       previousHeadSha: "abc123",
       updatedHeadSha: "def456",
+      metadataUpdate: {
+        transport: "github-rest-api",
+        outcome: "updated",
+        fields: ["title"],
+      },
+    });
+  });
+
+  it("updates pull request metadata without touching the branch", async () => {
+    const gitCalls: Array<{ cwd: string; args: string[] }> = [];
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const provider = new GitHubScmProvider({
+      env: { NITELY_GITHUB_TOKEN: "nitely-token" },
+      git: async (cwd, args) => {
+        gitCalls.push({ cwd, args });
+        return "";
+      },
+      fetch: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return new Response("{}", { status: 200 });
+      },
+    });
+
+    const result = await provider.updateChangeRequestMetadata?.({
+      repoPath: "/repo",
+      worktreePath: "/repo/.nitely/runs/run-1/worktree",
+      remoteName: "origin",
+      changeRequest: {
+        provider: "github",
+        owner: "Instask",
+        repository: "nitely",
+        number: 22,
+        url: "https://github.com/Instask/nitely/pull/22",
+        baseBranch: "master",
+        headBranch: "nitely/run-1",
+        draft: true,
+      },
+      body: "Final evidence",
+    });
+
+    expect(gitCalls).toEqual([]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe(
+      "https://api.github.com/repos/Instask/nitely/pulls/22",
+    );
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
+      body: "Final evidence",
+    });
+    expect(result).toMatchObject({
+      url: "https://github.com/Instask/nitely/pull/22",
+      number: 22,
+      metadataUpdate: {
+        transport: "github-rest-api",
+        outcome: "updated",
+        fields: ["body"],
+      },
     });
   });
 
@@ -964,7 +1549,7 @@ describe("GitHubScmProvider", () => {
     ]);
   });
 
-  it("removes a clean previous Nitely worktree before checking out the same pull request branch", async () => {
+  it("uses a unique local branch when another active Nitely worktree owns the pull request branch", async () => {
     const gitCalls: Array<{ cwd: string; args: string[] }> = [];
     const provider = new GitHubScmProvider({
       env: { NITELY_GITHUB_TOKEN: "nitely-token" },
@@ -1006,18 +1591,67 @@ describe("GitHubScmProvider", () => {
       },
     });
 
-    expect(gitCalls).toContainEqual({
-      cwd: "/repo/.nitely/runs/old-run/worktree",
-      args: ["status", "--short"],
+    expect(gitCalls).not.toContainEqual({
+      cwd: "/repo",
+      args: ["worktree", "remove", "--force", "/repo/.nitely/runs/old-run/worktree"],
     });
-    expect(gitCalls).toContainEqual({
+    expect(gitCalls.at(-1)).toEqual({
       cwd: "/repo",
       args: [
         "worktree",
-        "remove",
+        "add",
         "--force",
-        "/repo/.nitely/runs/old-run/worktree",
+        "-B",
+        "nitely/run-1-checkout-new-run",
+        "/repo/.nitely/runs/new-run/worktree",
+        "FETCH_HEAD",
       ],
+    });
+  });
+
+  it("prunes a stale Nitely worktree before checking out the pull request branch", async () => {
+    const gitCalls: Array<{ cwd: string; args: string[] }> = [];
+    const provider = new GitHubScmProvider({
+      env: { NITELY_GITHUB_TOKEN: "nitely-token" },
+      git: async (cwd, args) => {
+        gitCalls.push({ cwd, args });
+        if (args[0] === "worktree" && args[1] === "list") {
+          return [
+            "worktree /repo",
+            "branch refs/heads/master",
+            "",
+            "worktree /repo/.nitely/runs/old-run/worktree",
+            "branch refs/heads/nitely/run-1",
+            "prunable gitdir file points to non-existent location",
+            "",
+          ].join("\n");
+        }
+        return "";
+      },
+      fetch: async () => new Response("{}", { status: 200 }),
+    });
+
+    await provider.checkoutChangeRequest?.({
+      repoPath: "/repo",
+      worktreePath: "/repo/.nitely/runs/new-run/worktree",
+      remoteName: "origin",
+      target: {
+        provider: "github",
+        owner: "Instask",
+        repository: "nitely",
+        number: 22,
+        url: "https://github.com/Instask/nitely/pull/22",
+        baseBranch: "master",
+        headBranch: "nitely/run-1",
+        headSha: "abc123",
+        headRepository: { owner: "Instask", repository: "nitely" },
+        isCrossRepository: false,
+      },
+    });
+
+    expect(gitCalls).toContainEqual({
+      cwd: "/repo",
+      args: ["worktree", "prune"],
     });
     expect(gitCalls.at(-1)).toEqual({
       cwd: "/repo",
@@ -1031,6 +1665,48 @@ describe("GitHubScmProvider", () => {
         "FETCH_HEAD",
       ],
     });
+  });
+
+  it("blocks checkout with an actionable message when an external worktree owns the pull request branch", async () => {
+    const provider = new GitHubScmProvider({
+      env: { NITELY_GITHUB_TOKEN: "nitely-token" },
+      git: async (_cwd, args) => {
+        if (args[0] === "worktree" && args[1] === "list") {
+          return [
+            "worktree /repo",
+            "branch refs/heads/master",
+            "",
+            "worktree /tmp/manual-nitely-run",
+            "branch refs/heads/nitely/run-1",
+            "",
+          ].join("\n");
+        }
+        return "";
+      },
+      fetch: async () => new Response("{}", { status: 200 }),
+    });
+
+    await expect(
+      provider.checkoutChangeRequest?.({
+        repoPath: "/repo",
+        worktreePath: "/repo/.nitely/runs/new-run/worktree",
+        remoteName: "origin",
+        target: {
+          provider: "github",
+          owner: "Instask",
+          repository: "nitely",
+          number: 22,
+          url: "https://github.com/Instask/nitely/pull/22",
+          baseBranch: "master",
+          headBranch: "nitely/run-1",
+          headSha: "abc123",
+          headRepository: { owner: "Instask", repository: "nitely" },
+          isCrossRepository: false,
+        },
+      }),
+    ).rejects.toThrow(
+      "pull request branch nitely/run-1 is already checked out at /tmp/manual-nitely-run. Remove or detach that worktree, then retry the Nitely checkout.",
+    );
   });
 
   it("rejects cross-repository targets during direct checkout and update calls", async () => {
@@ -1087,6 +1763,15 @@ describe("GitHubCliScmProvider", () => {
         if (args[0] === "remote") {
           return "git@github.com:Instask/nitely.git\n";
         }
+        if (args[0] === "ls-remote" && args[3] === "refs/heads/master") {
+          return "aaa111\trefs/heads/master\n";
+        }
+        if (args[0] === "ls-remote" && args[3] === "refs/heads/nitely/run-1") {
+          return "bbb222\trefs/heads/nitely/run-1\n";
+        }
+        if (args[0] === "rev-list") {
+          return "1\n";
+        }
         return "";
       },
       execFile: async (file, args, options) => {
@@ -1118,6 +1803,28 @@ describe("GitHubCliScmProvider", () => {
         cwd: "/repo/.nitely/worktree",
         args: ["push", "-u", "origin", "nitely/run-1"],
       },
+      {
+        cwd: "/repo/.nitely/worktree",
+        args: ["ls-remote", "--heads", "origin", "refs/heads/master"],
+      },
+      {
+        cwd: "/repo/.nitely/worktree",
+        args: ["ls-remote", "--heads", "origin", "refs/heads/nitely/run-1"],
+      },
+      {
+        cwd: "/repo/.nitely/worktree",
+        args: [
+          "fetch",
+          "--no-tags",
+          "origin",
+          "refs/heads/master",
+          "refs/heads/nitely/run-1",
+        ],
+      },
+      {
+        cwd: "/repo/.nitely/worktree",
+        args: ["rev-list", "--count", "aaa111..bbb222"],
+      },
     ]);
     expect(ghCalls).toEqual([
       {
@@ -1143,10 +1850,28 @@ describe("GitHubCliScmProvider", () => {
         cwd: "/repo/.nitely/worktree",
         args: [
           "pr",
+          "list",
+          "--head",
+          "nitely/run-1",
+          "--state",
+          "open",
+          "--json",
+          "number,url,isDraft",
+          "--limit",
+          "1",
+        ],
+      },
+      {
+        file: "gh",
+        cwd: "/repo/.nitely/worktree",
+        args: [
+          "pr",
           "create",
           "--draft",
           "--base",
           "master",
+          "--head",
+          "nitely/run-1",
           "--title",
           "Nitely: test",
           "--body-file",
@@ -1167,9 +1892,88 @@ describe("GitHubCliScmProvider", () => {
     });
   });
 
-  it("reuses an existing pull request through the GitHub CLI", async () => {
+  it("does not create a pull request when the base branch is missing", async () => {
     const ghCalls: Array<{ file: string; args: string[]; cwd: string }> = [];
     const provider = new GitHubCliScmProvider({
+      git: async (_cwd, args) => {
+        if (args[0] === "remote") {
+          return "git@github.com:Instask/nitely.git\n";
+        }
+        if (args[0] === "ls-remote" && args[3] === "refs/heads/nitely/run-1") {
+          return "bbb222\trefs/heads/nitely/run-1\n";
+        }
+        return "";
+      },
+      execFile: async (file, args, options) => {
+        ghCalls.push({ file, args, cwd: options.cwd });
+        return { stdout: "[]" };
+      },
+    });
+
+    await expect(
+      provider.publishChange({
+        repoPath: "/repo",
+        worktreePath: "/repo/.nitely/worktree",
+        remoteName: "origin",
+        baseBranch: "missing-base",
+        headBranch: "nitely/run-1",
+        title: "Nitely: test",
+        body: "Evidence body",
+      }),
+    ).rejects.toThrow(
+      "Cannot publish change request: base branch 'missing-base' does not exist on remote 'origin'. Check the configured base/head branch and retry.",
+    );
+    expect(ghCalls).toHaveLength(2);
+    expect(ghCalls[0]?.args.slice(0, 2)).toEqual(["pr", "list"]);
+    expect(ghCalls[1]?.args.slice(0, 2)).toEqual(["pr", "list"]);
+  });
+
+  it("does not create a pull request when there are no commits between base and head", async () => {
+    const ghCalls: Array<{ file: string; args: string[]; cwd: string }> = [];
+    const provider = new GitHubCliScmProvider({
+      git: async (_cwd, args) => {
+        if (args[0] === "remote") {
+          return "git@github.com:Instask/nitely.git\n";
+        }
+        if (args[0] === "ls-remote" && args[3] === "refs/heads/master") {
+          return "aaa111\trefs/heads/master\n";
+        }
+        if (args[0] === "ls-remote" && args[3] === "refs/heads/nitely/run-1") {
+          return "aaa111\trefs/heads/nitely/run-1\n";
+        }
+        if (args[0] === "rev-list") {
+          return "0\n";
+        }
+        return "";
+      },
+      execFile: async (file, args, options) => {
+        ghCalls.push({ file, args, cwd: options.cwd });
+        return { stdout: "[]" };
+      },
+    });
+
+    await expect(
+      provider.publishChange({
+        repoPath: "/repo",
+        worktreePath: "/repo/.nitely/worktree",
+        remoteName: "origin",
+        baseBranch: "master",
+        headBranch: "nitely/run-1",
+        title: "Nitely: test",
+        body: "Evidence body",
+      }),
+    ).rejects.toThrow(
+      "Cannot publish change request: no commits between base branch 'master' and head branch 'nitely/run-1'. Commit changes, choose the correct base branch, or reuse an existing pull request.",
+    );
+    expect(ghCalls).toHaveLength(2);
+    expect(ghCalls[0]?.args.slice(0, 2)).toEqual(["pr", "list"]);
+    expect(ghCalls[1]?.args.slice(0, 2)).toEqual(["pr", "list"]);
+  });
+
+  it("reuses an existing pull request through the GitHub CLI and refreshes metadata", async () => {
+    const ghCalls: Array<{ file: string; args: string[]; cwd: string }> = [];
+    const provider = new GitHubCliScmProvider({
+      env: {},
       git: async (_cwd, args) => {
         if (args[0] === "remote") {
           return "git@github.com:Instask/nitely.git\n";
@@ -1178,6 +1982,9 @@ describe("GitHubCliScmProvider", () => {
       },
       execFile: async (file, args, options) => {
         ghCalls.push({ file, args, cwd: options.cwd });
+        if (args[0] === "pr" && args[1] === "edit") {
+          return { stdout: "" };
+        }
         return {
           stdout: JSON.stringify([
             {
@@ -1198,10 +2005,42 @@ describe("GitHubCliScmProvider", () => {
       headBranch: "nitely/run-1",
       title: "Nitely: retry",
       body: "Evidence body",
+      bodyPath: "/repo/.nitely/runs/run-1/evidence.md",
     });
 
-    expect(ghCalls).toHaveLength(1);
-    expect(ghCalls[0]?.args.slice(0, 2)).toEqual(["pr", "list"]);
+    expect(ghCalls).toEqual([
+      {
+        file: "gh",
+        cwd: "/repo/.nitely/worktree",
+        args: [
+          "pr",
+          "list",
+          "--head",
+          "nitely/run-1",
+          "--base",
+          "master",
+          "--state",
+          "open",
+          "--json",
+          "number,url,isDraft",
+          "--limit",
+          "1",
+        ],
+      },
+      {
+        file: "gh",
+        cwd: "/repo/.nitely/worktree",
+        args: [
+          "pr",
+          "edit",
+          "158",
+          "--title",
+          "Nitely: retry",
+          "--body-file",
+          "/repo/.nitely/runs/run-1/evidence.md",
+        ],
+      },
+    ]);
     expect(result).toEqual({
       provider: "github",
       url: "https://github.com/Instask/nitely/pull/158",
@@ -1212,13 +2051,107 @@ describe("GitHubCliScmProvider", () => {
       headBranch: "nitely/run-1",
       draft: true,
       outcome: "reused",
+      metadataUpdate: {
+        transport: "github-cli",
+        outcome: "updated",
+        fields: ["title", "body"],
+      },
     });
+  });
+
+  it("recovers when gh pr create fails because a pull request already exists", async () => {
+    const ghCalls: Array<{ file: string; args: string[]; cwd: string }> = [];
+    let listLookups = 0;
+    const provider = new GitHubCliScmProvider({
+      env: {},
+      git: async (_cwd, args) => {
+        if (args[0] === "remote") {
+          return "git@github.com:Instask/nitely.git\n";
+        }
+        if (args[0] === "ls-remote" && args[3] === "refs/heads/master") {
+          return "aaa111\trefs/heads/master\n";
+        }
+        if (args[0] === "ls-remote" && args[3] === "refs/heads/nitely/run-1") {
+          return "bbb222\trefs/heads/nitely/run-1\n";
+        }
+        if (args[0] === "rev-list") {
+          return "1\n";
+        }
+        return "";
+      },
+      execFile: async (file, args, options) => {
+        ghCalls.push({ file, args, cwd: options.cwd });
+        if (args[0] === "pr" && args[1] === "list") {
+          // Pre-create lookups (with/without base) miss; recovery finds the PR.
+          listLookups += 1;
+          if (listLookups <= 2) {
+            return { stdout: "[]" };
+          }
+          return {
+            stdout: JSON.stringify([
+              {
+                number: 99,
+                url: "https://github.com/Instask/nitely/pull/99",
+                isDraft: true,
+              },
+            ]),
+          };
+        }
+        if (args[0] === "pr" && args[1] === "create") {
+          const error = new Error(
+            'a pull request for branch "nitely/run-1" into branch "master" already exists: https://github.com/Instask/nitely/pull/99',
+          ) as Error & { stderr: string };
+          error.stderr =
+            'a pull request for branch "nitely/run-1" into branch "master" already exists: https://github.com/Instask/nitely/pull/99';
+          throw error;
+        }
+        if (args[0] === "pr" && args[1] === "edit") {
+          return { stdout: "" };
+        }
+        return { stdout: "" };
+      },
+    });
+
+    const result = await provider.publishChange({
+      repoPath: "/repo",
+      worktreePath: "/repo/.nitely/worktree",
+      remoteName: "origin",
+      baseBranch: "master",
+      headBranch: "nitely/run-1",
+      title: "Nitely: race",
+      body: "Evidence body",
+      bodyPath: "/repo/.nitely/runs/run-1/evidence.md",
+    });
+
+    expect(result).toEqual({
+      provider: "github",
+      url: "https://github.com/Instask/nitely/pull/99",
+      number: 99,
+      owner: "Instask",
+      repository: "nitely",
+      baseBranch: "master",
+      headBranch: "nitely/run-1",
+      draft: true,
+      outcome: "updated",
+      metadataUpdate: {
+        transport: "github-cli",
+        outcome: "updated",
+        fields: ["title", "body"],
+      },
+    });
+    expect(ghCalls.some((call) => call.args[0] === "pr" && call.args[1] === "create")).toBe(
+      true,
+    );
+    expect(
+      ghCalls.filter((call) => call.args[0] === "pr" && call.args[1] === "list").length,
+    ).toBeGreaterThanOrEqual(3);
   });
 
   it("edits the pull request title after pushing updates to an existing pull request", async () => {
     const gitCalls: Array<{ cwd: string; args: string[] }> = [];
     const ghCalls: Array<{ file: string; args: string[]; cwd: string }> = [];
     const provider = new GitHubCliScmProvider({
+      env: {},
       git: async (cwd, args) => {
         gitCalls.push({ cwd, args });
         if (args[0] === "status") {
@@ -1284,6 +2217,162 @@ describe("GitHubCliScmProvider", () => {
       number: 22,
       previousHeadSha: "abc123",
       updatedHeadSha: "def456",
+      metadataUpdate: {
+        transport: "github-cli",
+        outcome: "updated",
+        fields: ["title"],
+      },
+    });
+  });
+
+  it("edits pull request body from an evidence file without pushing branch updates", async () => {
+    const gitCalls: Array<{ cwd: string; args: string[] }> = [];
+    const ghCalls: Array<{ file: string; args: string[]; cwd: string }> = [];
+    const provider = new GitHubCliScmProvider({
+      env: {},
+      git: async (cwd, args) => {
+        gitCalls.push({ cwd, args });
+        return "";
+      },
+      execFile: async (file, args, options) => {
+        ghCalls.push({ file, args, cwd: options.cwd });
+        return { stdout: "" };
+      },
+    });
+
+    const result = await provider.updateChangeRequestMetadata?.({
+      repoPath: "/repo",
+      worktreePath: "/repo/.nitely/runs/run-1/worktree",
+      remoteName: "origin",
+      changeRequest: {
+        provider: "github",
+        owner: "Instask",
+        repository: "nitely",
+        number: 22,
+        url: "https://github.com/Instask/nitely/pull/22",
+        baseBranch: "master",
+        headBranch: "nitely/run-1",
+        draft: true,
+      },
+      body: "Final evidence",
+      bodyPath: "/repo/.nitely/runs/run-1/evidence.md",
+    });
+
+    expect(gitCalls).toEqual([]);
+    expect(ghCalls).toEqual([
+      {
+        file: "gh",
+        cwd: "/repo/.nitely/runs/run-1/worktree",
+        args: [
+          "pr",
+          "edit",
+          "22",
+          "--body-file",
+          "/repo/.nitely/runs/run-1/evidence.md",
+        ],
+      },
+    ]);
+    expect(result).toMatchObject({
+      url: "https://github.com/Instask/nitely/pull/22",
+      number: 22,
+      metadataUpdate: {
+        transport: "github-cli",
+        outcome: "updated",
+        fields: ["body"],
+      },
+    });
+  });
+
+  it("updates pull request metadata with REST when a token is available to avoid gh pr edit GraphQL failures", async () => {
+    const gitCalls: Array<{ cwd: string; args: string[] }> = [];
+    const ghCalls: Array<{ file: string; args: string[]; cwd: string }> = [];
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const projectsClassicFailure =
+      "GraphQL: Projects (classic) is being deprecated in favor of the new Projects experience (repository.pullRequest.projectCards)";
+    const provider = new GitHubCliScmProvider({
+      env: { NITELY_GITHUB_TOKEN: "nitely-token" },
+      git: async (cwd, args) => {
+        gitCalls.push({ cwd, args });
+        if (args[0] === "status") {
+          return "";
+        }
+        if (args[0] === "rev-parse") {
+          return "def456\n";
+        }
+        return "";
+      },
+      execFile: async (file, args, options) => {
+        ghCalls.push({ file, args, cwd: options.cwd });
+        throw new Error(projectsClassicFailure);
+      },
+      fetch: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return new Response("{}", { status: 200 });
+      },
+    });
+
+    const result = await provider.updateChangeRequest?.({
+      repoPath: "/repo",
+      worktreePath: "/repo/.nitely/runs/run-1/worktree",
+      remoteName: "origin",
+      target: {
+        provider: "github",
+        owner: "Instask",
+        repository: "nitely",
+        number: 22,
+        url: "https://github.com/Instask/nitely/pull/22",
+        baseBranch: "master",
+        headBranch: "nitely/run-1",
+        headSha: "abc123",
+        headRepository: { owner: "Instask", repository: "nitely" },
+        isCrossRepository: false,
+      },
+      title: "Nitely: rework",
+    });
+
+    expect(ghCalls).toEqual([]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe(
+      "https://api.github.com/repos/Instask/nitely/pulls/22",
+    );
+    expect(requests[0]?.init?.method).toBe("PATCH");
+    expect(requests[0]?.init?.headers).toMatchObject({
+      Authorization: "Bearer nitely-token",
+      Accept: "application/vnd.github+json",
+      "Content-Type": "application/json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    });
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
+      title: "Nitely: rework",
+    });
+    expect(gitCalls).toEqual([
+      {
+        cwd: "/repo/.nitely/runs/run-1/worktree",
+        args: ["add", "."],
+      },
+      {
+        cwd: "/repo/.nitely/runs/run-1/worktree",
+        args: ["status", "--short"],
+      },
+      {
+        cwd: "/repo/.nitely/runs/run-1/worktree",
+        args: ["push", "origin", "HEAD:nitely/run-1"],
+      },
+      {
+        cwd: "/repo/.nitely/runs/run-1/worktree",
+        args: ["rev-parse", "HEAD"],
+      },
+    ]);
+    expect(result).toMatchObject({
+      url: "https://github.com/Instask/nitely/pull/22",
+      number: 22,
+      previousHeadSha: "abc123",
+      updatedHeadSha: "def456",
+      metadataUpdate: {
+        transport: "github-rest-api",
+        outcome: "updated",
+        fields: ["title"],
+      },
     });
   });
 });

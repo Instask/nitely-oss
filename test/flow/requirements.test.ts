@@ -9,7 +9,16 @@ describe("stageDependencyRequirements", () => {
       id: "implement",
       type: "agent",
       runtime: "codex",
-      required_mcp_servers: ["google-docs", "github-cli", "claude", "zhipu", "openai"],
+      required_mcp_servers: [
+        "google-docs",
+        "github-cli",
+        "claude",
+        "zhipu",
+        "grok",
+        "xai",
+        "pi",
+        "openai",
+      ],
       required_connectors: [],
       prompt: "Implement.",
       inputs: [],
@@ -18,9 +27,26 @@ describe("stageDependencyRequirements", () => {
     } satisfies Stage;
 
     expect(stageDependencyRequirements(stage)).toMatchObject({
-      mcpServers: ["google-docs", "github-cli", "claude", "zhipu", "openai"],
+      mcpServers: [
+        "google-docs",
+        "github-cli",
+        "claude",
+        "zhipu",
+        "grok",
+        "xai",
+        "pi",
+        "openai",
+      ],
       connectors: [],
-      providerIds: ["google-drive", "github", "anthropic", "glm", "codex"],
+      providerIds: [
+        "google-drive",
+        "github",
+        "anthropic",
+        "glm",
+        "grok",
+        "pi",
+        "codex",
+      ],
       unknownMcpServers: [],
     });
   });

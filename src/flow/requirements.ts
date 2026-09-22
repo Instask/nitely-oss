@@ -19,14 +19,20 @@ const MCP_PROVIDER_REQUIREMENTS = new Map<string, ProviderId>([
   ["anthropic", "anthropic"],
   ["glm", "glm"],
   ["zhipu", "glm"],
+  ["grok", "grok"],
+  ["xai", "grok"],
+  ["pi", "pi"],
   ["codex", "codex"],
   ["openai", "codex"],
 ]);
 
 function hasDependencyDeclarations(
   stage: Stage,
-): stage is Extract<Stage, { type: "agent" }> | Extract<Stage, { type: "gate"; mode: "review" }> {
-  return stage.type === "agent" || (stage.type === "gate" && stage.mode === "review");
+): stage is
+  | Extract<Stage, { type: "agent" }>
+  | Extract<Stage, { type: "judge" }>
+  | Extract<Stage, { type: "gate"; mode: "review" }> {
+  return stage.type === "agent" || stage.type === "judge" || (stage.type === "gate" && stage.mode === "review");
 }
 
 function appendUnique<T>(values: T[], value: T): void {

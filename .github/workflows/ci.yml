@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck and tests
+    # Linux is the deployment target, and a large part of the suite asserts
+    # Linux descriptor-relative path anchoring that cannot run on macOS, so
+    # this is the only platform where a green run means anything.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reads the pnpm version from the `packageManager` field, and must run
+      # before setup-node so the pnpm store cache can be resolved.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Both commands are exactly what a contributor runs locally. A type error
+      # here is a merge blocker, not a baseline to carry forward: the `pass`/
+      # `fail` verdict regression that reached master on 2026-09-18 was a real
+      # behavioral bug that tsc had been reporting for three hours.
+      - name: Typecheck
+        run: pnpm run check
+
+      - name: Tests
+        run: pnpm run test:run

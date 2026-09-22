@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { ResourceReference } from "../connectors/types.js";
+import type { NormalizedReviewFeedback } from "../review-feedback/model.js";
 import type { ChangeRequestTarget, PullRequestDiscussionItem } from "../scm/types.js";
 import type { ParsedNitelyCommand } from "./commands.js";
 import { commentTriggerRoot, type CommentStateLocation } from "./state.js";
@@ -11,6 +12,7 @@ export interface MaterializeCommentTriggerInputsInput {
   target: ChangeRequestTarget;
   comment: PullRequestDiscussionItem;
   command: ParsedNitelyCommand;
+  feedback?: NormalizedReviewFeedback;
   priorRunId?: string;
 }
 
@@ -31,6 +33,16 @@ export async function materializeCommentTriggerInputs(
   const specPath = join(directory, "spec.md");
   const techDesignPath = join(directory, "tech-design.md");
   const triggerPath = join(directory, "trigger.json");
+  const feedbackPath = join(directory, "feedback.json");
+  const memoryProposalLines = input.feedback?.memoryProposals.length
+    ? [
+        "",
+        "Memory proposals:",
+        ...input.feedback.memoryProposals.map(
+          (proposal) => `- ${proposal.title}`,
+        ),
+      ]
+    : [];
 
   await writeFile(
     specPath,
@@ -45,9 +57,18 @@ export async function materializeCommentTriggerInputs(
       `Author association: ${input.comment.authorAssociation ?? ""}`,
       `Command action: ${input.command.action}`,
       `Instruction: ${input.command.instruction}`,
+      ...(input.feedback
+        ? [
+            `Feedback route: ${input.feedback.route.target}`,
+            `Route confidence: ${input.feedback.route.confidence}`,
+            `Route reason: ${input.feedback.route.reason}`,
+            `Operator approval required: ${input.feedback.route.requiresOperatorApproval ? "yes" : "no"}`,
+          ]
+        : []),
       `Previous run ID: ${input.priorRunId ?? ""}`,
       "",
       "Update the existing PR branch only. Keep the change scoped to this comment-triggered request.",
+      ...memoryProposalLines,
       "",
     ].join("\n"),
     "utf8",
@@ -81,6 +102,7 @@ export async function materializeCommentTriggerInputs(
         authorAssociation: input.comment.authorAssociation,
         action: input.command.action,
         instruction: input.command.instruction,
+        feedback: input.feedback,
         priorRunId: input.priorRunId,
       },
       null,
@@ -88,6 +110,9 @@ export async function materializeCommentTriggerInputs(
     ),
     "utf8",
   );
+  if (input.feedback) {
+    await writeFile(feedbackPath, JSON.stringify(input.feedback, null, 2), "utf8");
+  }
 
   return {
     directory,

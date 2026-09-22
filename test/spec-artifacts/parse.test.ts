@@ -10,6 +10,7 @@ describe("structured spec artifacts", () => {
     const result = validateStructuredSpec(structuredSpecTemplate);
 
     expect(result.valid).toBe(true);
+    expect(result.status).toBeUndefined();
     expect(result.stories.map((story) => story.id)).toEqual(["US-001", "US-002"]);
     expect(result.requirements.map((requirement) => requirement.id)).toEqual([
       "FR-001",
@@ -21,6 +22,41 @@ describe("structured spec artifacts", () => {
       "SC-002",
       "SC-003",
     ]);
+  });
+
+  it("reads leading structured spec status metadata", () => {
+    const result = validateStructuredSpec(`# Feature Spec
+
+Status: approved
+Source: github-issue https://github.com/Instask/nitely/issues/291
+
+## Background
+Problem.
+
+## User Stories
+- **US-001:** As an operator, I can approve a generated draft spec.
+
+## Acceptance Scenarios
+- **US-001 / SC-001:** Approval updates the persisted artifact status.
+
+## Functional Requirements
+- **FR-001:** The persisted spec artifact must record approved status.
+
+## Success Criteria
+- **SC-001:** Technical design drafting can use the approved spec.
+
+## Edge Cases
+None.
+
+## Assumptions
+None.
+
+## Out Of Scope
+None.
+`);
+
+    expect(result.valid).toBe(true);
+    expect(result.status).toBe("approved");
   });
 
   it("reports duplicate story, requirement, and success criterion ids", () => {

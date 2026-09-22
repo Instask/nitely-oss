@@ -1,0 +1,87 @@
+{
+  "apiVersion": "nitely.dev/v1alpha1",
+  "kind": "Flow",
+  "metadata": {
+    "name": "pilot-judge-implement-pr",
+    "workItemType": "dev.pr",
+    "inputs": [{ "id": "spec" }]
+  },
+  "spec": {
+    "maxAttempts": 2,
+    "verificationBudget": {
+      "maxAgentAttempts": 6,
+      "maxJudgeAttempts": 3,
+      "maxCiRuns": 2,
+      "maxRuntimeCostUsd": 10
+    },
+    "stages": [
+      {
+        "id": "implement",
+        "type": "agent",
+        "costClass": "moderate",
+        "runtime": "codex",
+        "prompt": "Implement the supplied specification and write an implementation artifact.",
+        "inputs": ["spec"],
+        "outputs": ["implementation"]
+      },
+      {
+        "id": "verify",
+        "type": "command",
+        "costClass": "cheap",
+        "command": "pnpm check",
+        "timeoutMs": 600000,
+        "inputs": ["implementation"],
+        "outputs": ["static-report"]
+      },
+      {
+        "id": "targeted-verify",
+        "type": "command",
+        "costClass": "moderate",
+        "command": "pnpm exec vitest run test/flow test/run",
+        "timeoutMs": 600000,
+        "inputs": ["implementation", "static-report"],
+        "outputs": ["targeted-test-report"]
+      },
+      {
+        "id": "judge",
+        "type": "judge",
+        "costClass": "moderate",
+        "runtime": "codex",
+        "prompt": "Judge the implementation against the criteria and return a structured JSON verdict.",
+        "criteria": [
+          "the requested behavior is implemented",
+          "the deterministic test report is green",
+          "no unrelated scope was introduced"
+        ],
+        "onRework": "implement",
+        "maxRework": 2,
+        "maxAttempts": 3,
+        "inputs": ["spec", "implementation", "targeted-test-report"],
+        "outputs": [
+          {
+            "id": "judge-result",
+            "type": "judge.result",
+            "description": "Structured PASS, REWORK, or HUMAN_REVIEW verdict with findings and evidence.",
+            "mediaType": "application/json"
+          }
+        ]
+      },
+      {
+        "id": "full-ci",
+        "type": "command",
+        "costClass": "expensive",
+        "command": "pnpm test:run",
+        "timeoutMs": 600000,
+        "inputs": ["implementation", "judge-result"],
+        "outputs": ["full-test-report"]
+      },
+      {
+        "id": "publish",
+        "type": "publish-change",
+        "provider": "github-cli",
+        "inputs": ["implementation", "targeted-test-report", "judge-result", "full-test-report"],
+        "outputs": ["change-request"]
+      }
+    ]
+  }
+}

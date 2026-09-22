@@ -17,6 +17,8 @@ export type PlanningDecision = "approve" | "reject" | "request_changes";
 export interface PlanningArtifactStatus {
   path: string;
   state: Exclude<PlanningState, "ready_for_execution">;
+  versionId?: string;
+  contentHash?: string;
 }
 
 export interface PlanningApprovalEvent {
@@ -198,6 +200,18 @@ export function validatePlanningApprovalStatus(
     if (!artifactStates.has(artifact.state)) {
       throw new WebInputError(`invalid planning state: ${artifact.state}`);
     }
+    if (
+      artifact.versionId !== undefined &&
+      typeof artifact.versionId !== "string"
+    ) {
+      throw new WebInputError(`invalid planning ${name} version id`);
+    }
+    if (
+      artifact.contentHash !== undefined &&
+      typeof artifact.contentHash !== "string"
+    ) {
+      throw new WebInputError(`invalid planning ${name} content hash`);
+    }
   }
   for (const event of cloned.events) {
     if (
@@ -308,14 +322,32 @@ export function formatPlanningApprovalEvidence(
   if (normalized.artifacts.spec) {
     lines.push(`- spec: ${normalized.artifacts.spec.state}`);
     lines.push(`  Path: ${normalized.artifacts.spec.path}`);
+    if (normalized.artifacts.spec.versionId) {
+      lines.push(`  Version: ${normalized.artifacts.spec.versionId}`);
+    }
+    if (normalized.artifacts.spec.contentHash) {
+      lines.push(`  Hash: ${normalized.artifacts.spec.contentHash}`);
+    }
   }
   if (normalized.artifacts.techDesign) {
     lines.push(`- tech-design: ${normalized.artifacts.techDesign.state}`);
     lines.push(`  Path: ${normalized.artifacts.techDesign.path}`);
+    if (normalized.artifacts.techDesign.versionId) {
+      lines.push(`  Version: ${normalized.artifacts.techDesign.versionId}`);
+    }
+    if (normalized.artifacts.techDesign.contentHash) {
+      lines.push(`  Hash: ${normalized.artifacts.techDesign.contentHash}`);
+    }
   }
   if (normalized.artifacts.tasks) {
     lines.push(`- tasks: ${normalized.artifacts.tasks.state}`);
     lines.push(`  Path: ${normalized.artifacts.tasks.path}`);
+    if (normalized.artifacts.tasks.versionId) {
+      lines.push(`  Version: ${normalized.artifacts.tasks.versionId}`);
+    }
+    if (normalized.artifacts.tasks.contentHash) {
+      lines.push(`  Hash: ${normalized.artifacts.tasks.contentHash}`);
+    }
   }
   lines.push(`- derived: ${derivePlanningExecutionState(normalized)}`);
   lines.push(`- events: ${normalized.events.length}`);

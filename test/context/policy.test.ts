@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -27,6 +27,10 @@ describe("context policy", () => {
       "certs/service.pem",
       "keys/deploy.key",
       ".nitely/providers/github.json",
+      ".nitely/connections.json",
+      ".nitely/connections.secrets.json",
+      ".nitely/connections.json.audit.jsonl",
+      ".nitely/users/usr_1/connections.secrets.json",
       ".nitely/events.db",
       "nested/id_rsa",
       "nested/id_ed25519",
