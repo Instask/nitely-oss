@@ -16,6 +16,11 @@ It turns approved engineering intent into evidence-backed, reviewable draft PRs
 through declared flows, typed artifacts, verification, policy gates, durable
 recovery, and human review.
 
+The product definition is four constraints: intent is explicit, execution is
+constrained, results require evidence, and humans retain authority. See
+[product.md](product.md). This document is the buyer-facing wedge those
+constraints produce.
+
 Codex, Claude Code, GLM, and future coding agents are interchangeable execution
 runtimes. Nitely's product is the contract and evidence path around them: what
 was approved, what each stage consumed and produced, what passed, what blocked,

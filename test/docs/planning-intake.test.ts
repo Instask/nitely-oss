@@ -7,10 +7,10 @@ const repositoryRoot = join(import.meta.dirname, "..", "..");
 
 describe("planning intake contract", () => {
   it("documents the shared intake sources, provenance, drift, and gates", async () => {
-    const [contract, readme, chineseReadme] = await Promise.all([
+    const [contract, remoteOperations, chineseConsole] = await Promise.all([
       readFile(join(repositoryRoot, "docs", "planning-intake.md"), "utf8"),
-      readFile(join(repositoryRoot, "README.md"), "utf8"),
-      readFile(join(repositoryRoot, "README.zh-CN.md"), "utf8"),
+      readFile(join(repositoryRoot, "docs", "remote-operations.md"), "utf8"),
+      readFile(join(repositoryRoot, "docs", "web-console.zh-CN.md"), "utf8"),
     ]);
 
     expect(contract).toContain("# Planning Intake");
@@ -40,8 +40,8 @@ describe("planning intake contract", () => {
     expect(contract).toContain("does not hold a Lark/Feishu, Confluence, or Google Docs credential");
     expect(contract).toContain("What intake never persists: provider tokens");
 
-    for (const readmeFile of [readme, chineseReadme]) {
-      expect(readmeFile).toContain("docs/planning-intake.md");
+    for (const readmeFile of [remoteOperations, chineseConsole]) {
+      expect(readmeFile).toContain("planning-intake.md");
       expect(readmeFile).toContain("pnpm dev -- task plan --prompt");
       expect(readmeFile).toContain("pnpm dev -- task plan --issue");
       expect(readmeFile).toContain("pnpm dev -- task plan --jira");

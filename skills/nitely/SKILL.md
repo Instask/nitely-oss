@@ -112,8 +112,11 @@ that cap unblocks a budget-stopped run. Verification attempt/cost caps on
 - **A command fails, a run blocks, a provider errors** → `references/troubleshooting.md`
 - **Deploy, configure, or drive a running Web instance: OCI backend, service environment, Console credentials, device-code login, remote task create/start** → `references/web-operations.md`
 
-Repository documentation is the deeper source: `README.md`,
-`docs/flow-authoring-guide.md`, `docs/local-mcp.md`,
+Repository documentation is the deeper source: `docs/product.md` for the four
+constraints, `README.md` for install, `docs/running-flows.md`,
+`docs/rework-and-recovery.md`, `docs/web-console.md`,
+`docs/remote-operations.md`, `docs/local-mcp.md`,
+`docs/flow-authoring-guide.md`, `docs/flow-format.md`,
 `docs/harness-and-audit.md`, and `docs/user-defined-flows.md`.
 
 ## Guardrails

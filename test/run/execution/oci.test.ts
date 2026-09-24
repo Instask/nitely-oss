@@ -2281,7 +2281,7 @@ describe("OciExecutionBackend", () => {
     expect(JSON.stringify(description)).not.toContain("never-record-this-value");
   });
 
-  it("states host-only Git as the permanent sandbox limitation and matches the README", async () => {
+  it("states host-only Git as the permanent sandbox limitation and matches the execution-backend docs", async () => {
     const backend = new OciExecutionBackend({
       image: "nitely-runner:test",
     });
@@ -2294,7 +2294,10 @@ describe("OciExecutionBackend", () => {
     expect(emittedGit).not.toMatch(/this slice|opt-in|follow-up/i);
 
     const readme = (
-      await readFile(join(import.meta.dirname, "..", "..", "..", "README.md"), "utf8")
+      await readFile(
+        join(import.meta.dirname, "..", "..", "..", "docs", "execution-backends.md"),
+        "utf8",
+      )
     )
       .replaceAll("`", "")
       .replace(/\s+/g, " ");

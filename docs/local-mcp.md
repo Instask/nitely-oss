@@ -27,7 +27,7 @@ own bounded code paths.
 
 Every API token is owned by a user, so the instance needs at least one user
 before a token can be minted. If none exist yet, bootstrap the initial admin
-once (see the [README's Web Console bootstrap](../README.md#web-console)):
+once (see the [Web Console bootstrap](web-console.md)):
 
 ```bash
 NITELY_ADMIN_EMAIL=admin@example.test \

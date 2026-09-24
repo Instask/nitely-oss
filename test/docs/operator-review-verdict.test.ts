@@ -8,7 +8,7 @@ const repositoryRoot = join(import.meta.dirname, "..", "..");
 describe("operator review verdict documentation", () => {
   it("documents the audited fallback and safer runtime alternatives", async () => {
     const [readme, authoring, design, trust] = await Promise.all([
-      readFile(join(repositoryRoot, "README.md"), "utf8"),
+      readFile(join(repositoryRoot, "docs", "rework-and-recovery.md"), "utf8"),
       readFile(join(repositoryRoot, "docs", "user-defined-flows.md"), "utf8"),
       readFile(
         join(
