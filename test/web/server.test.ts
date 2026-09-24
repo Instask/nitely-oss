@@ -6249,6 +6249,75 @@ describe("web server API and HTML", () => {
     });
   });
 
+  it("serves agent stability projection with zero counts and OSS candidates", async () => {
+    const repoPath = await createRepo();
+    const server = await startTestServer(repoPath);
+
+    const response = await fetch(`${server.url}/api/agent-stability`);
+    expect(response.status).toBe(200);
+    const body = (await json(response)) as {
+      agentStability: {
+        summary: {
+          active: number;
+          blocked: number;
+          failed: number;
+          incomplete: number;
+          completed: number;
+          total: number;
+        };
+        attention: unknown[];
+        failureClusters: unknown[];
+        runnerReadiness: unknown[];
+        changeRecords: unknown[];
+        verification: { totalStages: number };
+        ossExtraction: Array<{ id: string; status: string }>;
+      };
+    };
+
+    expect(body.agentStability.summary).toEqual({
+      active: 0,
+      blocked: 0,
+      failed: 0,
+      incomplete: 0,
+      completed: 0,
+      total: 0,
+    });
+    expect(body.agentStability.attention).toEqual([]);
+    expect(body.agentStability.failureClusters).toEqual([]);
+    expect(body.agentStability.runnerReadiness).toEqual([]);
+    expect(body.agentStability.changeRecords).toEqual([]);
+    expect(body.agentStability.verification.totalStages).toBe(0);
+    expect(body.agentStability.ossExtraction.map((item) => item.id)).toEqual([
+      "protocol",
+      "runner-lifecycle",
+      "evidence-metadata",
+      "connector-interface",
+      "doctor",
+    ]);
+    expect(
+      body.agentStability.ossExtraction.every((item) => item.status === "candidate"),
+    ).toBe(true);
+
+    // Response must not include credential material (paths/env values).
+    // Candidate copy may mention the word "secrets" as documentation only.
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toMatch(/password\s*[:=]|api[_-]?key\s*[:=]|Bearer\s+[A-Za-z0-9._-]+/i);
+    expect(serialized).not.toMatch(/\/home\/|\/Users\/|sk-[A-Za-z0-9]{10,}/);
+  });
+
+  it("serves the Agent Stability console at the /agent-stability page route", async () => {
+    const repoPath = await createRepo();
+    const server = await startTestServer(repoPath);
+
+    const response = await fetch(`${server.url}/agent-stability`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/html");
+    const html = await response.text();
+    expect(html).toContain('data-screen-label="Agent Stability"');
+    expect(html).toContain('path === "/agent-stability"');
+  });
+
   it("returns task detail data through the API and serves the Design Component for task routes", async () => {
     const repoPath = await createRepo();
     const server = await startTestServer(repoPath);

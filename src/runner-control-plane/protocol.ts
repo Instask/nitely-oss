@@ -15,17 +15,48 @@ export type ControlPlaneToRunnerEventKind =
   | "policy.updated"
   | "evidence.upload_requested";
 
+export const CONTROL_PLANE_TO_RUNNER_EVENT_KINDS = new Set([
+  "runner.register.accepted",
+  "task.assigned",
+  "task.cancel_requested",
+  "policy.updated",
+  "evidence.upload_requested",
+] as const);
+
 export type RunnerToControlPlaneEventKind =
   | "runner.heartbeat"
   | "task.accepted"
   | "task.rejected"
+  | "run.preparing"
   | "run.started"
   | "stage.updated"
   | "run.blocked"
   | "run.completed"
   | "run.failed"
+  | "run.cancelled"
   | "evidence.reported"
   | "runner.error";
+
+export const RUNNER_TO_CONTROL_PLANE_EVENT_KINDS = new Set([
+  "runner.heartbeat",
+  "task.accepted",
+  "task.rejected",
+  "run.preparing",
+  "run.started",
+  "stage.updated",
+  "run.blocked",
+  "run.completed",
+  "run.failed",
+  "run.cancelled",
+  "evidence.reported",
+  "runner.error",
+] as const);
+
+const RUNNER_CONTROL_PLANE_REDACTION_STATUSES = new Set([
+  "metadata_only",
+  "sanitized",
+  "explicit_raw_upload",
+] as const);
 
 export interface RunnerProtocolEvent<
   Kind extends string = string,
@@ -61,13 +92,41 @@ export interface RunnerPolicySnapshot {
   allowedUploadRedactionStatuses?: RunnerControlPlaneRedactionStatus[];
 }
 
+export interface RunnerRepositoryRef {
+  repoId: string;
+  name?: string;
+  cloneUrl?: string;
+  defaultBranch?: string;
+}
+
 export interface RunnerTaskAssignment {
   taskId: string;
   repoId: string;
+  repository?: RunnerRepositoryRef;
+  sourceRevision?: string;
   flowId: string;
+  flowPath?: string;
   policyVersion: string;
   title?: string;
   inputs?: Record<string, unknown>;
+}
+
+export interface RunnerEvidenceArtifactMetadata {
+  [key: string]: unknown;
+  artifactId?: string;
+  id?: string;
+  kind?: string;
+  name?: string;
+  uri?: string;
+  mediaType?: string;
+  bytes?: number;
+  redactionStatus?: RunnerControlPlaneRedactionStatus;
+}
+
+export interface RunnerEvidenceReportedPayload {
+  runId: string;
+  artifacts: RunnerEvidenceArtifactMetadata[];
+  redactionStatus?: RunnerControlPlaneRedactionStatus;
 }
 
 export type AssignmentRejectionReason =
@@ -115,6 +174,18 @@ export interface CreateRunnerProtocolEventInput<
 export function createRunnerProtocolEvent<
   Kind extends RunnerToControlPlaneEventKind | ControlPlaneToRunnerEventKind,
 >(input: CreateRunnerProtocolEventInput<Kind>): RunnerProtocolEvent<Kind> {
+  if (
+    !CONTROL_PLANE_TO_RUNNER_EVENT_KINDS.has(
+      input.kind as ControlPlaneToRunnerEventKind,
+    ) &&
+    !RUNNER_TO_CONTROL_PLANE_EVENT_KINDS.has(
+      input.kind as RunnerToControlPlaneEventKind,
+    )
+  ) {
+    throw new RunnerProtocolValidationError(
+      `unsupported runner protocol event kind ${input.kind}`,
+    );
+  }
   validateProtocolSegment("tenant id", input.tenantId);
   validateProtocolSegment("runner id", input.runnerId);
   validatePolicyVersion(input.policyVersion);
@@ -201,7 +272,13 @@ export function runnerEventForAssignmentDecision(input: {
       payload: {
         taskId: input.assignment.taskId,
         repoId: input.assignment.repoId,
+        ...(input.assignment.sourceRevision
+          ? { sourceRevision: input.assignment.sourceRevision }
+          : {}),
         flowId: input.assignment.flowId,
+        ...(input.assignment.flowPath
+          ? { flowPath: input.assignment.flowPath }
+          : {}),
         policyVersion: input.policy.policyVersion,
       },
     });
@@ -246,13 +323,37 @@ export function assertMetadataBoundary(input: {
   }
 }
 
+export function assertAssignmentMetadataBoundary(
+  assignment: RunnerTaskAssignment,
+): void {
+  const violations = [
+    ...findSensitiveAssignmentPaths(assignment),
+    ...findSensitivePayloadPaths(assignment.inputs ?? {}, "assignment.inputs"),
+  ];
+  if (violations.length > 0) {
+    throw new MetadataBoundaryError(
+      `assignment metadata contains disallowed fields: ${violations.join(", ")}`,
+    );
+  }
+}
+
 export function assertRunnerEventEnvelope(input: {
   event: RunnerToControlPlaneEvent;
   policy: RunnerPolicySnapshot;
 }): void {
+  validateProtocolSegment("event id", input.event.eventId);
   if (input.event.schemaVersion !== RUNNER_CONTROL_PLANE_SCHEMA_VERSION) {
     throw new RunnerProtocolValidationError(
       `unsupported runner protocol schema ${input.event.schemaVersion}`,
+    );
+  }
+  if (
+    !RUNNER_TO_CONTROL_PLANE_EVENT_KINDS.has(
+      input.event.kind as RunnerToControlPlaneEventKind,
+    )
+  ) {
+    throw new RunnerProtocolValidationError(
+      `unsupported runner event kind ${input.event.kind}`,
     );
   }
   if (input.event.tenantId !== input.policy.tenantId) {
@@ -264,37 +365,182 @@ export function assertRunnerEventEnvelope(input: {
   if (input.event.policyVersion !== input.policy.policyVersion) {
     throw new RunnerProtocolValidationError("runner event policy mismatch");
   }
+  if (input.event.kind !== "runner.heartbeat" && input.event.taskId === undefined) {
+    throw new RunnerProtocolValidationError(
+      "runner event task id is required for assignment events",
+    );
+  }
+  if (input.event.taskId !== undefined) {
+    validateProtocolSegment("task id", input.event.taskId);
+  }
+  if (input.event.runId !== undefined) {
+    validateProtocolSegment("run id", input.event.runId);
+  }
+  if (
+    input.event.sequence !== undefined &&
+    (!Number.isInteger(input.event.sequence) || input.event.sequence < 0)
+  ) {
+    throw new RunnerProtocolValidationError(
+      "runner protocol sequence must be a non-negative integer",
+    );
+  }
+  if (
+    typeof input.event.createdAt !== "string" ||
+    Number.isNaN(Date.parse(input.event.createdAt))
+  ) {
+    throw new RunnerProtocolValidationError(
+      "runner event createdAt must be a valid timestamp",
+    );
+  }
+  if (!isRecord(input.event.payload)) {
+    throw new RunnerProtocolValidationError(
+      "runner event payload must be an object",
+    );
+  }
 }
 
-function validateProtocolSegment(kind: string, value: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,160}$/.test(value)) {
+export function assertControlPlaneEventEnvelope(input: {
+  event: ControlPlaneToRunnerEvent;
+  policy: RunnerPolicySnapshot;
+  requirePolicyMatch?: boolean;
+}): void {
+  validateProtocolSegment("event id", input.event.eventId);
+  if (input.event.schemaVersion !== RUNNER_CONTROL_PLANE_SCHEMA_VERSION) {
+    throw new RunnerProtocolValidationError(
+      `unsupported runner protocol schema ${input.event.schemaVersion}`,
+    );
+  }
+  if (
+    !CONTROL_PLANE_TO_RUNNER_EVENT_KINDS.has(
+      input.event.kind as ControlPlaneToRunnerEventKind,
+    )
+  ) {
+    throw new RunnerProtocolValidationError(
+      `unsupported control-plane event kind ${input.event.kind}`,
+    );
+  }
+  if (input.event.tenantId !== input.policy.tenantId) {
+    throw new RunnerProtocolValidationError("control-plane event tenant mismatch");
+  }
+  if (input.event.runnerId !== input.policy.runnerId) {
+    throw new RunnerProtocolValidationError(
+      "control-plane event identity mismatch",
+    );
+  }
+  validatePolicyVersion(input.event.policyVersion);
+  if (
+    input.requirePolicyMatch !== false &&
+    input.event.policyVersion !== input.policy.policyVersion
+  ) {
+    throw new RunnerProtocolValidationError(
+      "control-plane event policy mismatch",
+    );
+  }
+  if (
+    requiresControlPlaneTaskId(input.event.kind) &&
+    input.event.taskId === undefined
+  ) {
+    throw new RunnerProtocolValidationError(
+      "control-plane event task id is required for assignment events",
+    );
+  }
+  if (input.event.taskId !== undefined) {
+    validateProtocolSegment("task id", input.event.taskId);
+  }
+  if (input.event.runId !== undefined) {
+    validateProtocolSegment("run id", input.event.runId);
+  }
+  if (
+    input.event.sequence !== undefined &&
+    (!Number.isInteger(input.event.sequence) || input.event.sequence < 0)
+  ) {
+    throw new RunnerProtocolValidationError(
+      "runner protocol sequence must be a non-negative integer",
+    );
+  }
+  if (
+    typeof input.event.createdAt !== "string" ||
+    Number.isNaN(Date.parse(input.event.createdAt))
+  ) {
+    throw new RunnerProtocolValidationError(
+      "control-plane event createdAt must be a valid timestamp",
+    );
+  }
+  if (!RUNNER_CONTROL_PLANE_REDACTION_STATUSES.has(input.event.redactionStatus)) {
+    throw new RunnerProtocolValidationError(
+      `unsupported redaction status ${input.event.redactionStatus}`,
+    );
+  }
+  if (!isRecord(input.event.payload)) {
+    throw new RunnerProtocolValidationError(
+      "control-plane event payload must be an object",
+    );
+  }
+  if (requiresControlPlaneTaskId(input.event.kind)) {
+    const payloadTaskId = input.event.payload.taskId;
+    if (payloadTaskId !== input.event.taskId) {
+      throw new RunnerProtocolValidationError(
+        "control-plane event task id mismatch",
+      );
+    }
+  }
+}
+
+function requiresControlPlaneTaskId(
+  kind: ControlPlaneToRunnerEventKind,
+): boolean {
+  return kind === "task.assigned" || kind === "task.cancel_requested";
+}
+
+function validateProtocolSegment(kind: string, value: unknown): void {
+  if (
+    typeof value !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,160}$/.test(value)
+  ) {
     throw new RunnerProtocolValidationError(`invalid ${kind}: ${value}`);
   }
 }
 
-function validatePolicyVersion(value: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,160}$/.test(value)) {
+function validatePolicyVersion(value: unknown): void {
+  if (
+    typeof value !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,160}$/.test(value)
+  ) {
     throw new RunnerProtocolValidationError(`invalid policy version: ${value}`);
   }
 }
 
 const sensitivePayloadKeys = new Set([
   "accessToken",
+  "adminToken",
   "apiKey",
   "artifactContent",
+  "auth",
+  "authorization",
+  "bearerToken",
   "content",
+  "cookie",
+  "credential",
+  "credentials",
   "diff",
   "fileContent",
   "fullLog",
   "log",
   "logs",
   "patch",
+  "password",
   "prompt",
+  "privateKey",
   "rawArtifact",
   "rawLog",
   "rawPrompt",
   "rawSource",
+  "refreshToken",
+  "registrationSecret",
+  "runnerToken",
   "secret",
+  "sessionCookie",
+  "sessionToken",
   "sourceCode",
   "stderr",
   "stdout",
@@ -334,4 +580,65 @@ function looksLikeSecret(value: string): boolean {
     /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/.test(value) ||
     /\bsk-[A-Za-z0-9_-]{20,}\b/.test(value)
   );
+}
+
+function findSensitiveAssignmentPaths(
+  assignment: RunnerTaskAssignment,
+): string[] {
+  const violations: string[] = [];
+  const assignmentRecord = assignment as unknown as Record<string, unknown>;
+  for (const key of Object.keys(assignmentRecord)) {
+    if (isRunnerLocalPathKey(key) || sensitivePayloadKeys.has(key)) {
+      violations.push(`assignment.${key}`);
+    }
+  }
+  if (assignment.repository) {
+    for (const key of Object.keys(assignment.repository)) {
+      if (isRunnerLocalPathKey(key) || sensitivePayloadKeys.has(key)) {
+        violations.push(`assignment.repository.${key}`);
+      }
+    }
+    if (assignment.repository.cloneUrl) {
+      if (isCredentialedUrl(assignment.repository.cloneUrl)) {
+        violations.push("assignment.repository.cloneUrl");
+      }
+    }
+  }
+  return violations;
+}
+
+function isRunnerLocalPathKey(key: string): boolean {
+  return [
+    "absolutePath",
+    "checkoutPath",
+    "localCheckoutPath",
+    "localPath",
+    "repositoryPath",
+    "repoPath",
+    "worktreePath",
+  ].includes(key);
+}
+
+function isCredentialedUrl(value: string): boolean {
+  if (looksLikeSecret(value)) {
+    return true;
+  }
+  try {
+    const url = new URL(value);
+    if (url.username || url.password) {
+      return true;
+    }
+    for (const key of url.searchParams.keys()) {
+      if (sensitivePayloadKeys.has(key) || /token|secret|password|auth/i.test(key)) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return /https?:\/\/[^/\s]+@/.test(value);
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

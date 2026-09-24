@@ -1,11 +1,50 @@
 {
   "name": "nitely",
   "version": "0.1.0",
+  "description": "Local-first AI development workflow runtime for specs, flows, evidence, and runner-control-plane protocol contracts.",
   "license": "Apache-2.0",
   "type": "module",
+  "keywords": [
+    "ai",
+    "agent",
+    "developer-tools",
+    "workflow",
+    "runner",
+    "control-plane"
+  ],
+  "homepage": "https://github.com/Instask/nitely-oss#readme",
+  "bugs": {
+    "url": "https://github.com/Instask/nitely-oss/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Instask/nitely-oss.git"
+  },
   "bin": {
     "nitely": "./dist/index.js"
   },
+  "exports": {
+    ".": {
+      "types": "./dist/api.d.ts",
+      "default": "./dist/api.js"
+    },
+    "./runner-control-plane/file-stub": {
+      "types": "./dist/runner-control-plane/file-stub.d.ts",
+      "default": "./dist/runner-control-plane/file-stub.js"
+    },
+    "./runner-control-plane/protocol": {
+      "types": "./dist/runner-control-plane/protocol.d.ts",
+      "default": "./dist/runner-control-plane/protocol.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "src/web/static/",
+    "flows/",
+    "docs/",
+    "README.zh-CN.md",
+    "NOTICE"
+  ],
   "engines": {
     "node": ">=24"
   },
@@ -13,7 +52,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc -p tsconfig.json --noEmit",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "dev": "tsx src/index.ts",
+    "prepack": "npm run clean && npm run build",
     "test": "vitest",
     "test:run": "vitest run",
     "test:robustness": "vitest run test/run/robustness.test.ts",

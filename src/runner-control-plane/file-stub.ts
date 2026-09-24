@@ -2,10 +2,13 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import {
+  assertAssignmentMetadataBoundary,
+  assertControlPlaneEventEnvelope,
   assertMetadataBoundary,
   assertRunnerEventEnvelope,
   createControlPlaneEvent,
   type ControlPlaneToRunnerEvent,
+  type RunnerControlPlaneRedactionStatus,
   type RunnerPolicySnapshot,
   type RunnerTaskAssignment,
   type RunnerToControlPlaneEvent,
@@ -15,10 +18,13 @@ export type StoredAssignmentStatus =
   | "assigned"
   | "accepted"
   | "rejected"
+  | "preparing"
   | "running"
   | "blocked"
+  | "cancelling"
   | "completed"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 export interface StoredRunnerRegistration {
   tenantId: string;
@@ -37,7 +43,10 @@ export interface StoredRunnerAssignment {
   runnerId: string;
   taskId: string;
   repoId: string;
+  repository?: RunnerTaskAssignment["repository"];
+  sourceRevision?: string;
   flowId: string;
+  flowPath?: string;
   title?: string;
   inputs: Record<string, unknown>;
   policyVersion: string;
@@ -58,9 +67,26 @@ export interface StoredRunnerAssignment {
     category?: string;
     safeMessage?: string;
   };
+  cancellation?: {
+    runId?: string;
+    safeMessage?: string;
+  };
+  cancellationRequest?: {
+    runId?: string;
+    reason: string;
+    safeMessage?: string;
+    requestedAt: string;
+  };
   changeRequestUrl?: string;
   evidenceSummary?: unknown;
+  evidence?: Array<{
+    runId?: string;
+    redactionStatus: RunnerControlPlaneRedactionStatus;
+    artifacts: unknown[];
+    reportedAt: string;
+  }>;
   assignedEvent: ControlPlaneToRunnerEvent;
+  cancelRequestedEvent?: ControlPlaneToRunnerEvent;
   createdAt: string;
   updatedAt: string;
 }
@@ -69,6 +95,7 @@ interface FileRunnerControlPlaneState {
   version: 1;
   runners: Record<string, StoredRunnerRegistration>;
   assignments: Record<string, StoredRunnerAssignment>;
+  controlPlaneEvents: ControlPlaneToRunnerEvent[];
   runnerEvents: RunnerToControlPlaneEvent[];
 }
 
@@ -105,6 +132,18 @@ export interface AssignRunnerTaskInput extends RunnerTaskAssignment {
 }
 
 export interface AssignRunnerTaskOptions {
+  now?: () => Date;
+  createId?: () => string;
+}
+
+export interface RequestRunCancellationInput {
+  tenantId: string;
+  runId: string;
+  reason?: string;
+  safeMessage?: string;
+}
+
+export interface RequestRunCancellationOptions {
   now?: () => Date;
   createId?: () => string;
 }
@@ -160,6 +199,7 @@ export class FileRunnerControlPlane {
     input: AssignRunnerTaskInput,
     options: AssignRunnerTaskOptions = {},
   ): Promise<ControlPlaneToRunnerEvent> {
+    assertAssignmentMetadataBoundary(input);
     const state = await readControlPlaneState(this.#path);
     const runner = requireRunner(state, input.tenantId, input.runnerId);
     const event = createControlPlaneEvent({
@@ -173,7 +213,12 @@ export class FileRunnerControlPlane {
       payload: {
         taskId: input.taskId,
         repoId: input.repoId,
+        ...(input.repository ? { repository: input.repository } : {}),
+        ...(input.sourceRevision
+          ? { sourceRevision: input.sourceRevision }
+          : {}),
         flowId: input.flowId,
+        ...(input.flowPath ? { flowPath: input.flowPath } : {}),
         inputs: input.inputs ?? {},
         policyVersion: input.policyVersion,
       },
@@ -184,7 +229,10 @@ export class FileRunnerControlPlane {
       runnerId: input.runnerId,
       taskId: input.taskId,
       repoId: input.repoId,
+      ...(input.repository ? { repository: input.repository } : {}),
+      ...(input.sourceRevision ? { sourceRevision: input.sourceRevision } : {}),
       flowId: input.flowId,
+      ...(input.flowPath ? { flowPath: input.flowPath } : {}),
       ...(input.title ? { title: input.title } : {}),
       inputs: input.inputs ?? {},
       policyVersion: input.policyVersion,
@@ -203,7 +251,7 @@ export class FileRunnerControlPlane {
     runnerId: string;
   }): Promise<ControlPlaneToRunnerEvent[]> {
     const state = await readControlPlaneState(this.#path);
-    requireRunner(state, input.tenantId, input.runnerId);
+    const runner = requireRunner(state, input.tenantId, input.runnerId);
     return Object.values(state.assignments)
       .filter(
         (assignment) =>
@@ -212,7 +260,83 @@ export class FileRunnerControlPlane {
           assignment.status === "assigned",
       )
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-      .map((assignment) => assignment.assignedEvent);
+      .map((assignment) =>
+        assertControlPlaneEventForRunner(
+          assignment.assignedEvent,
+          runner.policy,
+          { requirePolicyMatch: false },
+        ),
+      );
+  }
+
+  async pollControlPlaneEvents(input: {
+    tenantId: string;
+    runnerId: string;
+  }): Promise<ControlPlaneToRunnerEvent[]> {
+    const state = await readControlPlaneState(this.#path);
+    const runner = requireRunner(state, input.tenantId, input.runnerId);
+    return state.controlPlaneEvents
+      .filter(
+        (event) =>
+          event.tenantId === input.tenantId &&
+          event.runnerId === input.runnerId &&
+          shouldDeliverControlPlaneEvent(state, event),
+      )
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .map((event) => assertControlPlaneEventForRunner(event, runner.policy));
+  }
+
+  async requestRunCancellation(
+    input: RequestRunCancellationInput,
+    options: RequestRunCancellationOptions = {},
+  ): Promise<ControlPlaneToRunnerEvent> {
+    const state = await readControlPlaneState(this.#path);
+    const assignment = assignmentForRun(state, input.tenantId, input.runId);
+    if (!assignment) {
+      throw new Error(`unknown run: ${input.tenantId}/${input.runId}`);
+    }
+    if (isTerminalAssignmentStatus(assignment.status)) {
+      throw new Error(
+        `run ${input.runId} already terminal with status ${assignment.status}`,
+      );
+    }
+    if (assignment.cancelRequestedEvent) {
+      return assignment.cancelRequestedEvent;
+    }
+
+    const event = createControlPlaneEvent({
+      kind: "task.cancel_requested",
+      tenantId: assignment.tenantId,
+      runnerId: assignment.runnerId,
+      taskId: assignment.taskId,
+      runId: input.runId,
+      sequence: nextControlPlaneSequence(state, assignment),
+      policyVersion: assignment.policyVersion,
+      now: options.now ?? this.#now,
+      createId: options.createId,
+      payload: {
+        taskId: assignment.taskId,
+        runId: input.runId,
+        reason: stringInput(input.reason) ?? "operator_requested",
+        ...(stringInput(input.safeMessage)
+          ? { safeMessage: stringInput(input.safeMessage) }
+          : {}),
+      },
+    });
+    assignment.status = "cancelling";
+    assignment.updatedAt = event.createdAt;
+    assignment.cancelRequestedEvent = event;
+    assignment.cancellationRequest = {
+      runId: input.runId,
+      reason: String(event.payload.reason),
+      ...(typeof event.payload.safeMessage === "string"
+        ? { safeMessage: event.payload.safeMessage }
+        : {}),
+      requestedAt: event.createdAt,
+    };
+    state.controlPlaneEvents.push(event);
+    await writeControlPlaneState(this.#path, state);
+    return event;
   }
 
   async reportRunnerEvents(
@@ -382,6 +506,11 @@ function applyRunnerEvent(
     };
     return;
   }
+  if (event.kind === "run.preparing") {
+    assignment.status = "preparing";
+    assignment.latestRunId = event.runId ?? stringPayload(event.payload, "runId");
+    return;
+  }
   if (event.kind === "run.started") {
     assignment.status = "running";
     assignment.latestRunId = event.runId ?? stringPayload(event.payload, "runId");
@@ -397,6 +526,32 @@ function applyRunnerEvent(
       category: stringPayload(event.payload, "blockerCategory"),
       safeMessage: stringPayload(event.payload, "safeMessage"),
     };
+    return;
+  }
+  if (event.kind === "run.cancelled") {
+    assignment.status = "cancelled";
+    assignment.latestRunId =
+      event.runId ?? stringPayload(event.payload, "runId") ?? assignment.latestRunId;
+    assignment.cancellation = {
+      runId: assignment.latestRunId,
+      safeMessage: stringPayload(event.payload, "safeMessage"),
+    };
+    return;
+  }
+  if (event.kind === "evidence.reported") {
+    assignment.latestRunId =
+      event.runId ?? stringPayload(event.payload, "runId") ?? assignment.latestRunId;
+    assignment.evidence = [
+      ...(assignment.evidence ?? []),
+      {
+        runId: assignment.latestRunId,
+        redactionStatus: event.redactionStatus,
+        artifacts: Array.isArray(event.payload.artifacts)
+          ? event.payload.artifacts
+          : [],
+        reportedAt: event.createdAt,
+      },
+    ];
     return;
   }
   if (event.kind === "run.completed") {
@@ -421,8 +576,27 @@ function applyRunnerEvent(
   }
 }
 
+function assertControlPlaneEventForRunner(
+  event: ControlPlaneToRunnerEvent,
+  policy: RunnerPolicySnapshot,
+  options: { requirePolicyMatch?: boolean } = {},
+): ControlPlaneToRunnerEvent {
+  assertControlPlaneEventEnvelope({
+    event,
+    policy,
+    requirePolicyMatch: options.requirePolicyMatch,
+  });
+  return event;
+}
+
 function emptyControlPlaneState(): FileRunnerControlPlaneState {
-  return { version: 1, runners: {}, assignments: {}, runnerEvents: [] };
+  return {
+    version: 1,
+    runners: {},
+    assignments: {},
+    controlPlaneEvents: [],
+    runnerEvents: [],
+  };
 }
 
 function emptyOutboxState(): FileRunnerOutboxState {
@@ -447,6 +621,9 @@ async function readControlPlaneState(
     assignments: isRecord(raw.assignments)
       ? (raw.assignments as Record<string, StoredRunnerAssignment>)
       : {},
+    controlPlaneEvents: Array.isArray(raw.controlPlaneEvents)
+      ? (raw.controlPlaneEvents as ControlPlaneToRunnerEvent[])
+      : [],
     runnerEvents: Array.isArray(raw.runnerEvents)
       ? (raw.runnerEvents as RunnerToControlPlaneEvent[])
       : [],
@@ -470,7 +647,9 @@ async function readOutboxState(path: string): Promise<FileRunnerOutboxState> {
   }
   return {
     version: 1,
-    events: Array.isArray(raw.events) ? (raw.events as RunnerToControlPlaneEvent[]) : [],
+    events: Array.isArray(raw.events)
+      ? (raw.events as RunnerToControlPlaneEvent[])
+      : [],
   };
 }
 
@@ -515,6 +694,54 @@ function assignmentKey(tenantId: string, taskId: string): string {
   return `${tenantId}:${taskId}`;
 }
 
+function isTerminalAssignmentStatus(status: StoredAssignmentStatus): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "rejected"
+  );
+}
+
+function assignmentForRun(
+  state: FileRunnerControlPlaneState,
+  tenantId: string,
+  runId: string,
+): StoredRunnerAssignment | undefined {
+  return Object.values(state.assignments).find(
+    (assignment) =>
+      assignment.tenantId === tenantId && assignment.latestRunId === runId,
+  );
+}
+
+function shouldDeliverControlPlaneEvent(
+  state: FileRunnerControlPlaneState,
+  event: ControlPlaneToRunnerEvent,
+): boolean {
+  if (event.kind !== "task.cancel_requested" || !event.taskId) {
+    return true;
+  }
+  const assignment = state.assignments[assignmentKey(event.tenantId, event.taskId)];
+  return assignment?.status === "cancelling";
+}
+
+function nextControlPlaneSequence(
+  state: FileRunnerControlPlaneState,
+  assignment: StoredRunnerAssignment,
+): number | undefined {
+  const sequences = [
+    assignment.assignedEvent.sequence,
+    ...state.runnerEvents
+      .filter(
+        (event) =>
+          event.tenantId === assignment.tenantId &&
+          event.taskId === assignment.taskId,
+      )
+      .map((event) => event.sequence),
+  ].filter((sequence): sequence is number => sequence !== undefined);
+  return sequences.length > 0 ? Math.max(...sequences) + 1 : undefined;
+}
+
 function requireRunner(
   state: FileRunnerControlPlaneState,
   tenantId: string,
@@ -549,6 +776,10 @@ function stringPayload(
 ): string | undefined {
   const value = payload[key];
   return typeof value === "string" ? value : undefined;
+}
+
+function stringInput(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function stringArrayPayload(
