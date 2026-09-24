@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+
+import { organizationRoleHasPermission } from "./access-control.js";
 
 export type OrganizationRole = "owner" | "maintainer" | "member" | "viewer";
 
@@ -35,11 +37,11 @@ export interface CreateOrganizationOptions {
   now?: () => Date;
 }
 
-const writableRoles = new Set<OrganizationRole>([
-  "owner",
-  "maintainer",
-  "member",
-]);
+export interface EnsureDefaultOrganizationOptions {
+  createId?: () => string;
+  now?: () => Date;
+  enforceRole?: boolean;
+}
 
 function organizationsRoot(repoPath: string): string {
   return join(resolve(repoPath), ".nitely", "users");
@@ -120,15 +122,25 @@ async function readOrganizations(repoPath: string): Promise<OrganizationsFile> {
 }
 
 async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
+  const parent = dirname(path);
+  await mkdir(parent, { recursive: true, mode: 0o700 });
   const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    await writeFile(tmp, JSON.stringify(value, null, 2), {
-      encoding: "utf8",
-      mode: 0o600,
-    });
+    handle = await open(tmp, "wx", 0o600);
+    await handle.writeFile(JSON.stringify(value, null, 2), "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
     await rename(tmp, path);
+    const parentHandle = await open(parent, "r");
+    try {
+      await parentHandle.sync();
+    } finally {
+      await parentHandle.close();
+    }
   } catch (error) {
+    await handle?.close().catch(() => {});
     await rm(tmp, { force: true }).catch(() => {});
     throw error;
   }
@@ -190,6 +202,7 @@ export async function createOrganization(
 export async function ensureDefaultOrganizationForUser(
   repoPath: string,
   input: { userId: string; role: OrganizationRole },
+  options: EnsureDefaultOrganizationOptions = {},
 ): Promise<OrganizationRecord> {
   const role = validateOrganizationRole(input.role);
   const file = await readOrganizations(repoPath);
@@ -197,11 +210,21 @@ export async function ensureDefaultOrganizationForUser(
     (organization) => organization.members[input.userId],
   );
   if (existing) {
+    if (
+      options.enforceRole &&
+      existing.members[input.userId].role !== role
+    ) {
+      const now = (options.now?.() ?? new Date()).toISOString();
+      existing.members[input.userId].role = role;
+      existing.members[input.userId].updatedAt = now;
+      existing.updatedAt = now;
+      await writeJsonAtomic(organizationsPath(repoPath), file);
+    }
     return existing;
   }
-  const now = new Date().toISOString();
+  const now = (options.now?.() ?? new Date()).toISOString();
   const organization: OrganizationRecord = {
-    id: createOrganizationId(),
+    id: options.createId?.() ?? createOrganizationId(),
     name: "Default Team",
     members: {
       [input.userId]: {
@@ -250,5 +273,5 @@ export async function listPublicMemberships(
 }
 
 export function organizationRoleCanWrite(role: OrganizationRole | undefined): boolean {
-  return role ? writableRoles.has(role) : false;
+  return organizationRoleHasPermission(role, "tasks:write");
 }

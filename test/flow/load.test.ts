@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { FlowValidationError, loadFlow } from "../../src/flow/load.js";
 import { stageRuntimeCandidates } from "../../src/flow/schema.js";
+import { inferExternalInputs } from "../../src/flows/validate.js";
 
 const fixtures = join(import.meta.dirname, "..", "fixtures");
 
@@ -26,6 +27,57 @@ function baseFlow(stages: unknown[]) {
 }
 
 describe("loadFlow", () => {
+  it("keeps the primary bootstrap flow model tiers explicit", async () => {
+    const result = await loadFlow(
+      join(
+        import.meta.dirname,
+        "..",
+        "..",
+        "flows",
+        "implement-spec-bootstrap.json",
+      ),
+      { externalInputs: ["spec", "tech-design"] },
+    );
+    const stages = new Map(result.flow.spec.stages.map((stage) => [stage.id, stage]));
+
+    expect(stages.get("write-tests")).toMatchObject({
+      runtime: "codex",
+      model: "gpt-5.3-codex-spark",
+    });
+    expect(stages.get("implement")).toMatchObject({
+      runtime: "codex",
+      model: "gpt-5.3-codex",
+    });
+    expect(stages.get("review")).toMatchObject({
+      runtime: "codex",
+      model: "gpt-5",
+    });
+  });
+
+  it("loads static size-tier flows with distinct topologies", async () => {
+    const tiers = [
+      {
+        file: "flows/implement-small.json",
+        name: "implement-small",
+        stages: ["implement", "test", "publish"],
+      },
+      {
+        file: "flows/implement-medium.json",
+        name: "implement-medium",
+        stages: ["implement", "test", "review", "publish"],
+      },
+    ];
+
+    for (const tier of tiers) {
+      const result = await loadFlow(tier.file, {
+        externalInputs: ["spec", "tech-design"],
+      });
+
+      expect(result.flow.metadata.name).toBe(tier.name);
+      expect(result.graph.order).toEqual(tier.stages);
+    }
+  });
+
   it("loads a valid flow and derives its artifact graph", async () => {
     const result = await loadFlow(join(fixtures, "valid-flow.json"), {
       externalInputs: ["spec"],
@@ -89,6 +141,105 @@ describe("loadFlow", () => {
       },
       "pr-title",
     ]);
+  });
+
+  it("accepts task-plan stage loop configuration", async () => {
+    const path = await writeFlow(
+      baseFlow([
+        {
+          id: "plan",
+          type: "agent",
+          runtime: "mock",
+          prompt: "Plan.",
+          inputs: [],
+          outputs: [{ id: "task-plan", mediaType: "application/json" }],
+        },
+        {
+          id: "implement",
+          type: "agent",
+          runtime: "mock",
+          prompt: "Implement.",
+          inputs: ["task-plan"],
+          outputs: ["implementation"],
+          taskPlan: {
+            input: "task-plan",
+            role: "execute-current",
+            max_iterations: 4,
+            maxTasks: 12,
+            max_tasks: 12,
+          },
+        },
+      ]),
+    );
+
+    const result = await loadFlow(path);
+
+    expect(result.graph.order).toEqual(["plan", "implement"]);
+    expect(result.flow.spec.stages[1]).toMatchObject({
+      taskPlan: {
+        input: "task-plan",
+        role: "execute-current",
+        max_iterations: 4,
+        maxTasks: 12,
+        max_tasks: 12,
+      },
+    });
+  });
+
+  it("rejects conflicting task-plan task-limit aliases", async () => {
+    const path = await writeFlow(
+      baseFlow([
+        {
+          id: "plan",
+          type: "agent",
+          runtime: "mock",
+          prompt: "Plan.",
+          inputs: [],
+          outputs: [{ id: "task-plan", mediaType: "application/json" }],
+        },
+        {
+          id: "implement",
+          type: "agent",
+          runtime: "mock",
+          prompt: "Implement.",
+          inputs: ["task-plan"],
+          outputs: ["implementation"],
+          taskPlan: {
+            input: "task-plan",
+            role: "execute-current",
+            maxTasks: 12,
+            max_tasks: 13,
+          },
+        },
+      ]),
+    );
+
+    await expect(loadFlow(path)).rejects.toThrow(
+      /maxTasks and max_tasks must match when both are set/,
+    );
+  });
+
+  it("rejects task-plan loop config when its input is not a declared stage input", async () => {
+    const path = await writeFlow(
+      baseFlow([
+        {
+          id: "implement",
+          type: "agent",
+          runtime: "mock",
+          prompt: "Implement.",
+          inputs: [],
+          outputs: ["implementation"],
+          taskPlan: {
+            input: "task-plan",
+            role: "execute-current",
+          },
+        },
+      ]),
+    );
+
+    await expect(loadFlow(path)).rejects.toThrow(
+      /stage implement taskPlan input must be declared in inputs: task-plan/,
+    );
   });
 
   it("rejects duplicate stage IDs", async () => {
@@ -234,6 +385,181 @@ describe("loadFlow", () => {
     expect(result.graph.order).toEqual(["one"]);
   });
 
+  it("accepts flow and stage hooks with failure policy defaults", async () => {
+    const path = await writeFlow({
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "hooked-flow" },
+      spec: {
+        hooks: {
+          preRun: [{ id: "flow-pre", command: "true" }],
+          postRun: [
+            {
+              id: "flow-post",
+              command: "true",
+              onFailure: "evidence-only",
+            },
+          ],
+        },
+        stages: [
+          {
+            id: "test",
+            type: "command",
+            command: "true",
+            inputs: [],
+            outputs: ["report"],
+            hooks: {
+              pre: [{ id: "stage-pre", command: "true", onFailure: "warn" }],
+              post: [
+                {
+                  id: "stage-post",
+                  command: "true",
+                  timeoutMs: 1000,
+                  maxToolOutputTokens: 64,
+                },
+              ],
+            },
+          },
+        ],
+      },
+    });
+
+    const result = await loadFlow(path);
+    const [stage] = result.flow.spec.stages;
+
+    expect(result.flow.spec.hooks?.preRun[0]).toMatchObject({
+      id: "flow-pre",
+      command: "true",
+      onFailure: "block",
+    });
+    expect(result.flow.spec.hooks?.postRun[0]).toMatchObject({
+      id: "flow-post",
+      onFailure: "evidence-only",
+    });
+    expect(stage.hooks?.pre[0]).toMatchObject({
+      id: "stage-pre",
+      onFailure: "warn",
+    });
+    expect(stage.hooks?.post[0]).toMatchObject({
+      id: "stage-post",
+      onFailure: "block",
+      timeoutMs: 1000,
+      maxToolOutputTokens: 64,
+    });
+  });
+
+  it("treats metadata inputs as declared external input artifacts", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "nitely-flow-"));
+    const path = join(directory, "flow.json");
+    await writeFile(
+      path,
+      JSON.stringify(
+        {
+          apiVersion: "nitely.dev/v1alpha1",
+          kind: "Flow",
+          metadata: { name: "metadata-input-flow", inputs: [{ id: "intake" }] },
+          spec: {
+            stages: [
+              {
+                id: "draft-spec",
+                type: "agent",
+                runtime: "mock",
+                prompt: "Draft spec.",
+                inputs: ["intake"],
+                outputs: ["spec"],
+              },
+            ],
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    const result = await loadFlow(path);
+
+    expect(result.graph.order).toEqual(["draft-spec"]);
+  });
+
+  it("accepts source URLs and artifact URIs on external input contracts", async () => {
+    const path = await writeFlow({
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: {
+        name: "cross-flow-inputs",
+        inputs: [
+          {
+            id: "discovery-spec",
+            type: "spec",
+            sourceUrl: "https://example.test/spec.md",
+          },
+          {
+            id: "review-evidence",
+            artifactUri: "nitely-artifact://run-123/review",
+          },
+        ],
+      },
+      spec: {
+        stages: [
+          {
+            id: "implement",
+            type: "agent",
+            runtime: "mock",
+            prompt: "Use prior artifacts.",
+            inputs: ["discovery-spec", "review-evidence"],
+            outputs: ["implementation"],
+          },
+        ],
+      },
+    });
+
+    const result = await loadFlow(path);
+
+    expect(result.graph.order).toEqual(["implement"]);
+    expect(result.graph.producerByArtifact.has("discovery-spec")).toBe(false);
+    expect(result.flow.metadata.inputs).toEqual([
+      expect.objectContaining({
+        id: "discovery-spec",
+        sourceUrl: "https://example.test/spec.md",
+      }),
+      expect.objectContaining({
+        id: "review-evidence",
+        artifactUri: "nitely-artifact://run-123/review",
+      }),
+    ]);
+  });
+
+  it("rejects external input contracts with multiple default sources", async () => {
+    const path = await writeFlow({
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: {
+        name: "ambiguous-input",
+        inputs: [
+          {
+            id: "spec",
+            sourceUrl: "https://example.test/spec.md",
+            artifactUri: "nitely-artifact://run-123/spec",
+          },
+        ],
+      },
+      spec: {
+        stages: [
+          {
+            id: "test",
+            type: "command",
+            command: "true",
+            inputs: ["spec"],
+            outputs: ["test-report"],
+          },
+        ],
+      },
+    });
+
+    await expect(loadFlow(path)).rejects.toThrow(/only one of source/);
+  });
+
   it("rejects cycles derived from artifact dependencies", async () => {
     const path = await writeFlow(
       baseFlow([
@@ -323,6 +649,52 @@ describe("loadFlow", () => {
     }
   });
 
+  it("accepts capability policy on agent stages", async () => {
+    const path = await writeFlow(
+      baseFlow([
+        {
+          id: "implement",
+          type: "agent",
+          runtime: "codex",
+          prompt: "Implement the change.",
+          inputs: [],
+          outputs: ["result"],
+          capabilities: {
+            read: { scope: "approved artifacts", allow: ["docs/"] },
+            write: { scope: "worktree", allow: ["src/", "test/"] },
+            commands: { mode: "allow-list", allow: ["pnpm test"] },
+            network: { mode: "restricted" },
+            allowedRuntimes: ["codex"],
+            allowedModels: ["gpt-5.3-codex-spark"],
+            instructions: { repo: true, generated: false, skills: true },
+            evidence: { prompts: true, toolCalls: true, fileChanges: true },
+          },
+        },
+      ]),
+    );
+
+    const result = await loadFlow(path);
+    const stage = result.flow.spec.stages[0];
+    expect(stage.type).toBe("agent");
+    if (stage.type === "agent") {
+      expect(stage.capabilities).toMatchObject({
+        read: { scope: "approved artifacts", allow: ["docs/"] },
+        write: { scope: "worktree", allow: ["src/", "test/"] },
+        commands: { mode: "allow-list", allow: ["pnpm test"] },
+        network: { mode: "restricted" },
+        allowedRuntimes: ["codex"],
+        allowedModels: ["gpt-5.3-codex-spark"],
+        instructions: { repo: true, generated: false, skills: true },
+        evidence: {
+          prompts: true,
+          toolCalls: true,
+          fileChanges: true,
+          runtimeUsage: true,
+        },
+      });
+    }
+  });
+
   it("accepts deterministic gate stages", async () => {
     const path = await writeFlow(
       baseFlow([
@@ -403,6 +775,189 @@ describe("loadFlow", () => {
       mode: "deterministic",
       timeoutMs: 5_000,
     });
+  });
+
+  it("accepts flow and stage timeout controls", async () => {
+    const path = await writeFlow({
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "timeout-controls" },
+      spec: {
+        timeouts: { sessionMs: 300_000, turnMs: 120_000, gateMs: 600_000 },
+        stages: [
+          {
+            id: "implement",
+            type: "agent",
+            runtime: "codex",
+            prompt: "Implement the change.",
+            timeouts: { sessionMs: 120_000, stallMs: 30_000 },
+            inputs: [],
+            outputs: ["implementation"],
+          },
+          {
+            id: "verify",
+            type: "command",
+            command: "pnpm test",
+            timeouts: { commandMs: 600_000 },
+            inputs: ["implementation"],
+            outputs: ["test-report"],
+          },
+          {
+            id: "review",
+            type: "gate",
+            mode: "review",
+            runtime: "codex",
+            prompt: "Review the change.",
+            timeouts: { sessionMs: 90_000, busyIdleMs: 45_000 },
+            inputs: ["test-report"],
+            outputs: ["review-result"],
+          },
+          {
+            id: "approve",
+            type: "approval",
+            prompt: "Approve publish.",
+            timeouts: { pauseMs: 86_400_000 },
+            inputs: ["review-result"],
+            outputs: [],
+          },
+        ],
+      },
+    });
+
+    const result = await loadFlow(path);
+
+    expect(result.flow.spec.timeouts).toMatchObject({
+      sessionMs: 300_000,
+      turnMs: 120_000,
+      gateMs: 600_000,
+    });
+    expect(result.flow.spec.stages[0]).toMatchObject({
+      id: "implement",
+      timeouts: { sessionMs: 120_000, stallMs: 30_000 },
+    });
+    expect(result.flow.spec.stages[1]).toMatchObject({
+      id: "verify",
+      timeouts: { commandMs: 600_000 },
+    });
+    expect(result.flow.spec.stages[2]).toMatchObject({
+      id: "review",
+      timeouts: { sessionMs: 90_000, busyIdleMs: 45_000 },
+    });
+    expect(result.flow.spec.stages[3]).toMatchObject({
+      id: "approve",
+      timeouts: { pauseMs: 86_400_000 },
+    });
+  });
+
+  it("rejects a flow that still declares spec.budgets", async () => {
+    const path = await writeFlow({
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "declared-run-budgets" },
+      spec: {
+        budgets: { maxRuntimeTokens: 50_000 },
+        stages: [
+          {
+            id: "implement",
+            type: "agent",
+            runtime: "codex",
+            prompt: "Implement the change.",
+            inputs: [],
+            outputs: ["implementation"],
+          },
+        ],
+      },
+    });
+
+    await expect(loadFlow(path)).rejects.toThrow(
+      /spec\.budgets.*NITELY_DEFAULT_MAX_RUNTIME_TOKENS/,
+    );
+  });
+
+  it("rejects a stage that still declares budgets", async () => {
+    const path = await writeFlow({
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "declared-stage-budgets" },
+      spec: {
+        stages: [
+          {
+            id: "implement",
+            type: "agent",
+            runtime: "codex",
+            prompt: "Implement the change.",
+            budgets: { maxRuntimeTokens: 20_000 },
+            inputs: [],
+            outputs: ["implementation"],
+          },
+        ],
+      },
+    });
+
+    await expect(loadFlow(path)).rejects.toThrow(
+      /spec\.stages\.0\.budgets.*NITELY_DEFAULT_MAX_RUNTIME_TOKENS/,
+    );
+  });
+
+  it("accepts verification budgets and provider-independent stage cost classes", async () => {
+    const path = await writeFlow({
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "verification-budget" },
+      spec: {
+        verificationBudget: {
+          maxAgentAttempts: 6,
+          maxJudgeAttempts: 3,
+          maxCiRuns: 2,
+          maxRuntimeCostUsd: 10,
+        },
+        stages: [
+          {
+            id: "implement",
+            type: "agent",
+            costClass: "moderate",
+            runtime: "codex",
+            prompt: "Implement the change.",
+            inputs: [],
+            outputs: ["implementation"],
+          },
+        ],
+      },
+    });
+
+    const result = await loadFlow(path);
+
+    expect(result.flow.spec.verificationBudget).toEqual({
+      maxAgentAttempts: 6,
+      maxJudgeAttempts: 3,
+      maxCiRuns: 2,
+      maxRuntimeCostUsd: 10,
+    });
+    expect(result.flow.spec.stages[0]?.costClass).toBe("moderate");
+  });
+
+  it("loads every bundled flow and none declare budgets", async () => {
+    const flowDirectory = join(import.meta.dirname, "..", "..", "flows");
+    const files = (await readdir(flowDirectory)).filter((name) => name.endsWith(".json"));
+    expect(files.length).toBeGreaterThan(0);
+
+    for (const file of files) {
+      const path = join(flowDirectory, file);
+      const content = await readFile(path, "utf8");
+      const raw = JSON.parse(content) as {
+        spec?: { budgets?: unknown; stages?: Array<{ id?: string; budgets?: unknown }> };
+      };
+      expect(raw.spec?.budgets, file).toBeUndefined();
+      for (const stage of raw.spec?.stages ?? []) {
+        expect(stage.budgets, `${file}:${stage.id ?? "?"}`).toBeUndefined();
+      }
+      await expect(
+        loadFlow(path, { externalInputs: inferExternalInputs(content) }),
+        file,
+      ).resolves.toMatchObject({
+        flow: { metadata: { name: expect.any(String) } },
+      });
+    }
   });
 
   it("accepts maxToolOutputTokens on command stages, deterministic gates, and flow spec", async () => {
@@ -499,6 +1054,42 @@ describe("loadFlow", () => {
       prompt: "Review the implementation.",
       outputs: ["review-result"],
     });
+  });
+
+  it("accepts capability policy on review gate stages", async () => {
+    const path = await writeFlow(
+      baseFlow([
+        {
+          id: "review",
+          type: "gate",
+          mode: "review",
+          runtime: "codex",
+          prompt: "Review the implementation.",
+          inputs: [],
+          outputs: ["review-result"],
+          capabilities: {
+            read: { scope: "review artifacts" },
+            write: { scope: "none" },
+            commands: { mode: "none" },
+            network: { mode: "disabled", advisory: false },
+            allowedRuntimes: ["codex"],
+          },
+        },
+      ]),
+    );
+
+    const result = await loadFlow(path);
+    const stage = result.flow.spec.stages[0];
+    expect(stage.type).toBe("gate");
+    if (stage.type === "gate" && stage.mode === "review") {
+      expect(stage.capabilities).toMatchObject({
+        read: { scope: "review artifacts" },
+        write: { scope: "none" },
+        commands: { mode: "none" },
+        network: { mode: "disabled", advisory: false },
+        allowedRuntimes: ["codex"],
+      });
+    }
   });
 
   it("accepts ordered runtime candidates on review gate stages", async () => {
@@ -668,6 +1259,23 @@ describe("loadFlow", () => {
     await expect(loadFlow(path)).rejects.toThrow(/skills/);
   });
 
+  it("rejects capability policy on non-agent stages", async () => {
+    const path = await writeFlow(
+      baseFlow([
+        {
+          id: "test",
+          type: "command",
+          command: "true",
+          capabilities: { commands: { mode: "none" } },
+          inputs: [],
+          outputs: ["report"],
+        },
+      ]),
+    );
+
+    await expect(loadFlow(path)).rejects.toThrow(/capabilities/);
+  });
+
   it("strips unrelated unknown keys from non-agent stages", async () => {
     const path = await writeFlow(
       baseFlow([
@@ -833,13 +1441,45 @@ describe("loadFlow", () => {
     ]);
   });
 
+  it("loads the plan-approve-implement bootstrap flow with spec and tech-design approval gates", async () => {
+    const result = await loadFlow("flows/plan-approve-implement-bootstrap.json", {
+      externalInputs: ["intake"],
+    });
+
+    expect(result.flow.metadata.name).toBe("plan-approve-implement-bootstrap");
+    expect(result.graph.order).toEqual([
+      "draft-spec",
+      "approve-spec",
+      "draft-tech-design",
+      "approve-tech-design",
+      "write-tests",
+      "implement",
+      "test",
+      "review",
+      "publish",
+      "reflect",
+    ]);
+    expect(result.flow.spec.stages.map((stage) => [stage.id, stage.type])).toEqual([
+      ["draft-spec", "agent"],
+      ["approve-spec", "approval"],
+      ["draft-tech-design", "agent"],
+      ["approve-tech-design", "approval"],
+      ["write-tests", "agent"],
+      ["implement", "agent"],
+      ["test", "command"],
+      ["review", "gate"],
+      ["publish", "publish-change"],
+      ["reflect", "agent"],
+    ]);
+  });
+
   it("loads runtime-variant implement-spec bootstrap flows with expected agent runtimes", async () => {
     // Keep all runtime-specific implement-spec bootstrap variants in one place
     // so Codex remains the default while Grok/Pi variants share one regression check.
     const runtimeVariants: Array<{
       file: string;
       name: string;
-      runtime: "grok" | "pi";
+      runtime: "glm" | "grok" | "pi";
     }> = [
       {
         file: "flows/implement-spec-bootstrap-grok.json",
@@ -860,6 +1500,7 @@ describe("loadFlow", () => {
 
       expect(result.flow.metadata.name).toBe(variant.name);
       expect(result.graph.order).toEqual([
+        "write-tests",
         "implement",
         "test",
         "review",
@@ -880,12 +1521,139 @@ describe("loadFlow", () => {
     }
   });
 
+  it("loads the claude implement-spec bootstrap variant with the full codex-baseline shape", async () => {
+    // The Claude variant tracks the Codex baseline instead of the trimmed
+    // Grok/Pi variants: Claude Code can render a review verdict and file
+    // reflection follow-ups, so it keeps the blocking gate and the reflect
+    // stage rather than degrading to plain agent stages.
+    const result = await loadFlow("flows/implement-spec-bootstrap-claude.json", {
+      externalInputs: ["spec", "tech-design"],
+    });
+
+    expect(result.flow.metadata.name).toBe("implement-spec-bootstrap-claude");
+    expect(result.flow.spec.stages.map((stage) => [stage.id, stage.type])).toEqual([
+      ["write-tests", "agent"],
+      ["implement", "agent"],
+      ["test", "command"],
+      ["review", "gate"],
+      ["publish", "publish-change"],
+      ["reflect", "agent"],
+    ]);
+
+    for (const stage of result.flow.spec.stages) {
+      const carriesRuntime =
+        stage.type === "agent" || (stage.type === "gate" && stage.mode === "review");
+      if (carriesRuntime) {
+        expect(stage, stage.id).toMatchObject({ runtime: "claude" });
+      } else {
+        expect(stage, stage.id).not.toHaveProperty("runtime");
+      }
+      expect(stage, stage.id).not.toHaveProperty("model");
+    }
+  });
+
+  it("orders write-tests before implement in every spec-driven bootstrap flow", async () => {
+    // TDD lives in the graph, not in a prompt sentence: implement cannot start
+    // before the tests artifact exists, and the command gate stays the green bar.
+    const specDrivenFlows: Array<{ file: string; externalInputs: string[] }> = [
+      {
+        file: "flows/implement-spec-bootstrap.json",
+        externalInputs: ["spec", "tech-design"],
+      },
+      {
+        file: "flows/implement-spec-bootstrap-claude.json",
+        externalInputs: ["spec", "tech-design"],
+      },
+      {
+        file: "flows/implement-spec-bootstrap-grok.json",
+        externalInputs: ["spec", "tech-design"],
+      },
+      {
+        file: "flows/implement-spec-bootstrap-pi.json",
+        externalInputs: ["spec", "tech-design"],
+      },
+      {
+        file: "flows/plan-approve-implement-bootstrap.json",
+        externalInputs: ["intake"],
+      },
+    ];
+
+    for (const { file, externalInputs } of specDrivenFlows) {
+      const result = await loadFlow(file, { externalInputs });
+      const stages = new Map(
+        result.flow.spec.stages.map((stage) => [stage.id, stage]),
+      );
+
+      const writeTests = stages.get("write-tests");
+      expect(writeTests, file).toMatchObject({
+        type: "agent",
+        inputs: ["spec", "tech-design"],
+        outputs: ["tests"],
+        capabilities: {
+          write: { scope: "worktree", allow: ["test/"] },
+          commands: { mode: "none" },
+        },
+      });
+
+      const implement = stages.get("implement");
+      expect(implement?.inputs, file).toContain("tests");
+      expect(implement, file).toMatchObject({
+        capabilities: {
+          write: { scope: "worktree" },
+          commands: { mode: "unrestricted" },
+        },
+      });
+      expect(
+        implement?.type === "agent" ? implement.context?.fullReadInputs : undefined,
+        file,
+      ).toContain("tests");
+      expect(implement, file).toMatchObject({
+        prompt: expect.stringContaining("write-tests"),
+      });
+
+      const order = result.graph.order;
+      expect(order.indexOf("write-tests"), file).toBeGreaterThanOrEqual(0);
+      expect(order.indexOf("write-tests"), file).toBeLessThan(
+        order.indexOf("implement"),
+      );
+      expect(order.indexOf("implement"), file).toBeLessThan(order.indexOf("test"));
+      expect(order.indexOf("test"), file).toBeLessThan(order.indexOf("review"));
+
+      expect(stages.get("test"), file).toMatchObject({ type: "command" });
+      expect(stages.get("review")?.inputs, file).toContain("tests");
+
+      for (const stage of result.flow.spec.stages) {
+        if (
+          stage.type === "agent" ||
+          (stage.type === "gate" && stage.mode === "review")
+        ) {
+          expect(stage.capabilities, `${file}:${stage.id}`).toBeDefined();
+        }
+      }
+
+      if (file.includes("plan-approve")) {
+        for (const id of ["draft-spec", "draft-tech-design", "review", "reflect"]) {
+          expect(stages.get(id), `${file}:${id}`).toMatchObject({
+            capabilities: {
+              write: { scope: "none" },
+              commands: { mode: "none" },
+            },
+          });
+        }
+      }
+    }
+  });
+
   it("uses blocking review gates in bootstrap flows that publish or update changes", async () => {
     const bootstrapFlowFiles = [
       "google-drive-connector-bootstrap.json",
+      "implement-spec-bootstrap-claude.json",
       "implement-spec-bootstrap.json",
       "resolve-conflicts-bootstrap.json",
       "rework-pr-bootstrap.json",
+      "rework-spec-bootstrap.json",
+      "rework-tech-design-bootstrap.json",
+      "rework-workflow-bootstrap.json",
     ];
 
     for (const file of bootstrapFlowFiles) {
@@ -908,12 +1676,33 @@ describe("loadFlow", () => {
     }
   });
 
+  it("declares external inputs on route-specific rework flows", async () => {
+    const routeReworkFlowFiles = [
+      "rework-spec-bootstrap.json",
+      "rework-tech-design-bootstrap.json",
+      "rework-workflow-bootstrap.json",
+    ];
+
+    for (const file of routeReworkFlowFiles) {
+      const result = await loadFlow(join("flows", file));
+
+      expect(result.flow.metadata.inputs?.map((input) => input.id), file).toEqual([
+        "spec",
+        "tech-design",
+      ]);
+    }
+  });
+
   it("ends bootstrap issue execution flows with reflection", async () => {
     const bootstrapFlowFiles = [
       "google-drive-connector-bootstrap.json",
+      "implement-spec-bootstrap-claude.json",
       "implement-spec-bootstrap.json",
       "resolve-conflicts-bootstrap.json",
       "rework-pr-bootstrap.json",
+      "rework-spec-bootstrap.json",
+      "rework-tech-design-bootstrap.json",
+      "rework-workflow-bootstrap.json",
     ];
 
     for (const file of bootstrapFlowFiles) {
@@ -942,7 +1731,7 @@ describe("loadFlow", () => {
     }
   });
 
-  it("does not pin model fields in bootstrap flow stages", async () => {
+  it("pins model fields only for the primary bootstrap flow tiers", async () => {
     const flowDirectory = "flows";
     const bootstrapFlowFiles = (await readdir(flowDirectory)).filter((file) =>
       file.endsWith("bootstrap.json"),
@@ -954,7 +1743,16 @@ describe("loadFlow", () => {
       "implement-spec-bootstrap.json",
       "resolve-conflicts-bootstrap.json",
       "rework-pr-bootstrap.json",
+      "rework-spec-bootstrap.json",
+      "rework-tech-design-bootstrap.json",
+      "rework-workflow-bootstrap.json",
     ]));
+
+    const primaryModels = {
+      "write-tests": "gpt-5.3-codex-spark",
+      implement: "gpt-5.3-codex",
+      review: "gpt-5",
+    };
 
     for (const file of bootstrapFlowFiles) {
       const path = join(flowDirectory, file);
@@ -965,7 +1763,13 @@ describe("loadFlow", () => {
       };
 
       for (const stage of rawFlow.spec.stages) {
-        expect(stage, `${file}:${stage.id}`).not.toHaveProperty("model");
+        if (file === "implement-spec-bootstrap.json" && stage.id in primaryModels) {
+          expect(stage.model, `${file}:${stage.id}`).toBe(
+            primaryModels[stage.id as keyof typeof primaryModels],
+          );
+        } else {
+          expect(stage, `${file}:${stage.id}`).not.toHaveProperty("model");
+        }
       }
     }
   });
@@ -984,6 +1788,56 @@ describe("loadFlow", () => {
     );
 
     await expect(loadFlow(path)).rejects.toThrow(/provider/);
+  });
+
+  it("accepts conformance policy on publish and update change stages", async () => {
+    const path = await writeFlow(
+      baseFlow([
+        {
+          id: "publish",
+          type: "publish-change",
+          provider: "github",
+          inputs: ["implementation", "conformance-report"],
+          outputs: ["change-request"],
+          conformance: {
+            mode: "strict",
+            required: ["FR-001", "SC-001"],
+          },
+        },
+        {
+          id: "update",
+          type: "update-change",
+          provider: "github",
+          inputs: ["change-request"],
+          outputs: ["updated-change-request"],
+          conformance: {
+            mode: "advisory",
+            report: "coverage",
+          },
+        },
+      ]),
+    );
+
+    const result = await loadFlow(path, {
+      externalInputs: ["implementation", "conformance-report"],
+    });
+
+    expect(result.flow.spec.stages[0]).toMatchObject({
+      id: "publish",
+      conformance: {
+        mode: "strict",
+        report: "conformance-report",
+        required: ["FR-001", "SC-001"],
+      },
+    });
+    expect(result.flow.spec.stages[1]).toMatchObject({
+      id: "update",
+      conformance: {
+        mode: "advisory",
+        report: "coverage",
+        required: [],
+      },
+    });
   });
 
   it("rejects path-like stage and artifact identifiers", async () => {

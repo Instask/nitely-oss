@@ -1,0 +1,102 @@
+{
+  "apiVersion": "nitely.dev/v1alpha1",
+  "kind": "Flow",
+  "metadata": {
+    "name": "pilot-pr-review-rework",
+    "workItemType": "dev.pr",
+    "inputs": [{ "id": "review-feedback" }, { "id": "implementation-notes" }]
+  },
+  "spec": {
+    "maxAttempts": 2,
+    "stages": [
+      {
+        "id": "rework",
+        "type": "agent",
+        "runtime": "codex",
+        "prompt": "Apply the supplied review feedback on the existing pull request branch. Preserve unrelated code, address every blocking comment, update tests/docs when behavior changes, and write a concise pr-title artifact.",
+        "inputs": ["review-feedback", "implementation-notes"],
+        "outputs": [
+          {
+            "id": "implementation",
+            "name": "Implementation summary",
+            "type": "implementation.summary",
+            "description": "Markdown summary of code changes, affected files, and important implementation decisions.",
+            "mediaType": "text/markdown"
+          },
+          {
+            "id": "pr-title",
+            "name": "Pull request title",
+            "type": "change-request.title",
+            "description": "One-line title to use when publishing or updating the pull request.",
+            "mediaType": "text/plain"
+          }
+        ]
+      },
+      {
+        "id": "verify",
+        "type": "command",
+        "command": "pnpm exec vitest run && pnpm run check",
+        "timeoutMs": 600000,
+        "inputs": ["implementation"],
+        "outputs": [
+          {
+            "id": "verification-report",
+            "name": "Verification report",
+            "type": "verification.report",
+            "description": "Command output summary listing tests, checks, failures, and any verification caveats.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      },
+      {
+        "id": "review",
+        "type": "gate",
+        "mode": "review",
+        "runtime": "codex",
+        "prompt": "Review whether the requested feedback was addressed without broadening scope. Check tests, docs, and remaining unresolved P0/P1 findings. Write `Review verdict: pass` only when there are no P0/P1/blocking findings.",
+        "inputs": ["review-feedback", "implementation", "verification-report"],
+        "outputs": [
+          {
+            "id": "review",
+            "name": "Review verdict",
+            "type": "review.verdict",
+            "description": "Blocking review result with pass/fail verdict and P0/P1 findings when present.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      },
+      {
+        "id": "update",
+        "type": "update-change",
+        "provider": "github-cli",
+        "inputs": ["implementation", "verification-report", "review", "pr-title"],
+        "outputs": [
+          {
+            "id": "change-request",
+            "name": "Change request result",
+            "type": "change-request.result",
+            "description": "Published or updated pull request metadata, including provider, URL, branch, and status.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      },
+      {
+        "id": "reflect",
+        "type": "agent",
+        "runtime": "codex",
+        "alwaysRun": true,
+        "prompt": "Reflect on this PR rework pilot run. Identify recurring review-feedback patterns, missing automation, unclear reviewer instructions, and follow-up issues.",
+        "inputs": ["review-feedback", "implementation", "verification-report", "review", "change-request"],
+        "outputs": [
+          {
+            "id": "reflection",
+            "name": "Reflection",
+            "type": "workflow.reflection",
+            "description": "Post-run workflow reflection listing follow-up issues, duplicates, observations, or a clean result.",
+            "mediaType": "text/markdown"
+          }
+        ]
+      }
+    ]
+  }
+}

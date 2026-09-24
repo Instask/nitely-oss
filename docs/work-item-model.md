@@ -55,10 +55,10 @@ URIs.
 
 High-risk work item types cannot be declared by arbitrary flows. A built-in
 policy table marks families such as `autofarm.site` and `capital-autopilot.*` as
-high-risk and lists the gate stages they must declare. A high-risk type is only
-accepted when:
+high-risk and lists the gate stages they must declare. Repository policy lives in
+`.nitely/work-item-policy.json`. A high-risk built-in type is only accepted when:
 
-1. it is present in the repository allow-list `.nitely/work-item-policy.json`:
+1. it is present in the repository allow-list:
 
    ```json
    { "allowedTypes": ["autofarm.site"] }
@@ -66,8 +66,30 @@ accepted when:
 
 2. its flow declares every required gate stage.
 
-`dev.pr` is the safe built-in and is always allowed. Unknown types default to
-non-high-risk and are accepted, keeping the model open for extension.
+Custom work item types can be classified in the same file:
+
+```json
+{
+  "unknownTypeDefault": "allow",
+  "customTypes": {
+    "docs.publish": { "decision": "require-approval" },
+    "reports.generate": { "decision": "allow", "risk": "low" }
+  }
+}
+```
+
+`unknownTypeDefault` supports `allow`, `require-approval`, and `deny`. When no
+default is configured, unknown non-protected types remain open for local
+extension, but unknown flows with protected stages (`publish-change`,
+`update-change`, `deploy`) require an approval stage. A custom protected flow can
+avoid that gate only when repository policy explicitly marks its type as
+low-risk. `dev.pr` is the safe built-in and is always allowed.
+
+Governance decides whether a Run may start. What the Run actually changed is
+judged separately, at publication time, by the risk-based review policy in
+`.nitely/review-policy.json`: a declared-low-risk task whose diff touches a
+protected path is escalated automatically. See
+`docs/risk-based-review-policy.md`.
 
 ## Mapping examples
 

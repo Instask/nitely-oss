@@ -56,15 +56,26 @@
     "dev": "tsx src/index.ts",
     "prepack": "npm run clean && npm run build",
     "test": "vitest",
-    "test:run": "vitest run"
+    "test:run": "vitest run",
+    "test:robustness": "vitest run test/run/robustness.test.ts",
+    "test:web-mobile": "vitest run test/web/mobile-viewport.test.ts"
   },
   "dependencies": {
+    "@babel/standalone": "7.26.4",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "pixelmatch": "^7.2.0",
+    "pngjs": "^7.0.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
     "zod": "^4.2.1"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
+    "@types/pngjs": "^6.0.5",
+    "playwright-core": "^1.61.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "vitest": "^3.2.4"
+    "vite": "^8.3.0",
+    "vitest": "^4.1.11"
   }
 }

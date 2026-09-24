@@ -2,10 +2,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+import type { NormalizedReviewFeedback } from "../review-feedback/model.js";
 import type { NitelyCommentAction } from "./commands.js";
 
 export type CommentProcessStatus =
   | "skipped"
+  | "pending-approval"
   | "processed"
   | "triggered"
   | "failed";
@@ -17,13 +19,26 @@ export interface CommentProcessRecord {
   action?: NitelyCommentAction;
   status: CommentProcessStatus;
   runId?: string;
+  feedback?: NormalizedReviewFeedback;
   reason?: string;
   processedAt: string;
+}
+
+export interface CommentReworkAttempts {
+  maxAttempts: number;
+  attemptCount: number;
+  runIds: string[];
+  lastAttemptCommentId?: string;
+  lastAttemptAt?: string;
+  terminalReason?: string;
+  terminalCommentId?: string;
+  terminalAt?: string;
 }
 
 export interface CommentLoopStateFile {
   version: 1;
   comments: Record<string, CommentProcessRecord>;
+  reworkAttempts?: CommentReworkAttempts;
 }
 
 export interface CommentStateLocation {

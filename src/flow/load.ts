@@ -32,6 +32,29 @@ function formatSchemaPath(path: PropertyKey[]): string {
   return path.length === 0 ? "flow" : path.map(String).join(".");
 }
 
+const REMOVED_BUDGETS_MESSAGE =
+  "no longer supported; use the machine-wide runaway ceiling NITELY_DEFAULT_MAX_RUNTIME_TOKENS instead";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function removedBudgetFieldErrors(document: unknown): string[] {
+  if (!isRecord(document) || !isRecord(document.spec)) return [];
+  const errors: string[] = [];
+  if (Object.prototype.hasOwnProperty.call(document.spec, "budgets")) {
+    errors.push(`spec.budgets: ${REMOVED_BUDGETS_MESSAGE}`);
+  }
+  const stages = document.spec.stages;
+  if (!Array.isArray(stages)) return errors;
+  stages.forEach((stage, index) => {
+    if (isRecord(stage) && Object.prototype.hasOwnProperty.call(stage, "budgets")) {
+      errors.push(`spec.stages.${index}.budgets: ${REMOVED_BUDGETS_MESSAGE}`);
+    }
+  });
+  return errors;
+}
+
 function valueAtPath(value: unknown, path: PropertyKey[]): unknown {
   let current = value;
   for (const part of path) {
@@ -150,6 +173,11 @@ function validateGraph(
   }
 
   for (const stage of flow.spec.stages) {
+    if (stage.taskPlan && !stage.inputs.includes(stage.taskPlan.input)) {
+      errors.push(
+        `stage ${stage.id} taskPlan input must be declared in inputs: ${stage.taskPlan.input}`,
+      );
+    }
     for (const artifact of stage.inputs) {
       const producer = producerByArtifact.get(artifact);
       if (!producer) {
@@ -222,29 +250,33 @@ export function parseFlowDocument(
     ]);
   }
 
+  const removedBudgetErrors = removedBudgetFieldErrors(document);
   const parsed = flowSchema.safeParse(document);
-  if (!parsed.success) {
-    throw new FlowValidationError(
-      parsed.error.issues.flatMap((issue) => {
-        const matchingUnionErrors =
-          issue.code === "invalid_union"
-            ? unionErrorsForMatchingStage(issue, document)
-            : undefined;
-        const issues = matchingUnionErrors ?? [issue];
-        return issues.map(
-          (candidate) =>
-            `${formatSchemaPath(candidate.path)}: ${candidate.message}`,
-        );
-      }),
-    );
+  if (!parsed.success || removedBudgetErrors.length > 0) {
+    const schemaErrors = parsed.success
+      ? []
+      : parsed.error.issues.flatMap((issue) => {
+          const matchingUnionErrors =
+            issue.code === "invalid_union"
+              ? unionErrorsForMatchingStage(issue, document)
+              : undefined;
+          const issues = matchingUnionErrors ?? [issue];
+          return issues.map(
+            (candidate) =>
+              `${formatSchemaPath(candidate.path)}: ${candidate.message}`,
+          );
+        });
+    throw new FlowValidationError([...removedBudgetErrors, ...schemaErrors]);
   }
+
+  const externalInputs = new Set([
+    ...(options.externalInputs ?? []),
+    ...(parsed.data.metadata.inputs ?? []).map((input) => input.id),
+  ]);
 
   return {
     flow: parsed.data,
-    graph: validateGraph(
-      parsed.data,
-      new Set(options.externalInputs ?? []),
-    ),
+    graph: validateGraph(parsed.data, externalInputs),
   };
 }
 

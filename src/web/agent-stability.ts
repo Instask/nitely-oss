@@ -1,5 +1,11 @@
+import type { ToolchainPreflight } from "../run/toolchain-preflight.js";
 import { formatAge } from "./dashboard.js";
-import type { WebRunStatus } from "./runs.js";
+import type {
+  WebArtifactReadiness,
+  WebRunPublication,
+  WebRunStatus,
+  WebStageProcess,
+} from "./runs.js";
 
 export type AgentStabilityReadinessState =
   | "ready"
@@ -14,59 +20,6 @@ export type AgentStabilityPublicationState =
   | "unknown";
 
 export type AgentStabilityOssStatus = "candidate";
-
-/** Optional artifact readiness signal (may be absent in OSS run summaries). */
-export type AgentStabilityArtifactReadinessStatus =
-  | "not-applicable"
-  | "pending"
-  | "partial"
-  | "ready"
-  | "missing";
-
-export interface AgentStabilityArtifactReadiness {
-  status: AgentStabilityArtifactReadinessStatus;
-  declaredIds?: string[];
-  readyIds?: string[];
-  missingIds?: string[];
-}
-
-/** Optional publication metadata when a change request or local branch exists. */
-export interface AgentStabilityRunPublication {
-  state: "published" | "updated";
-  branchName?: string;
-  headCommit?: string;
-  changeRequestUrl?: string;
-  prNumber?: number;
-}
-
-/** Optional current agent process metadata (runtime/model/state). */
-export interface AgentStabilityStageProcess {
-  kind: string;
-  label: string;
-  command?: string;
-  runtime?: string;
-  model?: string;
-  state?: string;
-}
-
-/**
- * Optional toolchain preflight snapshot.
- * When missing, runner readiness reports `unknown` rather than inventing signals.
- */
-export interface AgentStabilityToolchainPreflight {
-  version?: number;
-  runId?: string;
-  generatedAt?: string;
-  repoPath?: string;
-  commandEnvironment?: {
-    envSource?: string;
-    shellMode?: string;
-    pathEntryCount?: number;
-    repairs?: unknown[];
-  };
-  toolchainFiles?: Array<{ path?: string; kind?: string }>;
-  executables?: Array<{ name: string; available?: boolean; path?: string }>;
-}
 
 export interface AgentStabilitySummary {
   active: number;
@@ -124,7 +77,7 @@ export interface AgentStabilitySelfTestCandidate {
   runId: string;
   kind: "self-test" | "verify" | "doctor" | "test";
   stages: string[];
-  readiness?: AgentStabilityArtifactReadinessStatus;
+  readiness?: WebArtifactReadiness["status"];
 }
 
 export interface AgentStabilityVerificationSummary {
@@ -163,7 +116,7 @@ export interface AgentStabilityTimelineStage {
   status?: string;
   state?: string;
   hasEvidence?: boolean;
-  artifactReadiness?: AgentStabilityArtifactReadiness;
+  artifactReadiness?: WebArtifactReadiness;
 }
 
 export interface AgentStabilityRunInput {
@@ -181,7 +134,7 @@ export interface AgentStabilityRunInput {
   currentStage?: string;
   completedStages?: string[];
   branchName?: string;
-  publication?: AgentStabilityRunPublication;
+  publication?: WebRunPublication;
   changeRequestUrl?: string;
   prNumber?: number;
   prUrl?: string;
@@ -192,11 +145,11 @@ export interface AgentStabilityRunInput {
     runtime?: string;
   };
   currentProcess?: Pick<
-    AgentStabilityStageProcess,
+    WebStageProcess,
     "kind" | "label" | "command" | "runtime" | "model" | "state"
   >;
-  currentArtifactReadiness?: AgentStabilityArtifactReadiness;
-  toolchainPreflight?: AgentStabilityToolchainPreflight;
+  currentArtifactReadiness?: WebArtifactReadiness;
+  toolchainPreflight?: ToolchainPreflight;
   timeline?: AgentStabilityTimelineStage[];
   startedAt?: string;
   completedAt?: string;
@@ -389,7 +342,7 @@ function normalizeRuntime(runtime: string): string {
 }
 
 function readinessFromPreflight(
-  preflight: AgentStabilityToolchainPreflight | undefined,
+  preflight: ToolchainPreflight | undefined,
 ): {
   readiness: AgentStabilityReadinessState;
   missingTools: string[];
@@ -400,17 +353,16 @@ function readinessFromPreflight(
     return { readiness: "unknown", missingTools: [], warnings: [] };
   }
 
-  const executables = preflight.executables ?? [];
-  const missingTools = executables
+  const missingTools = preflight.executables
     .filter((executable) => executable.available !== true)
     .map((executable) => executable.name)
     .filter(Boolean);
 
   const warnings: string[] = [];
-  if ((preflight.toolchainFiles ?? []).length === 0) {
+  if (preflight.toolchainFiles.length === 0) {
     warnings.push("no-toolchain-files");
   }
-  if ((preflight.commandEnvironment?.repairs?.length ?? 0) > 0) {
+  if ((preflight.commandEnvironment.repairs?.length ?? 0) > 0) {
     warnings.push("environment-repairs");
   }
 
@@ -423,7 +375,7 @@ function readinessFromPreflight(
     };
   }
 
-  const availableCount = executables.filter(
+  const availableCount = preflight.executables.filter(
     (executable) => executable.available === true,
   ).length;
   if (availableCount === 0) {
@@ -516,7 +468,7 @@ function collectVerification(
     );
 
     const classify = (
-      readiness: AgentStabilityArtifactReadinessStatus | undefined,
+      readiness: WebArtifactReadiness["status"] | undefined,
       status: string | undefined,
       hasEvidence?: boolean,
     ): "passed" | "failed" | "missing" | "partial" | "unknown" => {
@@ -668,7 +620,7 @@ export function buildAgentStabilityProjection(
       lastRunId?: string;
       lastObservedAt?: string;
       lastObservedMs: number;
-      preflight?: AgentStabilityToolchainPreflight;
+      preflight?: ToolchainPreflight;
       processState?: string;
     }
   >();

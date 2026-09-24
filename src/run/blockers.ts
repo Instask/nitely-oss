@@ -1,6 +1,8 @@
 export type RunBlockerReason =
+  | "agent_credentials_invalid"
   | "agent_usage_limit"
-  | "agent_runtime_unavailable";
+  | "agent_runtime_unavailable"
+  | "awaiting_operator_answer";
 
 export interface RunBlocker {
   reason: RunBlockerReason;
@@ -8,6 +10,7 @@ export interface RunBlocker {
   runtime?: string;
   message: string;
   retryAfter?: string;
+  questionId?: string;
 }
 
 function stringField(value: unknown, key: string): string | undefined {
@@ -28,12 +31,27 @@ function combinedRuntimeOutput(error: unknown): string {
 
 function matchesUsageLimit(text: string): boolean {
   const lower = text.toLowerCase();
-  if (lower.includes("hit your usage limit")) return true;
+  // Claude phrases the same condition as "your limit", "your usage limit"
+  // and "your session limit"; any single qualifier still means quota.
+  if (/\bhit your (?:\w+ )?limit\b/.test(lower)) return true;
   if (lower.includes("usage limit")) return true;
   if (/\brate[-\s]?limit(?:ed)?\b/.test(lower)) return true;
   if (/\bquota\s+exceeded\b/.test(lower)) return true;
   if (/\bcapacity\b/.test(lower)) return true;
   return /\btry again\b/.test(lower) && /\b(?:usage|rate|quota)\b/.test(lower);
+}
+
+function matchesCredentialFailure(text: string): boolean {
+  const lower = text.toLowerCase();
+  const authSignal =
+    /\b(?:401|unauthorized|authentication[_ ]error|authentication failed|failed to authenticate)\b/.test(
+      lower,
+    );
+  const credentialSignal =
+    /\b(?:oauth|api[\s_-]?key|access token|token|credential(?:s)?)\b/.test(lower);
+  const invalidSignal =
+    /\b(?:invalid|expired|revoked|rejected|unauthorized|unauthenticated)\b/.test(lower);
+  return credentialSignal && (authSignal || invalidSignal);
 }
 
 function matchesRuntimeUnavailable(text: string): boolean {
@@ -47,6 +65,8 @@ function matchesRuntimeUnavailable(text: string): boolean {
 
 function extractRetryAfter(text: string): string | undefined {
   const patterns = [
+    /\bresets\s+(\d{1,2}:\d{2}(?:\s*(?:am|pm))?\s+\([^)]+\))/i,
+    /\bresets\s+(\d{1,2}:\d{2}\s*(?:am|pm)?)/i,
     /\btry again at\s+(.+?)(?:[.\n\r]|$)/i,
     /\bretry after\s+(.+?)(?:[.\n\r]|$)/i,
     /\btry again in\s+(.+?)(?:[.\n\r]|$)/i,
@@ -67,6 +87,19 @@ export function classifyAgentRuntimeBlocker(input: {
   const message = combinedRuntimeOutput(input.error);
   if (!message) {
     return undefined;
+  }
+  if (matchesCredentialFailure(message)) {
+    const runtime = input.runtime ? ` for ${input.runtime}` : "";
+    return {
+      reason: "agent_credentials_invalid",
+      stageId: input.stageId,
+      runtime: input.runtime,
+      message: [
+        `Agent credentials${runtime} were rejected.`,
+        "Check the configured credential source and scopes, refresh or replace the credential, then resume the run.",
+        `Provider error: ${message}`,
+      ].join(" "),
+    };
   }
   if (matchesUsageLimit(message)) {
     return {

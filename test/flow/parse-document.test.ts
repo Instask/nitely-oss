@@ -51,6 +51,85 @@ describe("parseFlowDocument", () => {
     });
   });
 
+  it("keeps context.fullReadInputs on an agent stage", () => {
+    const flow = JSON.stringify({
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "full-read" },
+      spec: {
+        stages: [
+          {
+            id: "plan-tasks",
+            type: "agent",
+            runtime: "codex",
+            prompt: "Plan.",
+            inputs: ["spec"],
+            context: { fullReadInputs: ["spec"] },
+            outputs: ["task-plan"],
+          },
+        ],
+      },
+    });
+
+    const result = parseFlowDocument(flow, { externalInputs: ["spec"] });
+    expect(result.flow.spec.stages[0]).toMatchObject({
+      context: { fullReadInputs: ["spec"] },
+    });
+  });
+
+  it("rejects a fullReadInputs id that the stage does not declare as an input", () => {
+    const flow = JSON.stringify({
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "full-read-undeclared" },
+      spec: {
+        stages: [
+          {
+            id: "plan-tasks",
+            type: "agent",
+            runtime: "codex",
+            prompt: "Plan.",
+            inputs: ["spec"],
+            context: { fullReadInputs: ["tech-design"] },
+            outputs: ["task-plan"],
+          },
+        ],
+      },
+    });
+
+    expect(() => parseFlowDocument(flow, { externalInputs: ["spec"] })).toThrow(
+      FlowValidationError,
+    );
+    expect(() => parseFlowDocument(flow, { externalInputs: ["spec"] })).toThrow(
+      /fullReadInputs id must be declared in stage plan-tasks inputs: tech-design/,
+    );
+  });
+
+  it("rejects duplicate fullReadInputs ids on a stage", () => {
+    const flow = JSON.stringify({
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "full-read-duplicate" },
+      spec: {
+        stages: [
+          {
+            id: "plan-tasks",
+            type: "agent",
+            runtime: "codex",
+            prompt: "Plan.",
+            inputs: ["spec"],
+            context: { fullReadInputs: ["spec", "spec"] },
+            outputs: ["task-plan"],
+          },
+        ],
+      },
+    });
+
+    expect(() => parseFlowDocument(flow, { externalInputs: ["spec"] })).toThrow(
+      /duplicate fullReadInputs id on stage plan-tasks: spec/,
+    );
+  });
+
   it("rejects duplicate MCP server requirements on a stage", () => {
     const flow = JSON.stringify({
       apiVersion: "nitely.dev/v1alpha1",
@@ -122,6 +201,158 @@ describe("parseFlowDocument", () => {
 
     expect(() => parseFlowDocument(flow, {})).toThrow(
       /required_mcp_servers are only valid on agent and review gate stages/,
+    );
+  });
+
+  it("preserves a fully typed agent convergence contract", () => {
+    const flow = JSON.stringify({
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "converge", inputs: [{ id: "tasks" }] },
+      spec: {
+        stages: [
+          {
+            id: "converge",
+            type: "agent",
+            runtime: "codex",
+            prompt: "Compare the implementation with the feature artifacts.",
+            inputs: ["tasks"],
+            outputs: [
+              {
+                id: "convergence-report",
+                type: "convergence.report",
+                mediaType: "application/vnd.nitely.convergence+json",
+              },
+              {
+                id: "converged-tasks",
+                type: "task.converged",
+                mediaType: "text/markdown",
+              },
+            ],
+            convergence: {
+              tasksInput: "tasks",
+              reportOutput: "convergence-report",
+              tasksOutput: "converged-tasks",
+            },
+          },
+        ],
+      },
+    });
+
+    const result = parseFlowDocument(flow);
+    expect(result.flow.spec.stages[0]).toMatchObject({
+      convergence: {
+        tasksInput: "tasks",
+        reportOutput: "convergence-report",
+        tasksOutput: "converged-tasks",
+      },
+    });
+  });
+
+  it("rejects convergence contracts that do not declare distinct typed inputs and outputs", () => {
+    const invalidStage = (overrides: Record<string, unknown>) =>
+      JSON.stringify({
+        apiVersion: "nitely.dev/v1alpha1",
+        kind: "Flow",
+        metadata: { name: "invalid-convergence", inputs: [{ id: "tasks" }] },
+        spec: {
+          stages: [
+            {
+              id: "converge",
+              type: "agent",
+              runtime: "codex",
+              prompt: "Converge.",
+              inputs: ["tasks"],
+              outputs: [
+                {
+                  id: "convergence-report",
+                  type: "convergence.report",
+                  mediaType: "application/vnd.nitely.convergence+json",
+                },
+                {
+                  id: "converged-tasks",
+                  type: "task.converged",
+                  mediaType: "text/markdown",
+                },
+              ],
+              convergence: {
+                tasksInput: "tasks",
+                reportOutput: "convergence-report",
+                tasksOutput: "converged-tasks",
+              },
+              ...overrides,
+            },
+          ],
+        },
+      });
+
+    expect(() =>
+      parseFlowDocument(
+        invalidStage({
+          convergence: {
+            tasksInput: "missing-tasks",
+            reportOutput: "convergence-report",
+            tasksOutput: "converged-tasks",
+          },
+        }),
+      ),
+    ).toThrow(/tasksInput must be declared in stage inputs/);
+    expect(() =>
+      parseFlowDocument(
+        invalidStage({
+          convergence: {
+            tasksInput: "tasks",
+            reportOutput: "convergence-report",
+            tasksOutput: "convergence-report",
+          },
+        }),
+      ),
+    ).toThrow(/tasksInput, reportOutput, and tasksOutput must be distinct/);
+    expect(() =>
+      parseFlowDocument(
+        invalidStage({
+          outputs: [
+            {
+              id: "convergence-report",
+              type: "report",
+              mediaType: "application/json",
+            },
+            {
+              id: "converged-tasks",
+              type: "task.converged",
+              mediaType: "text/markdown",
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/reportOutput must declare type convergence\.report/);
+  });
+
+  it("rejects convergence configuration on non-agent stages", () => {
+    const flow = JSON.stringify({
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "command-convergence" },
+      spec: {
+        stages: [
+          {
+            id: "test",
+            type: "command",
+            command: "true",
+            inputs: [],
+            outputs: ["result"],
+            convergence: {
+              tasksInput: "tasks",
+              reportOutput: "report",
+              tasksOutput: "result",
+            },
+          },
+        ],
+      },
+    });
+
+    expect(() => parseFlowDocument(flow)).toThrow(
+      /convergence is only valid on agent stages/,
     );
   });
 

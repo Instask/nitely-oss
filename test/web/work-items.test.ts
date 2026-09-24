@@ -74,6 +74,30 @@ describe("web task work-item projection", () => {
     ]);
   });
 
+  // A task's runs are derived by filtering the repository-wide listing, so any
+  // page cap on that listing empties the run list of every task whose runs are
+  // not among the newest. #518's scan cost has to be paid per run, not by
+  // hiding older ones.
+  it("keeps an older task's runs visible as newer unrelated runs accumulate", async () => {
+    const repoPath = await createRepo();
+    const task = await createTask(
+      repoPath,
+      { title: "Long lived", spec: "Spec", techDesign: "Design" },
+      { createId: () => "task-long-lived" },
+    );
+
+    await writeRun(repoPath, "run-000", { workItemId: "task-long-lived" });
+    for (let index = 0; index < 60; index += 1) {
+      await writeRun(repoPath, `run-${String(100 + index)}`, {
+        workItemId: "task-unrelated",
+      });
+    }
+
+    await expect(listRunsForTask(repoPath, task)).resolves.toMatchObject([
+      { runId: "run-000" },
+    ]);
+  });
+
   it("associates a run by work item id without spec or tech-design inputs", async () => {
     const repoPath = await createRepo();
     const task = await createTask(

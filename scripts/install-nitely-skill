@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install the bundled `nitely` agent skill so a coding agent knows how to
+# install, configure, and operate Nitely.
+#
+# Works from a Nitely checkout (copies the local files) and standalone over
+# the network (downloads them from GitHub).
+
+SKILL_ID="nitely"
+
+# Files that make up the skill, relative to skills/<SKILL_ID>/.
+# Keep in sync with skills/nitely/ (test/skills/bundled-nitely-skill.test.ts
+# fails when they drift).
+SKILL_FILES=(
+  "SKILL.md"
+  "references/install.md"
+  "references/cli.md"
+  "references/flows.md"
+  "references/troubleshooting.md"
+  "references/web-operations.md"
+)
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/install-nitely-skill [options]
+
+Install the `nitely` agent skill.
+
+Targets (choose one, default --user):
+  --user                 ${CLAUDE_CONFIG_DIR:-~/.claude}/skills/nitely
+  --project [PATH]       PATH/.claude/skills/nitely          (default PATH: .)
+  --nitely-repo PATH     PATH/.nitely/skills/nitely          (skill packs for Nitely runs)
+  --dest PATH            PATH exactly, as the skill directory
+
+Options:
+  --ref REF              Git ref to download from in network mode. Default: master
+  --repo OWNER/NAME      Source GitHub repository. Default: jerryleooo/nitely
+  --force                Replace an existing skill directory
+  -h, --help             Show this help
+
+Environment overrides: NITELY_SKILL_REF, NITELY_SKILL_REPO, CLAUDE_CONFIG_DIR
+
+Examples:
+  scripts/install-nitely-skill                       # personal Claude Code skill
+  scripts/install-nitely-skill --project ~/code/app  # only for that project
+  scripts/install-nitely-skill --nitely-repo ~/code/app
+  curl -fsSL https://raw.githubusercontent.com/jerryleooo/nitely/master/scripts/install-nitely-skill | bash
+USAGE
+}
+
+ref="${NITELY_SKILL_REF:-master}"
+source_repo="${NITELY_SKILL_REPO:-jerryleooo/nitely}"
+target=""
+target_label=""
+force=0
+
+set_target() {
+  if [[ -n "$target" ]]; then
+    echo "install-nitely-skill: choose only one target" >&2
+    exit 2
+  fi
+  target="$1"
+  target_label="$2"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --user)
+      set_target "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/$SKILL_ID" "personal Claude Code skill"
+      shift
+      ;;
+    --project)
+      project_path="."
+      if [[ $# -ge 2 && "$2" != --* ]]; then
+        project_path="$2"
+        shift
+      fi
+      set_target "${project_path%/}/.claude/skills/$SKILL_ID" "project skill in ${project_path%/}"
+      shift
+      ;;
+    --nitely-repo)
+      [[ $# -ge 2 ]] || { echo "install-nitely-skill: --nitely-repo needs a path" >&2; exit 2; }
+      set_target "${2%/}/.nitely/skills/$SKILL_ID" "Nitely run skill in ${2%/}"
+      shift 2
+      ;;
+    --dest)
+      [[ $# -ge 2 ]] || { echo "install-nitely-skill: --dest needs a path" >&2; exit 2; }
+      set_target "${2%/}" "skill directory ${2%/}"
+      shift 2
+      ;;
+    --ref)
+      [[ $# -ge 2 ]] || { echo "install-nitely-skill: --ref needs a value" >&2; exit 2; }
+      ref="$2"
+      shift 2
+      ;;
+    --repo)
+      [[ $# -ge 2 ]] || { echo "install-nitely-skill: --repo needs a value" >&2; exit 2; }
+      source_repo="$2"
+      shift 2
+      ;;
+    --force)
+      force=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "install-nitely-skill: unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$target" ]]; then
+  target="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/$SKILL_ID"
+  target_label="personal Claude Code skill"
+fi
+
+# Locate a local copy of the skill when the script runs from a checkout.
+local_skill_dir=""
+if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  candidate="$(cd "$script_dir/.." && pwd)/skills/$SKILL_ID"
+  if [[ -f "$candidate/SKILL.md" ]]; then
+    local_skill_dir="$candidate"
+  fi
+fi
+
+if [[ -e "$target" && $force -ne 1 ]]; then
+  echo "install-nitely-skill: $target already exists (use --force to replace it)" >&2
+  exit 1
+fi
+
+staging="$(mktemp -d "${TMPDIR:-/tmp}/nitely-skill-XXXXXX")"
+cleanup() { rm -rf "$staging"; }
+trap cleanup EXIT
+
+if [[ -n "$local_skill_dir" ]]; then
+  source_label="$local_skill_dir"
+  for file in "${SKILL_FILES[@]}"; do
+    if [[ ! -f "$local_skill_dir/$file" ]]; then
+      echo "install-nitely-skill: missing source file: $local_skill_dir/$file" >&2
+      exit 1
+    fi
+    mkdir -p "$staging/$(dirname "$file")"
+    cp "$local_skill_dir/$file" "$staging/$file"
+  done
+else
+  command -v curl >/dev/null 2>&1 || {
+    echo "install-nitely-skill: curl is required to download the skill" >&2
+    exit 1
+  }
+  base_url="https://raw.githubusercontent.com/$source_repo/$ref/skills/$SKILL_ID"
+  source_label="$base_url"
+  for file in "${SKILL_FILES[@]}"; do
+    mkdir -p "$staging/$(dirname "$file")"
+    if ! curl -fsSL "$base_url/$file" -o "$staging/$file"; then
+      echo "install-nitely-skill: failed to download $base_url/$file" >&2
+      exit 1
+    fi
+  done
+fi
+
+# Fail before touching the target if the download or copy produced junk.
+if ! head -n 1 "$staging/SKILL.md" | grep -q '^---$'; then
+  echo "install-nitely-skill: SKILL.md does not start with frontmatter; refusing to install" >&2
+  exit 1
+fi
+
+mkdir -p "$(dirname "$target")"
+if [[ -e "$target" ]]; then
+  previous="$(mktemp -d "${TMPDIR:-/tmp}/nitely-skill-old-XXXXXX")"
+  mv "$target" "$previous/skill"
+  if mv "$staging" "$target"; then
+    rm -rf "$previous"
+  else
+    mv "$previous/skill" "$target"
+    rm -rf "$previous"
+    echo "install-nitely-skill: install failed; kept the existing skill" >&2
+    exit 1
+  fi
+else
+  mv "$staging" "$target"
+fi
+trap - EXIT
+
+chmod -R u+rwX,go+rX "$target"
+
+echo "Installed the nitely skill as the $target_label."
+echo "  Source: $source_label"
+echo "  Target: $target"
+echo "  Files:  ${#SKILL_FILES[@]}"
+case "$target" in
+  */.nitely/skills/*)
+    echo
+    echo "Reference it from an agent stage: \"skills\": [\"$SKILL_ID\"]"
+    ;;
+  *)
+    echo
+    echo "Start a new agent session to pick it up, then ask about installing or running Nitely."
+    ;;
+esac

@@ -1,7 +1,9 @@
 import { readFile } from "node:fs/promises";
-import { join, posix } from "node:path";
+import { join } from "node:path";
 
 import { z } from "zod";
+
+import { globMatches, normalizeRelativePath } from "../policy/glob.js";
 
 export interface ContextPolicy {
   version: 1;
@@ -32,6 +34,8 @@ export class ContextPolicyError extends Error {
 const builtInExcludes = [
   ".git/**",
   ".nitely/providers/**",
+  ".nitely/connections*",
+  ".nitely/users/**/connections*",
   ".nitely/events.db",
   ".env",
   ".env.*",
@@ -48,40 +52,6 @@ const policySchema = z.object({
   warnOnly: z.boolean().default(false),
   redactEnv: z.array(z.string()).default([]),
 });
-
-function normalizeRelativePath(value: string): string {
-  const normalized = posix.normalize(value.replaceAll("\\", "/"));
-  return normalized === "." ? "" : normalized.replace(/^\.\/+/, "");
-}
-
-function segmentMatches(pattern: string, segment: string): boolean {
-  const regex = new RegExp(
-    `^${pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replaceAll("*", "[^/]*")}$`,
-  );
-  return regex.test(segment);
-}
-
-function matchSegments(pattern: string[], path: string[]): boolean {
-  if (pattern.length === 0) return path.length === 0;
-  const [head, ...tail] = pattern;
-  if (head === "**") {
-    if (matchSegments(tail, path)) return true;
-    return path.length > 0 && matchSegments(pattern, path.slice(1));
-  }
-  return (
-    path.length > 0 &&
-    segmentMatches(head, path[0] ?? "") &&
-    matchSegments(tail, path.slice(1))
-  );
-}
-
-function globMatches(pattern: string, repoRelativePath: string): boolean {
-  const normalizedPattern = normalizeRelativePath(pattern);
-  const normalizedPath = normalizeRelativePath(repoRelativePath);
-  const patternSegments = normalizedPattern.split("/").filter(Boolean);
-  const pathSegments = normalizedPath.split("/").filter(Boolean);
-  return matchSegments(patternSegments, pathSegments);
-}
 
 export async function loadContextPolicy(repoPath: string): Promise<ContextPolicy> {
   let document: unknown = {};

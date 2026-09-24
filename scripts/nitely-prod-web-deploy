@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/nitely-prod-web-deploy [options]
+
+Deploy Nitely production Web on the configured remote host.
+
+Options:
+  --remote HOST          SSH target. Default: jerry@100.96.111.79
+  --prod-dir PATH       Production checkout. Default: /home/jerry/nitely
+  --branch NAME         Branch to deploy. Default: master
+  --dirty-mode MODE     stash or abort. Default: stash
+  --node-bin PATH       Production Node bin directory. Default: /home/jerry/.nvm/versions/node/v24.17.0/bin
+  --restart-script PATH Restart helper. Default: /home/jerry/bin/nitely-prod-web-restart
+  -h, --help            Show this help.
+
+Environment variables with the same names are also supported:
+  NITELY_DEPLOY_REMOTE, NITELY_PROD_DIR, NITELY_DEPLOY_BRANCH,
+  NITELY_DEPLOY_DIRTY_MODE, NITELY_PROD_NODE_BIN, NITELY_PROD_RESTART
+USAGE
+}
+
+remote="${NITELY_DEPLOY_REMOTE:-jerry@100.96.111.79}"
+prod_dir="${NITELY_PROD_DIR:-/home/jerry/nitely}"
+branch="${NITELY_DEPLOY_BRANCH:-master}"
+dirty_mode="${NITELY_DEPLOY_DIRTY_MODE:-stash}"
+node_bin="${NITELY_PROD_NODE_BIN:-/home/jerry/.nvm/versions/node/v24.17.0/bin}"
+restart_script="${NITELY_PROD_RESTART:-/home/jerry/bin/nitely-prod-web-restart}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --remote)
+      remote="${2:?--remote requires a value}"
+      shift 2
+      ;;
+    --prod-dir)
+      prod_dir="${2:?--prod-dir requires a value}"
+      shift 2
+      ;;
+    --branch)
+      branch="${2:?--branch requires a value}"
+      shift 2
+      ;;
+    --dirty-mode)
+      dirty_mode="${2:?--dirty-mode requires a value}"
+      shift 2
+      ;;
+    --node-bin)
+      node_bin="${2:?--node-bin requires a value}"
+      shift 2
+      ;;
+    --restart-script)
+      restart_script="${2:?--restart-script requires a value}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'unknown option: %s\n\n' "$1" >&2
+      usage >&2
+      exit 64
+      ;;
+  esac
+done
+
+case "$dirty_mode" in
+  stash|abort) ;;
+  *)
+    printf 'invalid --dirty-mode %s; expected stash or abort\n' "$dirty_mode" >&2
+    exit 64
+    ;;
+esac
+
+ssh "$remote" bash -s -- "$prod_dir" "$branch" "$dirty_mode" "$node_bin" "$restart_script" <<'REMOTE_SCRIPT'
+set -euo pipefail
+
+prod_dir="$1"
+branch="$2"
+dirty_mode="$3"
+node_bin="$4"
+restart_script="$5"
+
+if [[ -n "$node_bin" ]]; then
+  export PATH="$node_bin:$PATH"
+fi
+
+if [[ ! -e "$prod_dir/.git" ]]; then
+  printf 'production checkout is not a git worktree: %s\n' "$prod_dir" >&2
+  exit 66
+fi
+
+cd "$prod_dir"
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  printf 'production path is not inside a git worktree: %s\n' "$prod_dir" >&2
+  exit 66
+fi
+
+previous_commit="$(git rev-parse HEAD)"
+previous_branch="$(git branch --show-current || true)"
+preserved_stash="none"
+
+printf 'Nitely production deploy\n'
+printf '  checkout=%s\n' "$prod_dir"
+printf '  previous_branch=%s\n' "${previous_branch:-detached}"
+printf '  previous_commit=%s\n' "$previous_commit"
+printf '  target_branch=%s\n' "$branch"
+printf '  node_bin=%s\n' "${node_bin:-system PATH}"
+
+dirty_status="$(git status --porcelain=v1 --untracked-files=all)"
+if [[ -n "$dirty_status" ]]; then
+  printf '\nDirty tracked/untracked files detected before deploy:\n'
+  printf '%s\n' "$dirty_status"
+  if [[ "$dirty_mode" == "abort" ]]; then
+    printf '\nAborting before pull. Re-run with --dirty-mode stash to preserve this state automatically.\n' >&2
+    exit 65
+  fi
+  stash_message="nitely-deploy-preserve $(date -u +%Y%m%dT%H%M%SZ) before ${branch}"
+  git stash push -u -m "$stash_message"
+  preserved_stash="$(git rev-parse --verify refs/stash)"
+  printf 'Preserved dirty state in stash: %s\n' "$preserved_stash"
+  printf 'Restore deliberately with: cd %s && git stash show --stat %s && git stash apply %s\n' \
+    "$prod_dir" "$preserved_stash" "$preserved_stash"
+else
+  printf 'Remote worktree clean before deploy.\n'
+fi
+
+git fetch origin "$branch"
+target_ref="FETCH_HEAD"
+
+if git show-ref --verify --quiet "refs/heads/${branch}"; then
+  git checkout "$branch"
+else
+  git checkout -b "$branch" "$target_ref"
+fi
+
+branch_head="$(git rev-parse HEAD)"
+if ! git merge-base --is-ancestor "$branch_head" "$target_ref"; then
+  printf 'Local branch %s has commits not contained in fetched origin/%s; refusing to overwrite them.\n' \
+    "$branch" "$branch" >&2
+  printf 'preserved_stash=%s\n' "$preserved_stash" >&2
+  exit 67
+fi
+
+git merge --ff-only "$target_ref"
+deployed_commit="$(git rev-parse HEAD)"
+
+pnpm install --frozen-lockfile
+pnpm run build
+
+if [[ ! -x "$restart_script" ]]; then
+  printf 'restart helper is missing or not executable: %s\n' "$restart_script" >&2
+  printf 'deployed_commit=%s\n' "$deployed_commit" >&2
+  printf 'preserved_stash=%s\n' "$preserved_stash" >&2
+  exit 68
+fi
+
+"$restart_script"
+
+printf '\nRelease summary\n'
+printf '  previous_commit=%s\n' "$previous_commit"
+printf '  deployed_commit=%s\n' "$deployed_commit"
+printf '  preserved_stash=%s\n' "$preserved_stash"
+printf '  node_bin=%s\n' "${node_bin:-system PATH}"
+printf '  restart_script=%s\n' "$restart_script"
+REMOTE_SCRIPT

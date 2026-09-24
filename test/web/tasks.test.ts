@@ -149,6 +149,50 @@ describe("web task persistence", () => {
     ).rejects.toThrow("flow path must exist inside the repository");
   });
 
+  it("resyncs the repository once before rejecting a flow path it cannot see", async () => {
+    const repoPath = await createRepo();
+    let synced = 0;
+    await expect(
+      createTask(
+        repoPath,
+        {
+          title: "Task",
+          spec: "spec",
+          techDesign: "design",
+          flowPath: "flows/missing.json",
+        },
+        {
+          resyncRepository: async () => {
+            synced += 1;
+            return false;
+          },
+        },
+      ),
+    ).rejects.toThrow("flow path must exist inside the repository");
+    expect(synced).toBe(1);
+  });
+
+  it("accepts a flow path that only appears after the repository is resynced", async () => {
+    const repoPath = await createRepo();
+    const task = await createTask(
+      repoPath,
+      {
+        title: "Task",
+        spec: "spec",
+        techDesign: "design",
+        flowPath: "flows/late.json",
+      },
+      {
+        resyncRepository: async () => {
+          await mkdir(join(repoPath, "flows"), { recursive: true });
+          await writeFile(join(repoPath, "flows", "late.json"), "{}", "utf8");
+          return true;
+        },
+      },
+    );
+    expect(task.flowPath).toBe("flows/late.json");
+  });
+
   it("rejects flow paths that resolve outside the repository through a symlink", async () => {
     const repoPath = await createRepo();
     const outside = await mkdtemp(join(tmpdir(), "nitely-web-tasks-outside-"));

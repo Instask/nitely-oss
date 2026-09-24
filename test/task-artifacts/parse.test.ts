@@ -75,6 +75,50 @@ describe("task breakdown artifacts", () => {
     );
   });
 
+  it("ignores metadata and evidence headings when collecting executable phases", () => {
+    const parsed = parseTaskArtifact(`# Tasks
+
+## Phase 1: Setup
+
+- [x] T001 Create baseline tests in \`test/task-artifacts/parse.test.ts\`
+
+## Canonical Inputs
+
+- Spec: \`spec.md\`
+
+## Phase 2: User Story US-001 - Primary workflow
+
+- [ ] T002 Implement parser behavior in \`src/task-artifacts/parse.ts\` (depends: T001)
+
+## Downstream Evidence
+
+- [ ] T003 Evidence-only checkbox should not inherit the user story
+
+## Phase 3: Verification
+
+- [ ] T004 Run verification in \`package.json\` (depends: T002)
+`);
+
+    expect(parsed.valid).toBe(true);
+    expect(parsed.phases.map((phase) => phase.name)).toEqual([
+      "Phase 1: Setup",
+      "Phase 2: User Story US-001 - Primary workflow",
+      "Phase 3: Verification",
+    ]);
+    expect(parsed.tasks.find((task) => task.id === "T002")).toMatchObject({
+      phase: "Phase 2: User Story US-001 - Primary workflow",
+      storyId: "US-001",
+    });
+    expect(parsed.tasks.find((task) => task.id === "T003")).toMatchObject({
+      phase: undefined,
+      storyId: undefined,
+    });
+    expect(parsed.tasks.find((task) => task.id === "T004")).toMatchObject({
+      phase: "Phase 3: Verification",
+      storyId: undefined,
+    });
+  });
+
   it("exports a Markdown-first task artifact template", () => {
     expect(taskArtifactTemplate).toContain("T001");
     expect(taskArtifactTemplate).toContain("[P]");

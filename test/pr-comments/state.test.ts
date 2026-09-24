@@ -8,6 +8,7 @@ import {
   commentBodyHash,
   loadCommentLoopState,
   recordCommentProcess,
+  saveCommentLoopState,
 } from "../../src/pr-comments/state.js";
 
 describe("comment loop state", () => {
@@ -42,5 +43,39 @@ describe("comment loop state", () => {
       commentBodyHash("body", "2026-06-20T00:00:00Z"),
     );
     expect(commentBodyHash("body", "2026-06-20T00:05:00Z")).not.toBe(bodyHash);
+  });
+
+  it("persists rework attempt limits and terminal reasons", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-comments-state-"));
+    const location = {
+      repoPath,
+      owner: "Instask",
+      repository: "nitely",
+      prNumber: 15,
+    };
+
+    await saveCommentLoopState(location, {
+      version: 1,
+      comments: {},
+      reworkAttempts: {
+        maxAttempts: 2,
+        attemptCount: 2,
+        runIds: ["run-1", "run-2"],
+        lastAttemptCommentId: "c2",
+        lastAttemptAt: "2026-06-20T00:02:00.000Z",
+        terminalReason: "rework attempt limit reached (2/2); no run started",
+        terminalCommentId: "c3",
+        terminalAt: "2026-06-20T00:03:00.000Z",
+      },
+    });
+
+    await expect(loadCommentLoopState(location)).resolves.toMatchObject({
+      reworkAttempts: {
+        maxAttempts: 2,
+        attemptCount: 2,
+        runIds: ["run-1", "run-2"],
+        terminalReason: "rework attempt limit reached (2/2); no run started",
+      },
+    });
   });
 });

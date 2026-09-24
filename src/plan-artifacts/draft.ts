@@ -1,7 +1,13 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
+import {
+  renderDraftExternalKnowledgeSection,
+  type DraftExternalKnowledgePassage,
+} from "../spec-artifacts/draft.js";
 import { validateStructuredSpec } from "../spec-artifacts/parse.js";
+
+export type { DraftExternalKnowledgePassage } from "../spec-artifacts/draft.js";
 
 export interface RepositoryPlanContext {
   packageScripts: string[];
@@ -94,9 +100,15 @@ function likelyTestFiles(context: RepositoryPlanContext): string[] {
 export function generateDraftTechnicalPlan(input: {
   specMarkdown: string;
   context: RepositoryPlanContext;
+  source?: {
+    type: string;
+    uri?: string;
+    externalId?: string;
+  };
+  externalKnowledge?: DraftExternalKnowledgePassage[];
 }): GeneratedDraftTechnicalPlan {
   const parsed = validateStructuredSpec(input.specMarkdown);
-  if (!parsed.valid) {
+  if (!parsed.valid || parsed.status === "draft") {
     throw new Error("approved structured spec is required");
   }
   const storyIds = parsed.stories.map((story) => story.id);
@@ -124,6 +136,11 @@ export function generateDraftTechnicalPlan(input: {
     : input.context.packageScripts.includes("test")
       ? "pnpm test"
       : "verification command to be confirmed";
+  const sourceSnapshot = input.source
+    ? [input.source.type, input.source.externalId, input.source.uri]
+        .filter((value): value is string => Boolean(value))
+        .join(" · ")
+    : "not recorded";
 
   const markdown = `# Technical Plan: Draft From Approved Spec
 
@@ -132,6 +149,7 @@ Status: draft
 ## Summary
 
 - **Trace:** ${trace || "US/FR/SC ids unavailable"}
+- **Source snapshot:** ${sourceSnapshot}
 - **Approach:** Implement the approved structured spec with the smallest change that fits existing repository conventions.
 
 ## Technical Context
@@ -144,7 +162,10 @@ Status: draft
 - **Specs present:** ${input.context.specsPresent ? "yes" : "no"}
 - **Flows present:** ${input.context.flowsPresent ? "yes" : "no"}
 
-## Files / Modules Touched
+${renderDraftExternalKnowledgeSection(
+    input.externalKnowledge,
+    "the approved spec, plan constraints, or Nitely instructions",
+  )}## Files / Modules Touched
 
 ${implementationFiles.map((file) => `- \`${file}\`: candidate implementation surface for ${requirementIds[0] ?? "FR-001"}.`).join("\n")}
 ${testFiles.map((file) => `- \`${file}\`: candidate verification surface for ${criterionIds[0] ?? "SC-001"}.`).join("\n")}

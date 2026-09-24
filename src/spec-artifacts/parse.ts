@@ -9,6 +9,7 @@ export type StructuredSpecDiagnosticCode =
   | "placeholder";
 
 export type StructuredSpecDiagnosticSeverity = "error" | "warning";
+export type StructuredSpecStatus = "draft" | "approved";
 
 export interface StructuredSpecDiagnostic {
   code: StructuredSpecDiagnosticCode;
@@ -28,6 +29,7 @@ export interface StructuredSpecItem {
 
 export interface ParsedStructuredSpec {
   valid: boolean;
+  status?: StructuredSpecStatus;
   stories: StructuredSpecItem[];
   requirements: StructuredSpecItem[];
   successCriteria: StructuredSpecItem[];
@@ -52,6 +54,7 @@ const PLACEHOLDER_PATTERN =
   /\b(?:TBD|TODO|FIXME)\b|\{\{[^}]+\}\}|<([A-Z][A-Z0-9_-]*)>/;
 const HEADING_PATTERN = /^(#{2,4})\s+(.+?)\s*$/;
 const LIST_ITEM_PATTERN = /^\s*[-*]\s+(.*)$/;
+const STATUS_LINE_PATTERN = /^Status:\s*(draft|approved)\s*$/i;
 
 const REQUIRED_SECTIONS: SectionDefinition[] = [
   {
@@ -148,6 +151,43 @@ function sectionRanges(markdown: string): SectionRange[] {
   return ranges;
 }
 
+function leadingMetadataEndLine(lines: string[]): number {
+  const sectionIndex = lines.findIndex((line) => /^#{2,6}\s+/.test(line));
+  return sectionIndex === -1 ? lines.length : sectionIndex;
+}
+
+function parseStructuredSpecStatus(lines: string[]): StructuredSpecStatus | undefined {
+  for (const line of lines.slice(0, leadingMetadataEndLine(lines))) {
+    const match = STATUS_LINE_PATTERN.exec(line.trim());
+    if (match) {
+      return match[1]?.toLowerCase() as StructuredSpecStatus;
+    }
+  }
+  return undefined;
+}
+
+export function setStructuredSpecStatus(
+  markdown: string,
+  status: StructuredSpecStatus,
+): string {
+  const lines = markdown.split(/\r?\n/);
+  const metadataEndLine = leadingMetadataEndLine(lines);
+  const statusLine = `Status: ${status}`;
+
+  for (let index = 0; index < metadataEndLine; index += 1) {
+    if (STATUS_LINE_PATTERN.test(lines[index]?.trim() ?? "")) {
+      lines[index] = statusLine;
+      return lines.join("\n");
+    }
+  }
+
+  const insertAt = lines[0]?.startsWith("# ") ? 1 : 0;
+  const nextLineIsBlank = lines[insertAt]?.trim() === "";
+  const insertion = nextLineIsBlank ? ["", statusLine] : [statusLine, ""];
+  lines.splice(insertAt, 0, ...insertion);
+  return lines.join("\n");
+}
+
 function sectionText(lines: string[], range: SectionRange): string[] {
   return lines.slice(range.startLine - 1, range.endLine);
 }
@@ -217,6 +257,7 @@ export function parseStructuredSpec(markdown: string): ParsedStructuredSpec {
   const diagnostics: StructuredSpecDiagnostic[] = [];
   const lines = markdown.split(/\r?\n/);
   const ranges = sectionRanges(markdown);
+  const status = parseStructuredSpecStatus(lines);
 
   for (const definition of REQUIRED_SECTIONS) {
     if (!ranges.some((range) => range.definition.key === definition.key)) {
@@ -253,6 +294,7 @@ export function parseStructuredSpec(markdown: string): ParsedStructuredSpec {
 
   return {
     valid: diagnostics.every((diagnostic) => diagnostic.severity !== "error"),
+    ...(status ? { status } : {}),
     stories,
     requirements,
     successCriteria,
