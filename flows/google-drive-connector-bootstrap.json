@@ -10,10 +10,7 @@
       {
         "id": "implement",
         "type": "agent",
-        "runtimes": [
-          { "runtime": "claude" },
-          { "runtime": "codex" }
-        ],
+        "runtime": "codex",
         "prompt": "Implement the Google Drive connector according to the supplied specification and technical design. Follow TDD: add failing tests first, implement the smallest production code that passes, and keep the connector isolated behind the existing Connector interface. Produce a concise one-line pr-title artifact that names the actual change.",
         "inputs": ["spec", "tech-design"],
         "outputs": ["implementation", "pr-title"]
@@ -22,6 +19,7 @@
         "id": "test",
         "type": "command",
         "command": "pnpm exec vitest run test/connectors/google-drive.test.ts test/connectors/registry.test.ts && pnpm run check && pnpm run build",
+        "timeoutMs": 600000,
         "inputs": ["implementation"],
         "outputs": ["test-report"]
       },
@@ -29,10 +27,7 @@
         "id": "review",
         "type": "gate",
         "mode": "review",
-        "runtimes": [
-          { "runtime": "claude" },
-          { "runtime": "codex" }
-        ],
+        "runtime": "codex",
         "prompt": "Review the implementation against the specification and technical design. Check for credential leaks, direct scheduler coupling, missing tests, unsafe metadata, and brittle Google Drive URL parsing. Do not modify files during review. Write `Review verdict: pass` when there are no P0/P1/blocking findings. Write `Review verdict: fail` when any P0/P1/blocking issue exists, and list P0/P1 findings first.",
         "inputs": ["spec", "tech-design", "implementation", "test-report"],
         "outputs": ["review"]
@@ -47,10 +42,8 @@
       {
         "id": "reflect",
         "type": "agent",
-        "runtimes": [
-          { "runtime": "claude" },
-          { "runtime": "codex" }
-        ],
+        "alwaysRun": true,
+        "runtime": "codex",
         "prompt": "Reflect on this issue execution after the change request has been created. Review the source issue/spec, technical design, implementation summary, test report, review output, and change request result. Identify actionable improvements across specs, prompts, tests, workflow policy, run observability, deployment, and product behavior. Search existing GitHub issues before creating follow-ups. Create GitHub issues only for actionable non-duplicate improvements, include source issue, PR, run id, and relevant artifact/log links when available, and apply appropriate priority labels. Write a concise reflection artifact listing created issue URLs, duplicates found, non-actions/observations, or a clean result when no actionable improvement remains.",
         "inputs": ["spec", "tech-design", "implementation", "test-report", "review", "change-request"],
         "outputs": ["reflection"]

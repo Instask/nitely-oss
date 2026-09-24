@@ -1,13 +1,37 @@
-import { lstat, readFile, realpath, writeFile } from "node:fs/promises";
-import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
+import { lstat } from "node:fs/promises";
+import {
+  basename,
+  extname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 
 import type { ArtifactContract } from "../artifacts/types.js";
+import { validateAgainstSchema } from "../artifacts/validate.js";
 import { runRelativePath } from "../context/manifest.js";
+import {
+  readRunOwnedFile,
+  writeRunOwnedFileAtomically,
+} from "./owned-file.js";
 
 export interface AttemptOutputManifest {
   version: 1;
   stageId: string;
   attempt: number;
+  outputs: AttemptOutputEntry[];
+}
+
+/**
+ * An `artifact.json` exactly as an agent wrote it. `stageId` and `attempt` are
+ * optional here; {@link validateAttemptOutputs} fills them from the runner.
+ */
+export interface DeclaredAttemptOutputManifest {
+  version: 1;
+  stageId?: string;
+  attempt?: number;
   outputs: AttemptOutputEntry[];
 }
 
@@ -23,6 +47,7 @@ export interface ValidatedAttemptOutput {
   absolutePath: string;
   runRelativePath?: string;
   attemptRelativePath: string;
+  content: Buffer;
   mediaType: string;
   filename: string;
   manifestSource: "declared-manifest" | "discovered";
@@ -40,15 +65,19 @@ function isPathInside(parent: string, candidate: string): boolean {
   const relativePath = relative(parent, candidate);
   return (
     relativePath === "" ||
-    (!relativePath.startsWith("..") && !isAbsolute(relativePath))
+    !(
+      relativePath === ".." ||
+      relativePath.startsWith(`..${sep}`) ||
+      isAbsolute(relativePath)
+    )
   );
 }
 
-async function requireAttemptPath(input: {
+function requireAttemptPath(input: {
   attemptDirectory: string;
   path: string;
   outputId: string;
-}): Promise<string> {
+}): string {
   if (isAbsolute(input.path)) {
     throw new Error(
       `output ${input.outputId} path escapes attempt directory: ${input.path}`,
@@ -61,23 +90,7 @@ async function requireAttemptPath(input: {
       `output ${input.outputId} path escapes attempt directory: ${input.path}`,
     );
   }
-  let realAttemptDirectory: string;
-  let realPath: string;
-  try {
-    realAttemptDirectory = await realpath(resolvedAttemptDirectory);
-    realPath = await realpath(resolvedPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new Error(`missing required output ${input.outputId}: ${input.path}`);
-    }
-    throw error;
-  }
-  if (!isPathInside(realAttemptDirectory, realPath)) {
-    throw new Error(
-      `output ${input.outputId} path escapes attempt directory: ${input.path}`,
-    );
-  }
-  return realPath;
+  return resolvedPath;
 }
 
 function attemptRelativePath(attemptDirectory: string, path: string): string {
@@ -97,7 +110,7 @@ function inferMediaType(path: string): string {
   }
 }
 
-function readManifestValue(value: unknown): AttemptOutputManifest {
+function readManifestValue(value: unknown): DeclaredAttemptOutputManifest {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("artifact.json must be a JSON object");
   }
@@ -105,10 +118,16 @@ function readManifestValue(value: unknown): AttemptOutputManifest {
   if (record.version !== 1) {
     throw new Error("artifact.json version must be 1");
   }
-  if (typeof record.stageId !== "string") {
+  // stageId and attempt are advisory. The runner owns both values because it
+  // created <run>/stages/<stage-id>/<attempt>, so an agent that omits or
+  // mistypes them must not lose an otherwise complete attempt.
+  if (record.stageId !== undefined && typeof record.stageId !== "string") {
     throw new Error("artifact.json stageId must be a string");
   }
-  if (typeof record.attempt !== "number" || !Number.isInteger(record.attempt)) {
+  if (
+    record.attempt !== undefined &&
+    (typeof record.attempt !== "number" || !Number.isInteger(record.attempt))
+  ) {
     throw new Error("artifact.json attempt must be an integer");
   }
   if (!Array.isArray(record.outputs)) {
@@ -140,16 +159,23 @@ function readManifestValue(value: unknown): AttemptOutputManifest {
   });
   return {
     version: 1,
-    stageId: record.stageId,
-    attempt: record.attempt,
+    ...(record.stageId !== undefined ? { stageId: record.stageId } : {}),
+    ...(record.attempt !== undefined ? { attempt: record.attempt } : {}),
     outputs,
   };
 }
 
-async function readManifest(path: string): Promise<AttemptOutputManifest | undefined> {
-  let content: string;
+async function readManifest(input: {
+  runDirectory: string;
+  path: string;
+}): Promise<DeclaredAttemptOutputManifest | undefined> {
+  let content: Buffer;
   try {
-    content = await readFile(path, "utf8");
+    ({ content } = await readRunOwnedFile({
+      runDirectory: input.runDirectory,
+      path: input.path,
+      subject: "attempt output manifest path",
+    }));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return undefined;
@@ -157,7 +183,7 @@ async function readManifest(path: string): Promise<AttemptOutputManifest | undef
     throw error;
   }
   try {
-    return readManifestValue(JSON.parse(content));
+    return readManifestValue(JSON.parse(content.toString("utf8")));
   } catch (error) {
     if (error instanceof SyntaxError) {
       throw new Error(`artifact.json is not valid JSON: ${error.message}`);
@@ -178,6 +204,54 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+interface PhysicalFileIdentity {
+  dev: number;
+  ino: number;
+}
+
+async function physicalFileIdentity(
+  path: string,
+): Promise<PhysicalFileIdentity | undefined> {
+  try {
+    const metadata = await lstat(path);
+    if (metadata.isSymbolicLink() || !metadata.isFile()) return undefined;
+    return {
+      dev: metadata.dev,
+      ino: metadata.ino,
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+async function referencesReservedOutputSummary(input: {
+  attemptDirectory: string;
+  manifest: DeclaredAttemptOutputManifest;
+}): Promise<boolean> {
+  const reservedPath = resolve(input.attemptDirectory, "output.md");
+  const reservedIdentity = await physicalFileIdentity(reservedPath);
+  for (const output of input.manifest.outputs) {
+    const candidatePath = requireAttemptPath({
+      attemptDirectory: input.attemptDirectory,
+      path: output.path,
+      outputId: output.id,
+    });
+    if (candidatePath === reservedPath) return true;
+    if (!reservedIdentity) continue;
+    const candidateIdentity = await physicalFileIdentity(candidatePath);
+    if (!candidateIdentity) continue;
+    if (
+      candidateIdentity.ino !== 0 &&
+      candidateIdentity.dev === reservedIdentity.dev &&
+      candidateIdentity.ino === reservedIdentity.ino
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function discoverManifest(input: {
   stageId: string;
   attempt: number;
@@ -189,9 +263,11 @@ async function discoverManifest(input: {
     const candidates = [
       { path: `${output.id}.md`, mediaType: "text/markdown" },
       { path: `${output.id}.txt`, mediaType: "text/plain" },
+      { path: `${output.id}.json`, mediaType: "application/json" },
     ];
     let found: AttemptOutputEntry | undefined;
     for (const candidate of candidates) {
+      if (candidate.path === "output.md") continue;
       if (await pathExists(join(input.attemptDirectory, candidate.path))) {
         found = {
           id: output.id,
@@ -219,42 +295,122 @@ async function validateEntry(input: {
   entry: AttemptOutputEntry;
   manifestSource: ValidatedAttemptOutput["manifestSource"];
 }): Promise<ValidatedAttemptOutput> {
-  const absolutePath = await requireAttemptPath({
+  const absolutePath = requireAttemptPath({
     attemptDirectory: input.attemptDirectory,
     path: input.entry.path,
     outputId: input.entry.id,
   });
-  const content = await readFile(absolutePath, "utf8").catch((error) => {
+  const materialized = await readRunOwnedFile({
+    runDirectory: input.runDirectory,
+    path: absolutePath,
+    subject: `output ${input.entry.id} path`,
+  }).catch((error) => {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       throw new Error(`missing required output ${input.entry.id}: ${input.entry.path}`);
     }
     throw error;
   });
-  if (content.trim().length === 0) {
+  const content = materialized.content;
+  if (content.toString("utf8").trim().length === 0) {
     throw new Error(`output ${input.entry.id} is empty: ${input.entry.path}`);
   }
   const relativePath = attemptRelativePath(input.attemptDirectory, absolutePath);
   return {
     id: input.entry.id,
     absolutePath,
-    runRelativePath: runRelativePath(input.runDirectory, absolutePath),
+    runRelativePath: materialized.relativePath,
     attemptRelativePath: relativePath,
+    content,
     mediaType: input.entry.mediaType ?? inferMediaType(input.entry.path),
     filename: input.entry.filename ?? basename(input.entry.path),
     manifestSource: input.manifestSource,
   };
 }
 
+function isJsonMediaType(mediaType: string): boolean {
+  return mediaType === "application/json" || mediaType.endsWith("+json");
+}
+
+function validateOutputContracts(input: {
+  contracts: ArtifactContract[];
+  outputs: ValidatedAttemptOutput[];
+}): void {
+  const contracts = new Map(
+    input.contracts.map((contract) => [contract.id, contract] as const),
+  );
+  for (const output of input.outputs) {
+    const contract = contracts.get(output.id);
+    if (!contract) continue;
+    if (
+      contract.mediaType !== undefined &&
+      output.mediaType !== contract.mediaType
+    ) {
+      throw new Error(
+        `output ${output.id} media type ${output.mediaType} does not match ${contract.mediaType}`,
+      );
+    }
+    if (!isJsonMediaType(output.mediaType) && contract.schema === undefined) {
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(output.content.toString("utf8"));
+    } catch (error) {
+      const detail = error instanceof Error ? `: ${error.message}` : "";
+      throw new Error(`output ${output.id} is not valid JSON${detail}`);
+    }
+    if (contract.schema === undefined) continue;
+    const result = validateAgainstSchema(contract.schema, parsed);
+    if (!result.valid) {
+      throw new Error(
+        `output ${output.id} failed schema validation: ${result.errors.join("; ")}`,
+      );
+    }
+  }
+}
+
+async function requireDistinctPhysicalOutputs(
+  outputs: ValidatedAttemptOutput[],
+): Promise<void> {
+  const paths = new Set<string>();
+  const identities = new Set<string>();
+  for (const output of outputs) {
+    const canonicalPath = resolve(output.absolutePath);
+    const metadata = await lstat(canonicalPath);
+    const identity = `${metadata.dev}:${metadata.ino}`;
+    if (paths.has(canonicalPath) || identities.has(identity)) {
+      throw new Error(
+        `output ${output.id} must use a distinct physical file`,
+      );
+    }
+    paths.add(canonicalPath);
+    identities.add(identity);
+  }
+}
+
 async function writeOutputSummary(input: {
+  runDirectory: string;
   path: string;
   stageId: string;
   attempt: number;
   outputs: ValidatedAttemptOutput[];
 }): Promise<void> {
-  if (await pathExists(input.path)) return;
-  await writeFile(
-    input.path,
-    [
+  try {
+    await readRunOwnedFile({
+      runDirectory: input.runDirectory,
+      path: input.path,
+      subject: "attempt output summary path",
+      maximumBytes: 256 * 1024,
+    });
+    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  await writeRunOwnedFileAtomically({
+    runDirectory: input.runDirectory,
+    path: input.path,
+    subject: "attempt output summary path",
+    content: [
       "# Agent Attempt",
       "",
       `Stage: ${input.stageId}`,
@@ -274,8 +430,7 @@ async function writeOutputSummary(input: {
       "- manifest: artifact.json",
       "",
     ].join("\n"),
-    "utf8",
-  );
+  });
 }
 
 export async function validateAttemptOutputs(input: {
@@ -284,6 +439,8 @@ export async function validateAttemptOutputs(input: {
   stageId: string;
   attempt: number;
   outputs: ArtifactContract[];
+  validateContracts?: boolean;
+  allowMarkdownFallback?: boolean;
 }): Promise<ValidateAttemptOutputsResult> {
   const resolvedRunDirectory = resolve(input.runDirectory);
   const resolvedAttemptDirectory = resolve(input.attemptDirectory);
@@ -293,8 +450,22 @@ export async function validateAttemptOutputs(input: {
     );
   }
   const manifestPath = join(resolvedAttemptDirectory, "artifact.json");
-  const explicitManifest = await readManifest(manifestPath);
-  const manifest =
+  const explicitManifest = await readManifest({
+    runDirectory: resolvedRunDirectory,
+    path: manifestPath,
+  });
+  if (
+    explicitManifest &&
+    (await referencesReservedOutputSummary({
+      attemptDirectory: resolvedAttemptDirectory,
+      manifest: explicitManifest,
+    }))
+  ) {
+    throw new Error(
+      "explicit artifact.json cannot reference reserved output.md",
+    );
+  }
+  let manifest: DeclaredAttemptOutputManifest =
     explicitManifest ??
     (await discoverManifest({
       stageId: input.stageId,
@@ -302,20 +473,34 @@ export async function validateAttemptOutputs(input: {
       attemptDirectory: resolvedAttemptDirectory,
       outputs: input.outputs,
     }));
+  if (
+    !explicitManifest &&
+    manifest.outputs.length === 0 &&
+    input.allowMarkdownFallback &&
+    input.outputs.length === 1 &&
+    input.outputs[0]?.mediaType === "text/markdown" &&
+    input.outputs[0]?.schema === undefined &&
+    (await pathExists(join(resolvedAttemptDirectory, "output.md")))
+  ) {
+    manifest = {
+      version: 1,
+      stageId: input.stageId,
+      attempt: input.attempt,
+      outputs: [
+        {
+          id: input.outputs[0].id,
+          path: "output.md",
+          mediaType: "text/markdown",
+        },
+      ],
+    };
+  }
   const manifestSource: ValidatedAttemptOutput["manifestSource"] = explicitManifest
     ? "declared-manifest"
     : "discovered";
 
-  if (manifest.stageId !== input.stageId) {
-    throw new Error(
-      `artifact.json stageId ${manifest.stageId} does not match ${input.stageId}`,
-    );
-  }
-  if (manifest.attempt !== input.attempt) {
-    throw new Error(
-      `artifact.json attempt ${manifest.attempt} does not match ${input.attempt}`,
-    );
-  }
+  // The runner owns stageId and attempt. A manifest that omits or contradicts
+  // them is normalized rather than failing an attempt whose output files exist.
 
   const declaredIds = new Set(input.outputs.map((output) => output.id));
   const seenIds = new Set<string>();
@@ -350,6 +535,12 @@ export async function validateAttemptOutputs(input: {
     );
   }
 
+  await requireDistinctPhysicalOutputs(validated);
+
+  if (input.validateContracts) {
+    validateOutputContracts({ contracts: input.outputs, outputs: validated });
+  }
+
   const normalizedManifest: AttemptOutputManifest = {
     version: 1,
     stageId: input.stageId,
@@ -361,15 +552,17 @@ export async function validateAttemptOutputs(input: {
     })),
   };
   if (!explicitManifest) {
-    await writeFile(
-      manifestPath,
-      `${JSON.stringify(normalizedManifest, null, 2)}\n`,
-      "utf8",
-    );
+    await writeRunOwnedFileAtomically({
+      runDirectory: resolvedRunDirectory,
+      path: manifestPath,
+      subject: "attempt output manifest path",
+      content: `${JSON.stringify(normalizedManifest, null, 2)}\n`,
+    });
   }
 
   const outputPath = join(resolvedAttemptDirectory, "output.md");
   await writeOutputSummary({
+    runDirectory: resolvedRunDirectory,
     path: outputPath,
     stageId: input.stageId,
     attempt: input.attempt,

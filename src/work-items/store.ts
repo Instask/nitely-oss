@@ -8,9 +8,12 @@ import type {
   CreateWorkItemInput,
   CreateWorkItemOptions,
   UpdateWorkItemPatch,
+  WorkItemCandidateVersion,
   WorkItemRecord,
 } from "./types.js";
+import type { SuggestedDependency, TaskPriority } from "../web/tasks.js";
 import { validatePlanningApprovalStatus } from "./planning.js";
+import { workItemCandidateFingerprint } from "./candidate-version.js";
 
 const workItemIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
@@ -37,6 +40,58 @@ function workItemDirectory(repoPath: string, id: string): string {
 
 function normalizeTitle(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizePriority(value: unknown): TaskPriority {
+  return value === "P0" || value === "P1" || value === "P2" || value === "P3"
+    ? value
+    : "P2";
+}
+
+function normalizeDependencyIds(ids: unknown, selfId: string): string[] {
+  if (!Array.isArray(ids)) {
+    return [];
+  }
+  const normalized: string[] = [];
+  for (const id of ids) {
+    if (typeof id !== "string" || !id.trim()) {
+      continue;
+    }
+    const dependencyId = id.trim();
+    validateWorkItemId(dependencyId);
+    if (dependencyId !== selfId) {
+      normalized.push(dependencyId);
+    }
+  }
+  return [...new Set(normalized)];
+}
+
+function normalizeSuggestedDependencies(
+  suggestions: unknown,
+  selfId: string,
+): SuggestedDependency[] {
+  if (!Array.isArray(suggestions)) {
+    return [];
+  }
+  return suggestions.filter((suggestion): suggestion is SuggestedDependency => {
+    if (
+      !suggestion ||
+      typeof suggestion !== "object" ||
+      typeof (suggestion as SuggestedDependency).dependsOn !== "string" ||
+      typeof (suggestion as SuggestedDependency).reason !== "string" ||
+      typeof (suggestion as SuggestedDependency).confidence !== "number" ||
+      typeof (suggestion as SuggestedDependency).source !== "string" ||
+      typeof (suggestion as SuggestedDependency).suggestedAt !== "string"
+    ) {
+      return false;
+    }
+    const dependsOn = (suggestion as SuggestedDependency).dependsOn.trim();
+    if (!dependsOn || dependsOn === selfId) {
+      return false;
+    }
+    validateWorkItemId(dependsOn);
+    return true;
+  });
 }
 
 async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
@@ -77,11 +132,21 @@ export async function createWorkItem(
     workItemType: input.workItemType,
     flowPath: input.flowPath,
     inputs: input.inputs ?? {},
+    ...(input.configuration ? { configuration: input.configuration } : {}),
+    priority: normalizePriority(input.priority),
+    dependsOn: normalizeDependencyIds(input.dependsOn, id),
+    suggestedDependencies: normalizeSuggestedDependencies(
+      input.suggestedDependencies,
+      id,
+    ),
     createdAt: now,
     updatedAt: now,
   };
   if (input.flowId?.trim()) {
     record.flowId = input.flowId.trim();
+  }
+  if (input.template) {
+    record.template = input.template;
   }
   if (input.issueUrl?.trim()) {
     record.issueUrl = input.issueUrl.trim();
@@ -107,9 +172,31 @@ export async function getWorkItem(
   repoPath: string,
   id: string,
 ): Promise<WorkItemRecord> {
+  return (await getWorkItemSnapshot(repoPath, id)).record;
+}
+
+export interface StoredWorkItemSnapshot {
+  record: WorkItemRecord;
+  version: WorkItemCandidateVersion;
+}
+
+export async function getWorkItemSnapshot(
+  repoPath: string,
+  id: string,
+): Promise<StoredWorkItemSnapshot> {
   const path = join(workItemDirectory(repoPath, id), "work-item.json");
   try {
-    return JSON.parse(await readFile(path, "utf8")) as WorkItemRecord;
+    const document = await readFile(path, "utf8");
+    const record = JSON.parse(document) as WorkItemRecord;
+    return {
+      record,
+      version: {
+        store: "generic",
+        fingerprint: workItemCandidateFingerprint(
+          record as unknown as Record<string, unknown>,
+        ),
+      },
+    };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       throw new WebNotFoundError("work item not found");
@@ -155,10 +242,24 @@ export async function updateWorkItem(
   const updated: WorkItemRecord = {
     ...record,
     ...patch,
-    ...(patch.planning ? { planning: validatePlanningApprovalStatus(patch.planning) } : {}),
+    ...("planning" in patch && patch.planning
+      ? { planning: validatePlanningApprovalStatus(patch.planning) }
+      : {}),
+    ...("priority" in patch ? { priority: normalizePriority(patch.priority) } : {}),
+    ...("dependsOn" in patch
+      ? { dependsOn: normalizeDependencyIds(patch.dependsOn, id) }
+      : {}),
+    ...("suggestedDependencies" in patch
+      ? {
+          suggestedDependencies: normalizeSuggestedDependencies(
+            patch.suggestedDependencies,
+            id,
+          ),
+        }
+      : {}),
     updatedAt: new Date().toISOString(),
   };
-  if (patch.changeRequestUrl === undefined) {
+  if ("changeRequestUrl" in patch && patch.changeRequestUrl === undefined) {
     delete updated.changeRequestUrl;
   }
   await writeJsonAtomic(
@@ -166,4 +267,49 @@ export async function updateWorkItem(
     updated,
   );
   return updated;
+}
+
+export async function updateWorkItemDependencies(
+  repoPath: string,
+  id: string,
+  dependsOn: string[],
+): Promise<WorkItemRecord> {
+  return updateWorkItem(repoPath, id, { dependsOn });
+}
+
+export async function confirmWorkItemDependency(
+  repoPath: string,
+  id: string,
+  upstreamId: string,
+): Promise<WorkItemRecord> {
+  validateWorkItemId(upstreamId);
+  const item = await getWorkItem(repoPath, id);
+  return updateWorkItem(repoPath, id, {
+    dependsOn: [...new Set([...(item.dependsOn ?? []), upstreamId])],
+    suggestedDependencies: (item.suggestedDependencies ?? []).filter(
+      (suggestion) => suggestion.dependsOn !== upstreamId,
+    ),
+  });
+}
+
+export async function dismissWorkItemDependencySuggestion(
+  repoPath: string,
+  id: string,
+  upstreamId: string,
+): Promise<WorkItemRecord> {
+  validateWorkItemId(upstreamId);
+  const item = await getWorkItem(repoPath, id);
+  return updateWorkItem(repoPath, id, {
+    suggestedDependencies: (item.suggestedDependencies ?? []).filter(
+      (suggestion) => suggestion.dependsOn !== upstreamId,
+    ),
+  });
+}
+
+export async function updateWorkItemDependencySuggestions(
+  repoPath: string,
+  id: string,
+  suggestedDependencies: SuggestedDependency[],
+): Promise<WorkItemRecord> {
+  return updateWorkItem(repoPath, id, { suggestedDependencies });
 }

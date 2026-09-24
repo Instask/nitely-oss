@@ -4,6 +4,7 @@ import { renderInputContext } from "../../src/run/run-flow.js";
 function context() {
   return {
     runId: "run-1",
+    repoPath: "/repo",
     runDirectory: "/repo/.nitely/runs/run-1",
     manifestEntries: [],
     manifestEntryIndexes: new Map(),
@@ -11,6 +12,10 @@ function context() {
     artifactEntryIndexes: new Map(),
     redactionSecrets: [],
     constitution: { loaded: false as const, path: ".nitely/constitution.md" as const },
+    projectInstructions: {
+      loaded: false as const,
+      path: ".nitely/instructions.json" as const,
+    },
   };
 }
 
@@ -32,20 +37,33 @@ function input(content: string, overrides: Record<string, unknown> = {}) {
 describe("renderInputContext", () => {
   it("inlines small content fully with no savings and includes the readable path", () => {
     const { block, usage } = renderInputContext(input("short body"), context());
-    expect(block).toContain("Full content: /repo/.nitely/runs/run-1/inputs/spec/content");
+    expect(block).toContain("Local path: /repo/.nitely/runs/run-1/inputs/spec/content");
     expect(block).toContain("Content preview:");
     expect(block).toContain("short body");
     expect(block).not.toContain("MUST read");
+    expect(block).not.toContain("Full content");
     expect(usage).toEqual({ inlinedBytes: Buffer.byteLength("short body"), savedBytes: 0 });
   });
 
-  it("truncates large content to a head and demands a mandatory read", () => {
+  it("treats a truncated preview as sufficient by default", () => {
     const big = "x".repeat(20 * 1024);
     const { block, usage } = renderInputContext(input(big), context());
-    expect(block).toContain("Content preview (truncated");
-    expect(block).toContain("MUST read the full file");
+    expect(block).toContain("Content preview (truncated — treat it as sufficient");
+    expect(block).toContain("Local path: /repo/.nitely/runs/run-1/inputs/spec/content");
+    expect(block).not.toContain("MUST read");
+    expect(block).not.toContain("Full content");
     expect(usage.inlinedBytes).toBeLessThanOrEqual(8 * 1024);
     expect(usage.savedBytes).toBe(Buffer.byteLength(big) - usage.inlinedBytes);
+  });
+
+  it("demands a mandatory read only for an opted-in input", () => {
+    const big = "x".repeat(20 * 1024);
+    const { block, usage } = renderInputContext(input(big), context(), { fullRead: true });
+    expect(block).toContain("Full content: /repo/.nitely/runs/run-1/inputs/spec/content");
+    expect(block).toContain("MUST read the full file");
+    expect(usage.inlinedBytes).toBeLessThanOrEqual(8 * 1024);
+    // The agent is ordered to read every byte back, so nothing was saved.
+    expect(usage.savedBytes).toBe(0);
   });
 
   it("emits metadata + path only for binary media types", () => {
@@ -74,6 +92,6 @@ describe("renderInputContext", () => {
     expect(block).toContain("MUST read the full file");
     expect(block).not.toContain("a short body");
     expect(usage.inlinedBytes).toBe(0);
-    expect(usage.savedBytes).toBe(Buffer.byteLength("a short body"));
+    expect(usage.savedBytes).toBe(0);
   });
 });

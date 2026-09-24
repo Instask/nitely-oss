@@ -14,13 +14,27 @@ import type {
   CheckoutChangeRequestRequest,
   CheckoutChangeRequestResult,
   CreatePullRequestCommentRequest,
+  GetChangeRequestStatusRequest,
   ListPullRequestDiscussionRequest,
   PublishChangeRequest,
   PullRequestDiscussionItem,
   ResolveChangeRequestTargetRequest,
   ScmProvider,
   UpdateChangeRequestRequest,
+  UpdateChangeRequestMetadataRequest,
+  UpdateChangeRequestMetadataResult,
   UpdateChangeRequestResult,
+  ChangeRequestMetadataUpdate,
+  ChangeRequestStatus,
+  CreateRepositoryIssueCommentRequest,
+  CreateRepositoryIssueRequest,
+  ListRepositoryIssueCommentsRequest,
+  ListRepositoryIssuesRequest,
+  RepositoryIssue,
+  RepositoryIssueComment,
+  ResolveRepositoryRequest,
+  ScmRepository,
+  UpdateRepositoryIssueCommentRequest,
 } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -32,6 +46,39 @@ export class MissingGitHubTokenError extends Error {
   constructor() {
     super(MISSING_GITHUB_TOKEN_MESSAGE);
     this.name = "MissingGitHubTokenError";
+  }
+}
+
+export type GitHubApiErrorKind =
+  | "auth"
+  | "permission"
+  | "rate-limit"
+  | "not-found"
+  | "conflict"
+  | "validation"
+  | "network"
+  | "unknown";
+
+export class GitHubApiError extends Error {
+  readonly kind: GitHubApiErrorKind;
+  readonly status: number;
+  readonly operation: string;
+  readonly details: string;
+
+  constructor(input: {
+    kind: GitHubApiErrorKind;
+    status: number;
+    operation: string;
+    details: string;
+  }) {
+    super(
+      `GitHub ${input.operation} failed with ${input.status} (${input.kind}): ${input.details}`,
+    );
+    this.name = "GitHubApiError";
+    this.kind = input.kind;
+    this.status = input.status;
+    this.operation = input.operation;
+    this.details = input.details;
   }
 }
 
@@ -107,7 +154,7 @@ export function parseGitHubPullRequestTarget(
   }
 
   const match =
-    /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:$|[?#])/.exec(
+    /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:$|[/?#])/.exec(
       value,
     );
   if (!match) {
@@ -149,7 +196,7 @@ function assertSameRepository(input: {
   const target = `${input.target.owner}/${input.target.repository}`;
   if (configured.toLowerCase() !== target.toLowerCase()) {
     throw new Error(
-      `pull request target ${target} does not match configured repository ${configured}`,
+      `repository target ${target} does not match configured repository ${configured}`,
     );
   }
 }
@@ -210,6 +257,45 @@ function githubJsonWriteHeaders(token: string): Record<string, string> {
   };
 }
 
+function classifyGitHubApiError(input: {
+  status: number;
+  details: string;
+  headers: Headers;
+}): GitHubApiErrorKind {
+  const details = input.details.toLowerCase();
+  if (
+    input.status === 429 ||
+    (input.status === 403 &&
+      (input.headers.get("x-ratelimit-remaining") === "0" ||
+        details.includes("rate limit")))
+  ) {
+    return "rate-limit";
+  }
+  if (input.status === 401) return "auth";
+  if (input.status === 403) return "permission";
+  if (input.status === 404) return "not-found";
+  if (input.status === 409) return "conflict";
+  if (input.status === 422) return "validation";
+  return "unknown";
+}
+
+async function githubApiError(
+  response: Response,
+  operation: string,
+): Promise<GitHubApiError> {
+  const details = await response.text();
+  return new GitHubApiError({
+    kind: classifyGitHubApiError({
+      status: response.status,
+      details,
+      headers: response.headers,
+    }),
+    status: response.status,
+    operation,
+    details,
+  });
+}
+
 function changeRequestFromGitHubPullPayload(input: {
   repository: GitHubRepository;
   baseBranch: string;
@@ -231,6 +317,30 @@ function changeRequestFromGitHubPullPayload(input: {
   };
 }
 
+function isAlreadyExistsPullRequestError(error: unknown): boolean {
+  const parts: string[] = [];
+  if (error instanceof Error) {
+    parts.push(error.message);
+    if (error instanceof GitHubApiError) {
+      parts.push(error.details);
+    }
+  } else {
+    parts.push(String(error));
+  }
+  if (error && typeof error === "object" && "stderr" in error) {
+    parts.push(String((error as { stderr: unknown }).stderr));
+  }
+  if (error && typeof error === "object" && "stdout" in error) {
+    parts.push(String((error as { stdout: unknown }).stdout));
+  }
+  const text = parts.join("\n");
+  return (
+    /already exists/i.test(text) ||
+    /pull request already exists/i.test(text) ||
+    (/Validation Failed/i.test(text) && /pull request/i.test(text))
+  );
+}
+
 async function findExistingPullRequest(input: {
   fetch: FetchLike;
   token: string;
@@ -239,30 +349,135 @@ async function findExistingPullRequest(input: {
   headBranch: string;
 }): Promise<ChangeRequest | undefined> {
   const head = `${input.repository.owner}:${input.headBranch}`;
-  const response = await input.fetch(
+  const listUrls = [
     `https://api.github.com/repos/${input.repository.owner}/${input.repository.repository}/pulls?state=open&head=${encodeQueryValue(head)}&base=${encodeQueryValue(input.baseBranch)}&per_page=1`,
-    {
+    `https://api.github.com/repos/${input.repository.owner}/${input.repository.repository}/pulls?state=open&head=${encodeQueryValue(head)}&per_page=1`,
+  ];
+  for (const url of listUrls) {
+    const response = await input.fetch(url, {
       method: "GET",
       headers: githubJsonHeaders(input.token),
+    });
+    if (!response.ok) {
+      throw await githubApiError(response, "pull request lookup");
+    }
+    const payload = await response.json();
+    if (!Array.isArray(payload) || payload.length === 0) {
+      continue;
+    }
+    return changeRequestFromGitHubPullPayload({
+      repository: input.repository,
+      baseBranch: input.baseBranch,
+      headBranch: input.headBranch,
+      payload: payload[0],
+      outcome: "reused",
+    });
+  }
+  return undefined;
+}
+
+function remoteHeadSha(input: {
+  output: string;
+  branch: string;
+  label: "base" | "head";
+  remoteName: string;
+}): string {
+  const expectedRef = `refs/heads/${input.branch}`;
+  for (const line of input.output.trim().split("\n")) {
+    const [sha, ref] = line.trim().split(/\s+/);
+    if (sha && ref === expectedRef) {
+      return sha;
+    }
+  }
+  throw new Error(
+    `Cannot publish change request: ${input.label} branch '${input.branch}' does not exist on remote '${input.remoteName}'. Check the configured base/head branch and retry.`,
+  );
+}
+
+async function assertPublishablePullRequestDiff(input: {
+  git: GitRunner;
+  worktreePath: string;
+  remoteName: string;
+  baseBranch: string;
+  headBranch: string;
+}): Promise<void> {
+  const baseSha = remoteHeadSha({
+    output: await input.git(input.worktreePath, [
+      "ls-remote",
+      "--heads",
+      input.remoteName,
+      `refs/heads/${input.baseBranch}`,
+    ]),
+    branch: input.baseBranch,
+    label: "base",
+    remoteName: input.remoteName,
+  });
+  const headSha = remoteHeadSha({
+    output: await input.git(input.worktreePath, [
+      "ls-remote",
+      "--heads",
+      input.remoteName,
+      `refs/heads/${input.headBranch}`,
+    ]),
+    branch: input.headBranch,
+    label: "head",
+    remoteName: input.remoteName,
+  });
+  await input.git(input.worktreePath, [
+    "fetch",
+    "--no-tags",
+    input.remoteName,
+    `refs/heads/${input.baseBranch}`,
+    `refs/heads/${input.headBranch}`,
+  ]);
+  const count = Number.parseInt(
+    (
+      await input.git(input.worktreePath, [
+        "rev-list",
+        "--count",
+        `${baseSha}..${headSha}`,
+      ])
+    ).trim(),
+    10,
+  );
+  if (!Number.isFinite(count) || count <= 0) {
+    throw new Error(
+      `Cannot publish change request: no commits between base branch '${input.baseBranch}' and head branch '${input.headBranch}'. Commit changes, choose the correct base branch, or reuse an existing pull request.`,
+    );
+  }
+}
+
+async function patchPullRequestMetadata(input: {
+  fetch: FetchLike;
+  token: string;
+  target: Pick<ChangeRequestTarget, "owner" | "repository" | "number">;
+  title?: string;
+  body?: string;
+}): Promise<ChangeRequestMetadataUpdate> {
+  const body: Record<string, string> = {};
+  if (input.title !== undefined) {
+    body.title = input.title;
+  }
+  if (input.body !== undefined) {
+    body.body = input.body;
+  }
+  const fields = Object.keys(body);
+  const response = await input.fetch(
+    `https://api.github.com/repos/${input.target.owner}/${input.target.repository}/pulls/${input.target.number}`,
+    {
+      method: "PATCH",
+      headers: githubJsonWriteHeaders(input.token),
+      body: JSON.stringify(body),
     },
   );
   if (!response.ok) {
-    const details = await response.text();
-    throw new Error(
-      `GitHub pull request lookup failed with ${response.status}: ${details}`,
-    );
+    throw await githubApiError(response, "pull request metadata update");
   }
-  const payload = await response.json();
-  if (!Array.isArray(payload) || payload.length === 0) {
-    return undefined;
-  }
-  return changeRequestFromGitHubPullPayload({
-    repository: input.repository,
-    baseBranch: input.baseBranch,
-    headBranch: input.headBranch,
-    payload: payload[0],
-    outcome: "reused",
-  });
+  return {
+    transport: "github-rest-api",
+    outcome: "updated",
+    fields,
+  };
 }
 
 function normalizeDiscussionPayload(
@@ -295,13 +510,75 @@ function normalizeDiscussionPayload(
   return item;
 }
 
+function normalizeRepositoryIssuePayload(input: {
+  repository: GitHubRepository;
+  value: unknown;
+}): RepositoryIssue {
+  const payload = asObject(input.value);
+  const state = requireString(payload.state, "state");
+  if (state !== "open" && state !== "closed") {
+    throw new Error(`GitHub issue response included unsupported state: ${state}`);
+  }
+  return {
+    provider: "github",
+    owner: input.repository.owner,
+    repository: input.repository.repository,
+    number: requireNumber(payload.number, "number"),
+    url: requireString(payload.html_url, "html_url"),
+    title: requireString(payload.title, "title"),
+    body: typeof payload.body === "string" ? payload.body : "",
+    state,
+  };
+}
+
+function normalizeRepositoryIssueCommentPayload(
+  value: unknown,
+): RepositoryIssueComment {
+  const payload = asObject(value);
+  const user = asObject(payload.user);
+  const comment: RepositoryIssueComment = {
+    provider: "github",
+    id: String(requireNumber(payload.id, "id")),
+    url: requireString(payload.html_url, "html_url"),
+    body: typeof payload.body === "string" ? payload.body : "",
+    authorLogin: requireString(user.login, "user.login"),
+    createdAt: requireString(payload.created_at, "created_at"),
+  };
+  const updatedAt = optionalString(payload.updated_at);
+  if (updatedAt) comment.updatedAt = updatedAt;
+  return comment;
+}
+
+function scmRepository(repository: GitHubRepository): ScmRepository {
+  return {
+    provider: "github",
+    owner: repository.owner,
+    repository: repository.repository,
+    url: `https://github.com/${repository.owner}/${repository.repository}`,
+  };
+}
+
+function metadataUpdateResult(input: {
+  changeRequest: ChangeRequest;
+  metadataUpdate: ChangeRequestMetadataUpdate;
+}): UpdateChangeRequestMetadataResult {
+  return {
+    url: input.changeRequest.url,
+    number: input.changeRequest.number,
+    changeRequest: {
+      ...input.changeRequest,
+      outcome: "updated",
+    },
+    metadataUpdate: input.metadataUpdate,
+  };
+}
+
 async function requireGithubArrayResponse(
   response: Response,
   label: string,
 ): Promise<unknown[]> {
   if (!response.ok) {
-    const details = await response.text();
-    throw new Error(`GitHub ${label} failed with ${response.status}: ${details}`);
+    throw await githubApiError(response, label);
   }
   const payload = await response.json();
   if (!Array.isArray(payload)) {
@@ -397,13 +674,20 @@ function isPathInside(parent: string, candidate: string): boolean {
   );
 }
 
-function parseWorktreeList(output: string): Array<{ path: string; branch?: string }> {
+function parseWorktreeList(
+  output: string,
+): Array<{ path: string; branch?: string; prunable: boolean; locked: boolean }> {
   return output
     .trim()
     .split(/\n\n+/)
     .filter((entry) => entry.length > 0)
     .map((entry) => {
-      const result: { path: string; branch?: string } = { path: "" };
+      const result: {
+        path: string;
+        branch?: string;
+        prunable: boolean;
+        locked: boolean;
+      } = { path: "", prunable: false, locked: false };
       for (const line of entry.split("\n")) {
         if (line.startsWith("worktree ")) {
           result.path = line.slice("worktree ".length);
@@ -411,23 +695,40 @@ function parseWorktreeList(output: string): Array<{ path: string; branch?: strin
         if (line.startsWith("branch ")) {
           result.branch = line.slice("branch ".length);
         }
+        if (line === "prunable" || line.startsWith("prunable ")) {
+          result.prunable = true;
+        }
+        if (line === "locked" || line.startsWith("locked ")) {
+          result.locked = true;
+        }
       }
       return result;
     })
     .filter((entry) => entry.path.length > 0);
 }
 
-async function releaseCleanNitelyWorktreeForBranch(input: {
+function checkoutBranchNameForCollision(input: {
+  headBranch: string;
+  worktreePath: string;
+}): string {
+  const runDirectory = resolve(input.worktreePath, "..");
+  const runId = runDirectory.split(/[/\\]/).pop() ?? "run";
+  const suffix = runId.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return `${input.headBranch}-checkout-${suffix || "run"}`;
+}
+
+async function prepareLocalCheckoutBranch(input: {
   git: GitRunner;
   repoPath: string;
   worktreePath: string;
   headBranch: string;
-}): Promise<void> {
+}): Promise<string> {
   const worktrees = parseWorktreeList(
     await input.git(input.repoPath, ["worktree", "list", "--porcelain"]),
   );
   const nitelyRunsDirectory = resolve(input.repoPath, ".nitely", "runs");
   const targetRef = `refs/heads/${input.headBranch}`;
+  let useCollisionBranch = false;
   for (const worktree of worktrees) {
     const worktreePath = resolve(worktree.path);
     if (worktree.branch !== targetRef || worktreePath === resolve(input.worktreePath)) {
@@ -435,17 +736,21 @@ async function releaseCleanNitelyWorktreeForBranch(input: {
     }
     if (!isPathInside(nitelyRunsDirectory, worktreePath)) {
       throw new Error(
-        `pull request branch ${input.headBranch} is already checked out at ${worktree.path}`,
+        `pull request branch ${input.headBranch} is already checked out at ${worktree.path}. Remove or detach that worktree, then retry the Nitely checkout.`,
       );
     }
-    const status = await input.git(worktreePath, ["status", "--short"]);
-    if (status.trim().length > 0) {
-      throw new Error(
-        `pull request branch ${input.headBranch} is already checked out with local changes at ${worktree.path}`,
-      );
+    if (worktree.prunable && !worktree.locked) {
+      await input.git(input.repoPath, ["worktree", "prune"]);
+      continue;
     }
-    await input.git(input.repoPath, ["worktree", "remove", "--force", worktree.path]);
+    useCollisionBranch = true;
   }
+  return useCollisionBranch
+    ? checkoutBranchNameForCollision({
+        headBranch: input.headBranch,
+        worktreePath: input.worktreePath,
+      })
+    : input.headBranch;
 }
 
 async function checkoutResolvedChangeRequest(input: {
@@ -458,7 +763,7 @@ async function checkoutResolvedChangeRequest(input: {
     input.request.remoteName,
     input.request.target.headBranch,
   ]);
-  await releaseCleanNitelyWorktreeForBranch({
+  const localBranchName = await prepareLocalCheckoutBranch({
     git: input.git,
     repoPath: input.request.repoPath,
     worktreePath: input.request.worktreePath,
@@ -469,7 +774,7 @@ async function checkoutResolvedChangeRequest(input: {
     "add",
     "--force",
     "-B",
-    input.request.target.headBranch,
+    localBranchName,
     input.request.worktreePath,
     "FETCH_HEAD",
   ]);
@@ -553,6 +858,136 @@ export class GitHubScmProvider implements ScmProvider {
     }
   }
 
+  async resolveRepository(
+    input: ResolveRepositoryRequest,
+  ): Promise<ScmRepository> {
+    return scmRepository(
+      await configuredRepository({
+        git: this.#git,
+        repoPath: input.repoPath,
+        remoteName: input.remoteName,
+      }),
+    );
+  }
+
+  async listRepositoryIssues(
+    input: ListRepositoryIssuesRequest,
+  ): Promise<RepositoryIssue[]> {
+    const configured = await configuredRepository({
+      git: this.#git,
+      repoPath: input.repoPath,
+      remoteName: input.remoteName,
+    });
+    assertSameRepository({ configured, target: input.repository });
+    const token = await this.#getAccessToken();
+    const payloads = await fetchPaginatedGithubArray({
+      fetch: this.#fetch,
+      initialUrl: `https://api.github.com/repos/${configured.owner}/${configured.repository}/issues?state=all&per_page=100`,
+      headers: githubJsonHeaders(token),
+      label: "repository issues listing",
+    });
+    return payloads
+      .filter((payload) => !("pull_request" in asObject(payload)))
+      .map((value) => normalizeRepositoryIssuePayload({ repository: configured, value }));
+  }
+
+  async createRepositoryIssue(
+    input: CreateRepositoryIssueRequest,
+  ): Promise<RepositoryIssue> {
+    const configured = await configuredRepository({
+      git: this.#git,
+      repoPath: input.repoPath,
+      remoteName: input.remoteName,
+    });
+    assertSameRepository({ configured, target: input.repository });
+    const token = await this.#getAccessToken();
+    const response = await this.#fetch(
+      `https://api.github.com/repos/${configured.owner}/${configured.repository}/issues`,
+      {
+        method: "POST",
+        headers: githubJsonWriteHeaders(token),
+        body: JSON.stringify({ title: input.title, body: input.body }),
+      },
+    );
+    if (!response.ok) {
+      throw await githubApiError(response, "repository issue creation");
+    }
+    return normalizeRepositoryIssuePayload({
+      repository: configured,
+      value: await response.json(),
+    });
+  }
+
+  async listRepositoryIssueComments(
+    input: ListRepositoryIssueCommentsRequest,
+  ): Promise<RepositoryIssueComment[]> {
+    const configured = await configuredRepository({
+      git: this.#git,
+      repoPath: input.repoPath,
+      remoteName: input.remoteName,
+    });
+    assertSameRepository({ configured, target: input.repository });
+    const token = await this.#getAccessToken();
+    const payloads = await fetchPaginatedGithubArray({
+      fetch: this.#fetch,
+      initialUrl: `https://api.github.com/repos/${configured.owner}/${configured.repository}/issues/${input.issueNumber}/comments?per_page=100`,
+      headers: githubJsonHeaders(token),
+      label: "repository issue comments listing",
+    });
+    return payloads.map(normalizeRepositoryIssueCommentPayload);
+  }
+
+  async createRepositoryIssueComment(
+    input: CreateRepositoryIssueCommentRequest,
+  ): Promise<RepositoryIssueComment> {
+    const configured = await configuredRepository({
+      git: this.#git,
+      repoPath: input.repoPath,
+      remoteName: input.remoteName,
+    });
+    assertSameRepository({ configured, target: input.repository });
+    const token = await this.#getAccessToken();
+    const response = await this.#fetch(
+      `https://api.github.com/repos/${configured.owner}/${configured.repository}/issues/${input.issueNumber}/comments`,
+      {
+        method: "POST",
+        headers: githubJsonWriteHeaders(token),
+        body: JSON.stringify({ body: input.body }),
+      },
+    );
+    if (!response.ok) {
+      throw await githubApiError(response, "repository issue comment creation");
+    }
+    return normalizeRepositoryIssueCommentPayload(await response.json());
+  }
+
+  async updateRepositoryIssueComment(
+    input: UpdateRepositoryIssueCommentRequest,
+  ): Promise<RepositoryIssueComment> {
+    const configured = await configuredRepository({
+      git: this.#git,
+      repoPath: input.repoPath,
+      remoteName: input.remoteName,
+    });
+    assertSameRepository({ configured, target: input.repository });
+    if (!/^\d+$/.test(input.commentId)) {
+      throw new Error("GitHub issue comment ID must be numeric");
+    }
+    const token = await this.#getAccessToken();
+    const response = await this.#fetch(
+      `https://api.github.com/repos/${configured.owner}/${configured.repository}/issues/comments/${input.commentId}`,
+      {
+        method: "PATCH",
+        headers: githubJsonWriteHeaders(token),
+        body: JSON.stringify({ body: input.body }),
+      },
+    );
+    if (!response.ok) {
+      throw await githubApiError(response, "repository issue comment update");
+    }
+    return normalizeRepositoryIssueCommentPayload(await response.json());
+  }
+
   async publishChange(input: PublishChangeRequest): Promise<ChangeRequest> {
     const token = await this.#getAccessToken();
     const remoteUrl = await this.#git(input.worktreePath, [
@@ -577,8 +1012,23 @@ export class GitHubScmProvider implements ScmProvider {
       headBranch: input.headBranch,
     });
     if (existing) {
-      return existing;
+      const metadataUpdate = await patchPullRequestMetadata({
+        fetch: this.#fetch,
+        token,
+        target: existing,
+        title: input.title,
+        body: input.body,
+      });
+      return { ...existing, metadataUpdate };
     }
+
+    await assertPublishablePullRequestDiff({
+      git: this.#git,
+      worktreePath: input.worktreePath,
+      remoteName: input.remoteName,
+      baseBranch: input.baseBranch,
+      headBranch: input.headBranch,
+    });
 
     const response = await this.#fetch(
       `https://api.github.com/repos/${repository.owner}/${repository.repository}/pulls`,
@@ -601,10 +1051,27 @@ export class GitHubScmProvider implements ScmProvider {
     );
 
     if (!response.ok) {
-      const details = await response.text();
-      throw new Error(
-        `GitHub pull request creation failed with ${response.status}: ${details}`,
-      );
+      const createError = await githubApiError(response, "pull request creation");
+      if (isAlreadyExistsPullRequestError(createError)) {
+        const raced = await findExistingPullRequest({
+          fetch: this.#fetch,
+          token,
+          repository,
+          baseBranch: input.baseBranch,
+          headBranch: input.headBranch,
+        });
+        if (raced) {
+          const metadataUpdate = await patchPullRequestMetadata({
+            fetch: this.#fetch,
+            token,
+            target: raced,
+            title: input.title,
+            body: input.body,
+          });
+          return { ...raced, metadataUpdate, outcome: "updated" };
+        }
+      }
+      throw createError;
     }
 
     return changeRequestFromGitHubPullPayload({
@@ -614,6 +1081,33 @@ export class GitHubScmProvider implements ScmProvider {
       payload: await response.json(),
       outcome: "created",
     });
+  }
+
+  async getChangeRequestStatus(
+    input: GetChangeRequestStatusRequest,
+  ): Promise<ChangeRequestStatus> {
+    const parsed = parseGitHubPullRequestTarget(input.target);
+    if (!parsed.owner || !parsed.repository) {
+      throw new Error("GitHub pull request URL is required for status lookup");
+    }
+    const token = await this.#getAccessToken();
+    const response = await this.#fetch(
+      `https://api.github.com/repos/${parsed.owner}/${parsed.repository}/pulls/${parsed.number}`,
+      {
+        method: "GET",
+        headers: githubJsonHeaders(token),
+      },
+    );
+    if (!response.ok) {
+      throw await githubApiError(response, "pull request status lookup");
+    }
+    const payload = asObject(await response.json());
+    return {
+      provider: "github",
+      url: typeof payload.html_url === "string" ? payload.html_url : input.target,
+      state: requireString(payload.state, "state"),
+      merged: payload.merged === true,
+    };
   }
 
   async resolveChangeRequestTarget(
@@ -644,10 +1138,7 @@ export class GitHubScmProvider implements ScmProvider {
       },
     );
     if (!response.ok) {
-      const details = await response.text();
-      throw new Error(
-        `GitHub pull request lookup failed with ${response.status}: ${details}`,
-      );
+      throw await githubApiError(response, "pull request lookup");
     }
     return targetFromGitHubPullPayload({
       configured,
@@ -669,26 +1160,31 @@ export class GitHubScmProvider implements ScmProvider {
       request: input,
     });
     const token = await this.#getAccessToken();
-    const response = await this.#fetch(
-      `https://api.github.com/repos/${input.target.owner}/${input.target.repository}/pulls/${input.target.number}`,
-      {
-        method: "PATCH",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: "application/vnd.github+json",
-          "Content-Type": "application/json",
-          "X-GitHub-Api-Version": "2022-11-28",
-        },
-        body: JSON.stringify({ title: input.title }),
-      },
-    );
-    if (!response.ok) {
-      const details = await response.text();
-      throw new Error(
-        `GitHub pull request title update failed with ${response.status}: ${details}`,
-      );
-    }
-    return updated;
+    const metadataUpdate = await patchPullRequestMetadata({
+      fetch: this.#fetch,
+      token,
+      target: input.target,
+      title: input.title,
+      body: input.body,
+    });
+    return { ...updated, metadataUpdate };
+  }
+
+  async updateChangeRequestMetadata(
+    input: UpdateChangeRequestMetadataRequest,
+  ): Promise<UpdateChangeRequestMetadataResult> {
+    const token = await this.#getAccessToken();
+    const metadataUpdate = await patchPullRequestMetadata({
+      fetch: this.#fetch,
+      token,
+      target: input.changeRequest,
+      title: input.title,
+      body: input.body,
+    });
+    return metadataUpdateResult({
+      changeRequest: input.changeRequest,
+      metadataUpdate,
+    });
   }
 
   async listPullRequestDiscussion(
@@ -745,16 +1241,17 @@ export class GitHubScmProvider implements ScmProvider {
       },
     );
     if (!response.ok) {
-      const details = await response.text();
-      throw new Error(
-        `GitHub pull request comment creation failed with ${response.status}: ${details}`,
-      );
+      throw await githubApiError(response, "pull request comment creation");
     }
     return normalizeDiscussionPayload(await response.json(), "issue-comment");
   }
 }
 
 export interface GitHubCliScmProviderOptions {
+  env?: Record<string, string | undefined>;
+  connection?: ProviderConnection;
+  store?: ProviderConnectionStore;
+  fetch?: FetchLike;
   git?: GitRunner;
   execFile?: (
     file: string,
@@ -773,10 +1270,18 @@ function parsePullRequestNumber(url: string): number {
 
 export class GitHubCliScmProvider implements ScmProvider {
   readonly type = "github-cli";
+  readonly #connection: ProviderConnection | undefined;
+  readonly #store: ProviderConnectionStore;
+  readonly #fetch: FetchLike;
   readonly #git: GitRunner;
   readonly #execFile: NonNullable<GitHubCliScmProviderOptions["execFile"]>;
 
   constructor(options: GitHubCliScmProviderOptions = {}) {
+    this.#connection = options.connection;
+    this.#store =
+      options.store ??
+      new EnvProviderConnectionStore({ env: options.env ?? process.env });
+    this.#fetch = options.fetch ?? fetch;
     this.#git = options.git ?? defaultGit;
     this.#execFile =
       options.execFile ??
@@ -784,6 +1289,19 @@ export class GitHubCliScmProvider implements ScmProvider {
         const { stdout } = await execFileAsync(file, args, execOptions);
         return { stdout };
       });
+  }
+
+  async #getAccessTokenIfAvailable(): Promise<string | undefined> {
+    try {
+      return await (
+        this.#connection ?? (await this.#store.getConnection("github"))
+      ).getAccessToken();
+    } catch (error) {
+      if (error instanceof MissingConnectionError && error.providerId === "github") {
+        return undefined;
+      }
+      throw error;
+    }
   }
 
   async publishChange(input: PublishChangeRequest): Promise<ChangeRequest> {
@@ -808,41 +1326,74 @@ export class GitHubCliScmProvider implements ScmProvider {
       worktreePath: input.worktreePath,
     });
     if (existing) {
-      return existing;
+      const metadataUpdate = await this.#editExistingPublishedPullRequest({
+        changeRequest: existing,
+        input,
+      });
+      return { ...existing, metadataUpdate };
     }
+
+    await assertPublishablePullRequestDiff({
+      git: this.#git,
+      worktreePath: input.worktreePath,
+      remoteName: input.remoteName,
+      baseBranch: input.baseBranch,
+      headBranch: input.headBranch,
+    });
 
     const bodyArguments = input.bodyPath
       ? ["--body-file", input.bodyPath]
       : ["--body", input.body];
-    const { stdout } = await this.#execFile(
-      "gh",
-      [
-        "pr",
-        "create",
-        "--draft",
-        "--base",
-        input.baseBranch,
-        "--title",
-        input.title,
-        ...bodyArguments,
-      ],
-      {
-        cwd: input.worktreePath,
-        maxBuffer: 10 * 1024 * 1024,
-      },
-    );
-    const url = stdout.trim();
-    return {
-      provider: "github",
-      url,
-      number: parsePullRequestNumber(url),
-      owner: repository.owner,
-      repository: repository.repository,
-      baseBranch: input.baseBranch,
-      headBranch: input.headBranch,
-      draft: true,
-      outcome: "created",
-    };
+    try {
+      const { stdout } = await this.#execFile(
+        "gh",
+        [
+          "pr",
+          "create",
+          "--draft",
+          "--base",
+          input.baseBranch,
+          "--head",
+          input.headBranch,
+          "--title",
+          input.title,
+          ...bodyArguments,
+        ],
+        {
+          cwd: input.worktreePath,
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      );
+      const url = stdout.trim();
+      return {
+        provider: "github",
+        url,
+        number: parsePullRequestNumber(url),
+        owner: repository.owner,
+        repository: repository.repository,
+        baseBranch: input.baseBranch,
+        headBranch: input.headBranch,
+        draft: true,
+        outcome: "created",
+      };
+    } catch (error) {
+      if (isAlreadyExistsPullRequestError(error)) {
+        const raced = await this.#findExistingPullRequest({
+          repository,
+          baseBranch: input.baseBranch,
+          headBranch: input.headBranch,
+          worktreePath: input.worktreePath,
+        });
+        if (raced) {
+          const metadataUpdate = await this.#editExistingPublishedPullRequest({
+            changeRequest: raced,
+            input,
+          });
+          return { ...raced, metadataUpdate, outcome: "updated" };
+        }
+      }
+      throw error;
+    }
   }
 
   async #findExistingPullRequest(input: {
@@ -851,8 +1402,7 @@ export class GitHubCliScmProvider implements ScmProvider {
     headBranch: string;
     worktreePath: string;
   }): Promise<ChangeRequest | undefined> {
-    const { stdout } = await this.#execFile(
-      "gh",
+    const listArgumentSets: string[][] = [
       [
         "pr",
         "list",
@@ -867,26 +1417,79 @@ export class GitHubCliScmProvider implements ScmProvider {
         "--limit",
         "1",
       ],
-      {
+      [
+        "pr",
+        "list",
+        "--head",
+        input.headBranch,
+        "--state",
+        "open",
+        "--json",
+        "number,url,isDraft",
+        "--limit",
+        "1",
+      ],
+    ];
+    for (const args of listArgumentSets) {
+      const { stdout } = await this.#execFile("gh", args, {
         cwd: input.worktreePath,
         maxBuffer: 10 * 1024 * 1024,
-      },
-    );
-    const payload = JSON.parse(stdout) as unknown;
-    if (!Array.isArray(payload) || payload.length === 0) {
-      return undefined;
+      });
+      const payload = JSON.parse(stdout) as unknown;
+      if (!Array.isArray(payload) || payload.length === 0) {
+        continue;
+      }
+      const pull = asObject(payload[0]);
+      return {
+        provider: "github",
+        url: requireString(pull.url, "url"),
+        number: requireNumber(pull.number, "number"),
+        owner: input.repository.owner,
+        repository: input.repository.repository,
+        baseBranch: input.baseBranch,
+        headBranch: input.headBranch,
+        draft: normalizeDraft(pull.isDraft),
+        outcome: "reused",
+      };
     }
-    const pull = asObject(payload[0]);
+    return undefined;
+  }
+
+  async #editExistingPublishedPullRequest(input: {
+    changeRequest: ChangeRequest;
+    input: PublishChangeRequest;
+  }): Promise<ChangeRequestMetadataUpdate> {
+    const token = await this.#getAccessTokenIfAvailable();
+    if (token) {
+      return await patchPullRequestMetadata({
+        fetch: this.#fetch,
+        token,
+        target: input.changeRequest,
+        title: input.input.title,
+        body: input.input.body,
+      });
+    }
+
+    const args = [
+      "pr",
+      "edit",
+      String(input.changeRequest.number),
+      "--title",
+      input.input.title,
+    ];
+    if (input.input.bodyPath !== undefined) {
+      args.push("--body-file", input.input.bodyPath);
+    } else {
+      args.push("--body", input.input.body);
+    }
+    await this.#execFile("gh", args, {
+      cwd: input.input.worktreePath,
+      maxBuffer: 10 * 1024 * 1024,
+    });
     return {
-      provider: "github",
-      url: requireString(pull.url, "url"),
-      number: requireNumber(pull.number, "number"),
-      owner: input.repository.owner,
-      repository: input.repository.repository,
-      baseBranch: input.baseBranch,
-      headBranch: input.headBranch,
-      draft: normalizeDraft(pull.isDraft),
-      outcome: "reused",
+      transport: "github-cli",
+      outcome: "updated",
+      fields: ["title", "body"],
     };
   }
 
@@ -957,6 +1560,17 @@ export class GitHubCliScmProvider implements ScmProvider {
       git: this.#git,
       request: input,
     });
+    const token = await this.#getAccessTokenIfAvailable();
+    if (token) {
+      const metadataUpdate = await patchPullRequestMetadata({
+        fetch: this.#fetch,
+        token,
+        target: input.target,
+        title: input.title,
+        body: input.body,
+      });
+      return { ...updated, metadataUpdate };
+    }
     await this.#execFile(
       "gh",
       ["pr", "edit", String(input.target.number), "--title", input.title],
@@ -965,6 +1579,58 @@ export class GitHubCliScmProvider implements ScmProvider {
         maxBuffer: 10 * 1024 * 1024,
       },
     );
-    return updated;
+    return {
+      ...updated,
+      metadataUpdate: {
+        transport: "github-cli",
+        outcome: "updated",
+        fields: ["title"],
+      },
+    };
+  }
+
+  async updateChangeRequestMetadata(
+    input: UpdateChangeRequestMetadataRequest,
+  ): Promise<UpdateChangeRequestMetadataResult> {
+    const token = await this.#getAccessTokenIfAvailable();
+    if (token) {
+      const metadataUpdate = await patchPullRequestMetadata({
+        fetch: this.#fetch,
+        token,
+        target: input.changeRequest,
+        title: input.title,
+        body: input.body,
+      });
+      return metadataUpdateResult({
+        changeRequest: input.changeRequest,
+        metadataUpdate,
+      });
+    }
+
+    const args = ["pr", "edit", String(input.changeRequest.number)];
+    const fields: string[] = [];
+    if (input.title !== undefined) {
+      args.push("--title", input.title);
+      fields.push("title");
+    }
+    if (input.bodyPath !== undefined) {
+      args.push("--body-file", input.bodyPath);
+      fields.push("body");
+    } else if (input.body !== undefined) {
+      args.push("--body", input.body);
+      fields.push("body");
+    }
+    await this.#execFile("gh", args, {
+      cwd: input.worktreePath,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    return metadataUpdateResult({
+      changeRequest: input.changeRequest,
+      metadataUpdate: {
+        transport: "github-cli",
+        outcome: "updated",
+        fields,
+      },
+    });
   }
 }

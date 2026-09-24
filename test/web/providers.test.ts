@@ -9,23 +9,59 @@ describe("web provider statuses", () => {
         NITELY_GITHUB_TOKEN: "github-secret",
         ANTHROPIC_API_KEY: "anthropic-secret",
         ZHIPUAI_API_KEY: "glm-secret",
+        XAI_API_KEY: "xai-secret",
         NITELY_GOOGLE_ACCESS_TOKEN: "google-secret",
+        NITELY_JIRA_TOKEN: "jira-secret",
       },
-      commandStatus: async (command) => command === "codex",
+      commandStatus: async (command) =>
+        command === "codex" || command === "pi",
     });
 
     const serialized = JSON.stringify(statuses);
     expect(serialized).not.toContain("github-secret");
     expect(serialized).not.toContain("anthropic-secret");
     expect(serialized).not.toContain("glm-secret");
+    expect(serialized).not.toContain("xai-secret");
     expect(serialized).not.toContain("google-secret");
+    expect(serialized).not.toContain("jira-secret");
     expect(statuses).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: "github", configured: true }),
         expect.objectContaining({ id: "codex", configured: true }),
         expect.objectContaining({ id: "anthropic", configured: true }),
         expect.objectContaining({ id: "glm", configured: true }),
+        expect.objectContaining({ id: "grok", configured: true }),
+        expect.objectContaining({ id: "pi", configured: true }),
         expect.objectContaining({ id: "google-drive", configured: true }),
+        expect.objectContaining({ id: "jira", configured: true }),
+      ]),
+    );
+  });
+
+  it("reports Grok Build and Pi provider hints", async () => {
+    const statuses = await getProviderStatuses({
+      env: {},
+      commandStatus: async () => false,
+    });
+
+    expect(statuses).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "grok",
+          name: "Grok Build / xAI",
+          configured: false,
+          hints: expect.arrayContaining([
+            "grok login",
+            "XAI_API_KEY",
+            "NITELY_GROK_COMMAND",
+          ]),
+        }),
+        expect.objectContaining({
+          id: "pi",
+          name: "Pi Coding Agent",
+          configured: false,
+          hints: expect.arrayContaining(["pi --version", "NITELY_PI_COMMAND"]),
+        }),
       ]),
     );
   });

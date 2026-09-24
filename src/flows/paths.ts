@@ -13,6 +13,22 @@ export interface BuiltinFlowPath {
   absolutePath: string;
 }
 
+export class RepositoryFlowPathError extends Error {
+  constructor(
+    message:
+      | "flow path must stay inside the repository"
+      | "flow path must exist inside the repository",
+  ) {
+    super(message);
+    this.name = "RepositoryFlowPathError";
+  }
+}
+
+export interface RepositoryFlowPath {
+  flowPath: string;
+  absolutePath: string;
+}
+
 function pathInside(parentPath: string, candidatePath: string): boolean {
   const fromParent = relative(parentPath, candidatePath);
   return (
@@ -78,4 +94,47 @@ export async function resolveBuiltinFlowPath(
   }
 
   return { flowPath: normalizedFlowPath, absolutePath };
+}
+
+/**
+ * Resolve a legacy repository-backed Flow without depending on Web request
+ * types. Both lexical traversal and symlink escape are rejected before the
+ * caller reads the document.
+ */
+export async function resolveRepositoryFlowPath(
+  repoPath: string,
+  candidatePath: string,
+): Promise<RepositoryFlowPath> {
+  const repoRoot = resolve(repoPath);
+  const candidate = resolve(repoRoot, candidatePath);
+  if (!pathInside(repoRoot, candidate)) {
+    throw new RepositoryFlowPathError(
+      "flow path must stay inside the repository",
+    );
+  }
+  const flowPath = relative(repoRoot, candidate).replaceAll("\\", "/");
+  if (!flowPath) {
+    throw new RepositoryFlowPathError(
+      "flow path must stay inside the repository",
+    );
+  }
+
+  const repoRealPath = await realpath(repoRoot);
+  let flowRealPath: string;
+  try {
+    flowRealPath = await realpath(candidate);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new RepositoryFlowPathError(
+        "flow path must exist inside the repository",
+      );
+    }
+    throw error;
+  }
+  if (!pathInside(repoRealPath, flowRealPath)) {
+    throw new RepositoryFlowPathError(
+      "flow path must stay inside the repository",
+    );
+  }
+  return { flowPath, absolutePath: candidate };
 }

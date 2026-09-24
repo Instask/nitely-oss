@@ -1,0 +1,111 @@
+{
+  "apiVersion": "nitely.dev/v1alpha1",
+  "kind": "Flow",
+  "metadata": {
+    "name": "converge-feature-artifacts",
+    "workItemType": "dev.pr",
+    "inputs": [
+      {
+        "id": "spec"
+      },
+      {
+        "id": "plan"
+      },
+      {
+        "id": "tasks"
+      }
+    ]
+  },
+  "spec": {
+    "maxAttempts": 2,
+    "stages": [
+      {
+        "id": "converge",
+        "type": "agent",
+        "runtime": "codex",
+        "prompt": "Assess the current worktree against the supplied spec, technical plan, and task artifact. Classify every implementation gap, cite stable feature source references and concrete worktree evidence, and produce the required strict convergence report. A clean implementation must produce an empty gaps array.",
+        "inputs": [
+          "spec",
+          "plan",
+          "tasks"
+        ],
+        "outputs": [
+          {
+            "id": "convergence-report",
+            "name": "Convergence report",
+            "type": "convergence.report",
+            "description": "Structured implementation-gap report classified and traced to feature source references.",
+            "mediaType": "application/vnd.nitely.convergence+json",
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "version",
+                "gaps"
+              ],
+              "properties": {
+                "version": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "gaps": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "classification",
+                      "title",
+                      "sourceRefs",
+                      "evidence"
+                    ],
+                    "properties": {
+                      "classification": {
+                        "type": "string"
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "sourceRefs": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "evidence": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "paths": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "id": "converged-tasks",
+            "name": "Converged tasks",
+            "type": "task.converged",
+            "description": "Markdown task artifact with deterministic remaining-work tasks appended after existing content.",
+            "mediaType": "text/markdown"
+          }
+        ],
+        "convergence": {
+          "tasksInput": "tasks",
+          "reportOutput": "convergence-report",
+          "tasksOutput": "converged-tasks"
+        }
+      }
+    ]
+  }
+}

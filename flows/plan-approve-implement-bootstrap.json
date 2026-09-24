@@ -1,0 +1,119 @@
+{
+  "apiVersion": "nitely.dev/v1alpha1",
+  "kind": "Flow",
+  "metadata": {
+    "name": "plan-approve-implement-bootstrap",
+    "inputs": [{ "id": "intake" }]
+  },
+  "spec": {
+    "maxAttempts": 2,
+    "stages": [
+      {
+        "id": "draft-spec",
+        "type": "agent",
+        "runtime": "codex",
+        "capabilities": {
+          "write": { "scope": "none" },
+          "commands": { "mode": "none" }
+        },
+        "prompt": "Turn the supplied issue or rough intake into a structured Nitely specification. Do not implement. Capture acceptance criteria, non-goals, risks, and open questions. Write the output artifact as the spec that downstream stages must follow.",
+        "inputs": ["intake"],
+        "outputs": ["spec"]
+      },
+      {
+        "id": "approve-spec",
+        "type": "approval",
+        "prompt": "Approve the generated specification before technical design starts.",
+        "inputs": ["spec"],
+        "outputs": []
+      },
+      {
+        "id": "draft-tech-design",
+        "type": "agent",
+        "runtime": "codex",
+        "capabilities": {
+          "write": { "scope": "none" },
+          "commands": { "mode": "none" }
+        },
+        "prompt": "Create a technical design for the approved specification. Ground the plan in the repository structure and existing conventions. Include implementation steps, test strategy, migration or deployment notes, and open technical risks. Do not implement.",
+        "inputs": ["spec"],
+        "context": { "fullReadInputs": ["spec"] },
+        "outputs": ["tech-design"]
+      },
+      {
+        "id": "approve-tech-design",
+        "type": "approval",
+        "prompt": "Approve the generated technical design before implementation starts.",
+        "inputs": ["tech-design"],
+        "outputs": []
+      },
+      {
+        "id": "write-tests",
+        "type": "agent",
+        "runtime": "codex",
+        "capabilities": {
+          "write": { "scope": "worktree", "allow": ["test/"] },
+          "commands": { "mode": "none" }
+        },
+        "prompt": "Write only the tests for the approved specification and technical design. Add or extend test files so every acceptance scenario and functional requirement that can be asserted has a test naming the behavior it demands, and assert the demanded values rather than restating whatever the current code returns. Do not write or change production code, do not delete or weaken existing tests, and do not try to make the suite green: these tests are expected to fail until the implement stage lands. Produce a tests artifact listing each test file you touched, each test name you added, and the specification requirement it pins.",
+        "inputs": ["spec", "tech-design"],
+        "context": { "fullReadInputs": ["spec", "tech-design"] },
+        "outputs": ["tests"]
+      },
+      {
+        "id": "implement",
+        "type": "agent",
+        "runtime": "codex",
+        "capabilities": {
+          "write": { "scope": "worktree" },
+          "commands": { "mode": "unrestricted" }
+        },
+        "prompt": "Implement the approved specification and technical design so the tests written in the write-tests stage pass. Keep the change scoped and update docs when behavior changes. The tests supplied by the write-tests stage are a contract: do not delete them, mark them skipped, or loosen their expected values to reach green. If a supplied test contradicts the specification or technical design, leave it failing and record the disagreement under a `Test contract change` heading in the implementation artifact, quoting the specification text that justifies the change. Produce a concise one-line pr-title artifact.",
+        "inputs": ["spec", "tech-design", "tests"],
+        "context": { "fullReadInputs": ["spec", "tech-design", "tests"] },
+        "outputs": ["implementation", "pr-title"]
+      },
+      {
+        "id": "test",
+        "type": "command",
+        "command": "pnpm exec vitest run && pnpm run check && pnpm run build",
+        "timeoutMs": 600000,
+        "inputs": ["implementation"],
+        "outputs": ["test-report"]
+      },
+      {
+        "id": "review",
+        "type": "gate",
+        "mode": "review",
+        "runtime": "codex",
+        "capabilities": {
+          "write": { "scope": "none" },
+          "commands": { "mode": "none" }
+        },
+        "prompt": "Review the implementation against the approved specification and technical design. Check for missing tests, unsafe behavior, weak event semantics, incomplete documentation, and product regressions. Do not modify files. Write `Review verdict: pass` when there are no P0/P1/blocking findings. Write `Review verdict: fail` when any P0/P1/blocking issue exists, and list P0/P1 findings first. Compare the implementation against the tests artifact: treat a deleted, skipped, or weakened test from the write-tests stage as a blocking finding unless the implementation artifact justifies it under a `Test contract change` heading.",
+        "inputs": ["spec", "tech-design", "tests", "implementation", "test-report"],
+        "outputs": ["review"]
+      },
+      {
+        "id": "publish",
+        "type": "publish-change",
+        "provider": "github-cli",
+        "inputs": ["implementation", "test-report", "review", "pr-title"],
+        "outputs": ["change-request"]
+      },
+      {
+        "id": "reflect",
+        "type": "agent",
+        "alwaysRun": true,
+        "runtime": "codex",
+        "capabilities": {
+          "write": { "scope": "none" },
+          "commands": { "mode": "none" }
+        },
+        "prompt": "Reflect on this issue execution after the change request has been created. Review the intake, generated spec, technical design, implementation summary, test report, review output, and change request result. Identify actionable improvements across specs, prompts, tests, workflow policy, observability, deployment, and product behavior. Create GitHub follow-up issues only for actionable non-duplicate improvements.",
+        "inputs": ["intake", "spec", "tech-design", "implementation", "test-report", "review", "change-request"],
+        "outputs": ["reflection"]
+      }
+    ]
+  }
+}

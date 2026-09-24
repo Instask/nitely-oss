@@ -6,7 +6,7 @@ import {
   DEV_PR_WORK_ITEM_TYPE,
   getUnifiedWorkItem,
   listUnifiedWorkItems,
-} from "../work-items/adapters/dev-pr.js";
+} from "../work-items/access.js";
 import type { ResourceReference } from "../connectors/types.js";
 import type { WorkItemRecord } from "../work-items/types.js";
 import { WebNotFoundError } from "./errors.js";
@@ -80,21 +80,6 @@ function runInputSourceEntries(run: WebRunSummary): { id: string; uri: string }[
     }
   }
   return uris;
-}
-
-function inputReferenceFromRunInput(value: unknown): ResourceReference | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return undefined;
-  }
-  const record = value as Record<string, unknown>;
-  const uri = record.sourceUri ?? record.uri;
-  if (typeof uri !== "string") {
-    return undefined;
-  }
-  return {
-    connector: typeof record.connector === "string" ? record.connector : "local-file",
-    uri,
-  };
 }
 
 function runMatchesWorkItem(
@@ -237,10 +222,14 @@ async function buildViewFromRuns(
       view.currentStage = stage;
     }
   }
-  if (workItem.inputs.spec?.connector === "local-file") {
+  if (workItem.specPath) {
+    view.specPath = workItem.specPath;
+  } else if (workItem.inputs.spec?.connector === "local-file") {
     view.specPath = workItem.inputs.spec.uri;
   }
-  if (workItem.inputs["tech-design"]?.connector === "local-file") {
+  if (workItem.techDesignPath) {
+    view.techDesignPath = workItem.techDesignPath;
+  } else if (workItem.inputs["tech-design"]?.connector === "local-file") {
     view.techDesignPath = workItem.inputs["tech-design"].uri;
   }
   return { view, runs: enrichedRuns };
@@ -255,19 +244,6 @@ function workItemStatusFromRun(run: WebRunSummary | undefined): WorkItemRecord["
     return "failed";
   }
   return "ready";
-}
-
-function runInputsToResourceReferences(
-  inputs: Record<string, unknown>,
-): Record<string, ResourceReference> {
-  const references: Record<string, ResourceReference> = {};
-  for (const [key, value] of Object.entries(inputs)) {
-    const reference = inputReferenceFromRunInput(value);
-    if (reference) {
-      references[key] = reference;
-    }
-  }
-  return references;
 }
 
 function pathInsideRepo(repoPath: string, candidatePath: string): string | undefined {
@@ -319,24 +295,6 @@ async function inputContentsForWorkItem(
   return Object.fromEntries(
     entries.filter((entry): entry is readonly [string, string] => entry[1] !== undefined),
   );
-}
-
-async function getInferredWorkItem(
-  repoPath: string,
-  id: string,
-  user?: WebAccessContext,
-): Promise<WorkItemRecord> {
-  const items = await listUnifiedWorkItems(repoPath);
-  const runs = (await listRuns(repoPath)).filter((run) =>
-    ownedRecordVisibleToUser(run, user),
-  );
-  const group = inferredWorkItemGroups(items, runs, user).find(
-    (candidate) => candidate.item.id === id,
-  );
-  if (!group) {
-    throw new WebNotFoundError("task not found");
-  }
-  return group.item;
 }
 
 function prNumberFromRun(run: WebRunSummary): string | undefined {
@@ -495,8 +453,9 @@ function inferredWorkItemGroups(
 export async function listWorkItemViews(
   repoPath: string,
   user?: WebAccessContext,
+  workItemsSnapshot?: readonly WorkItemRecord[],
 ): Promise<WorkItemView[]> {
-  const items = await listUnifiedWorkItems(repoPath);
+  const items = workItemsSnapshot ?? (await listUnifiedWorkItems(repoPath));
   const runs = (await listRuns(repoPath)).filter((run) =>
     ownedRecordVisibleToUser(run, user),
   );
@@ -527,29 +486,38 @@ export async function getWorkItemView(
   repoPath: string,
   id: string,
   user?: WebAccessContext,
+  workItemsSnapshot?: readonly WorkItemRecord[],
 ): Promise<WorkItemDetailView> {
-  let readOnly = false;
-  let workItem: WorkItemRecord;
-  try {
-    workItem = await getUnifiedWorkItem(repoPath, id);
-  } catch (error) {
-    if (!(error instanceof WebNotFoundError)) {
-      throw error;
+  let persistedItems = workItemsSnapshot;
+  let workItem = persistedItems?.find((item) => item.id === id);
+  if (!persistedItems) {
+    try {
+      workItem = await getUnifiedWorkItem(repoPath, id);
+      persistedItems = [workItem];
+    } catch (error) {
+      if (!(error instanceof WebNotFoundError)) {
+        throw error;
+      }
+      persistedItems = await listUnifiedWorkItems(repoPath);
+      workItem = persistedItems.find((item) => item.id === id);
     }
-    workItem = await getInferredWorkItem(repoPath, id, user);
-    readOnly = true;
   }
+  const readOnly = workItem === undefined;
   const inferredGroup = readOnly
     ? inferredWorkItemGroups(
-        (await listUnifiedWorkItems(repoPath)).filter((item) =>
-          ownedRecordVisibleToUser(item, user),
-        ),
+        persistedItems.filter((item) => ownedRecordVisibleToUser(item, user)),
         (await listRuns(repoPath)).filter((run) =>
           ownedRecordVisibleToUser(run, user),
         ),
         user,
       ).find((group) => group.item.id === id)
     : undefined;
+  if (!workItem) {
+    workItem = inferredGroup?.item;
+  }
+  if (!workItem) {
+    throw new WebNotFoundError("task not found");
+  }
   const { view, runs } = inferredGroup
     ? await buildViewFromRuns(repoPath, inferredGroup.item, inferredGroup.runs, "inferred", {
         includeArtifacts: true,

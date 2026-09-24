@@ -1,0 +1,79 @@
+{
+  "apiVersion": "nitely.dev/v1alpha1",
+  "kind": "Flow",
+  "metadata": {
+    "name": "implement-spec-bootstrap-claude"
+  },
+  "spec": {
+    "maxAttempts": 2,
+    "stages": [
+      {
+        "id": "write-tests",
+        "type": "agent",
+        "runtime": "claude",
+        "capabilities": {
+          "write": { "scope": "worktree", "allow": ["test/"] },
+          "commands": { "mode": "none" }
+        },
+        "prompt": "Write only the tests for the supplied Nitely feature specification and technical design with Claude Code. Add or extend test files so every acceptance scenario and functional requirement that can be asserted has a test naming the behavior it demands, and assert the demanded values rather than restating whatever the current code returns. Do not write or change production code, do not delete or weaken existing tests, and do not try to make the suite green: these tests are expected to fail until the implement stage lands. Produce a tests artifact listing each test file you touched, each test name you added, and the specification requirement it pins.",
+        "inputs": ["spec", "tech-design"],
+        "context": { "fullReadInputs": ["spec", "tech-design"] },
+        "outputs": ["tests"]
+      },
+      {
+        "id": "implement",
+        "type": "agent",
+        "runtime": "claude",
+        "capabilities": {
+          "write": { "scope": "worktree" },
+          "commands": { "mode": "unrestricted" }
+        },
+        "prompt": "Implement the supplied Nitely feature specification and technical design with Claude Code. Make the tests written in the write-tests stage pass. Keep the change scoped, update docs when behavior changes, and avoid weakening existing tests. The tests supplied by the write-tests stage are a contract: do not delete them, mark them skipped, or loosen their expected values to reach green. If a supplied test contradicts the specification or technical design, leave it failing and record the disagreement under a `Test contract change` heading in the implementation artifact, quoting the specification text that justifies the change. Produce a concise one-line pr-title artifact that names the actual change.",
+        "inputs": ["spec", "tech-design", "tests"],
+        "context": { "fullReadInputs": ["spec", "tech-design", "tests"] },
+        "outputs": ["implementation", "pr-title"]
+      },
+      {
+        "id": "test",
+        "type": "command",
+        "command": "pnpm exec vitest run && pnpm run check && pnpm run build",
+        "timeoutMs": 600000,
+        "inputs": ["implementation"],
+        "outputs": ["test-report"]
+      },
+      {
+        "id": "review",
+        "type": "gate",
+        "mode": "review",
+        "runtime": "claude",
+        "capabilities": {
+          "write": { "scope": "none" },
+          "commands": { "mode": "none" }
+        },
+        "prompt": "Review the implementation against the specification and technical design with Claude Code. Check for missing tests, broken CLI contracts, unsafe filesystem behavior, weak event semantics, and incomplete documentation. If planning approval endpoints or src/work-items/planning.ts changed, verify deterministic invalid-transition tests cover the affected state-machine paths. Do not modify files during review. Write `Review verdict: pass` when there are no P0/P1/blocking findings. Write `Review verdict: fail` when any P0/P1/blocking issue exists, and list P0/P1 findings first. Compare the implementation against the tests artifact: treat a deleted, skipped, or weakened test from the write-tests stage as a blocking finding unless the implementation artifact justifies it under a `Test contract change` heading.",
+        "inputs": ["spec", "tech-design", "tests", "implementation", "test-report"],
+        "outputs": ["review"]
+      },
+      {
+        "id": "publish",
+        "type": "publish-change",
+        "provider": "github-cli",
+        "inputs": ["implementation", "test-report", "review", "pr-title"],
+        "outputs": ["change-request"]
+      },
+      {
+        "id": "reflect",
+        "type": "agent",
+        "alwaysRun": true,
+        "runtime": "claude",
+        "capabilities": {
+          "write": { "scope": "none" },
+          "commands": { "mode": "none" }
+        },
+        "prompt": "Reflect on this issue execution after the change request has been created, using Claude Code. Review the source issue/spec, technical design, implementation summary, test report, review output, and change request result. Identify actionable improvements across specs, prompts, tests, workflow policy, run observability, deployment, and product behavior. Search existing GitHub issues before creating follow-ups. Create GitHub issues only for actionable non-duplicate improvements, include source issue, PR, run id, and relevant artifact/log links when available, and apply appropriate priority labels. Write a concise reflection artifact listing created issue URLs, duplicates found, non-actions/observations, or a clean result when no actionable improvement remains.",
+        "inputs": ["spec", "tech-design", "implementation", "test-report", "review", "change-request"],
+        "outputs": ["reflection"]
+      }
+    ]
+  }
+}

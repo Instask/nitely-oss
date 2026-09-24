@@ -1,4 +1,6 @@
 .worktrees/
+# Local copy installed by scripts/install-nitely-skill --project .
+.claude/skills/nitely/
 node_modules/
 dist/
 .nitely/

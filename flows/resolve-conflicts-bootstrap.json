@@ -17,10 +17,7 @@
       {
         "id": "resolve",
         "type": "agent",
-        "runtimes": [
-          { "runtime": "claude" },
-          { "runtime": "codex" }
-        ],
+        "runtime": "codex",
         "prompt": "Resolve merge conflict markers if the sync report lists conflicts. If the sync was clean, leave the synchronized branch unchanged. Keep the change scoped to conflict resolution and avoid weakening existing tests. Produce a concise one-line pr-title artifact that describes the conflict resolution or sync update.",
         "inputs": ["spec", "tech-design", "sync-report"],
         "outputs": ["implementation", "pr-title"]
@@ -29,6 +26,7 @@
         "id": "test",
         "type": "command",
         "command": "git diff --check && git diff --cached --check && test -z \"$(git diff --name-only --diff-filter=U)\" && untracked_conflicts=$(git ls-files --others --exclude-standard -z | xargs -0 -r grep -n -I -E '^(<<<<<<<|=======|>>>>>>>)' -- || true) && test -z \"$untracked_conflicts\" && pnpm exec vitest run && pnpm run check && pnpm run build",
+        "timeoutMs": 600000,
         "inputs": ["implementation"],
         "outputs": ["test-report"]
       },
@@ -36,10 +34,7 @@
         "id": "review",
         "type": "gate",
         "mode": "review",
-        "runtimes": [
-          { "runtime": "claude" },
-          { "runtime": "codex" }
-        ],
+        "runtime": "codex",
         "prompt": "Review the synchronized pull request branch and any conflict resolution. Check that conflict markers are gone, the resolution preserves both sides where appropriate, verification evidence is meaningful, and the final stage updates the same PR. Do not modify files during review. Write `Review verdict: pass` when there are no P0/P1/blocking findings. Write `Review verdict: fail` when any P0/P1/blocking issue exists, and list P0/P1 findings first.",
         "inputs": ["spec", "tech-design", "sync-report", "implementation", "test-report"],
         "outputs": ["review"]
@@ -54,10 +49,8 @@
       {
         "id": "reflect",
         "type": "agent",
-        "runtimes": [
-          { "runtime": "claude" },
-          { "runtime": "codex" }
-        ],
+        "alwaysRun": true,
+        "runtime": "codex",
         "prompt": "Reflect on this issue execution after the change request has been updated. Review the source issue/spec, technical design, sync report when present, implementation summary, test report, review output, and change request result. Identify actionable improvements across specs, prompts, tests, workflow policy, run observability, deployment, and product behavior. Search existing GitHub issues before creating follow-ups. Create GitHub issues only for actionable non-duplicate improvements, include source issue, PR, run id, and relevant artifact/log links when available, and apply appropriate priority labels. Write a concise reflection artifact listing created issue URLs, duplicates found, non-actions/observations, or a clean result when no actionable improvement remains.",
         "inputs": ["spec", "tech-design", "sync-report", "implementation", "test-report", "review", "change-request"],
         "outputs": ["reflection"]

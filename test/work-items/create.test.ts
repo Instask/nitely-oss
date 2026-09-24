@@ -25,6 +25,24 @@ const autofarmFlow = {
   },
 };
 
+const configurableFlow = {
+  apiVersion: "nitely.dev/v1alpha1",
+  kind: "Flow",
+  metadata: {
+    name: "configured-dev",
+    workItemType: "dev.pr",
+    configurables: [
+      { key: "scope", type: "text", label: "Scope", required: true },
+      { key: "dryRun", type: "boolean", label: "Dry run", default: true },
+    ],
+  },
+  spec: {
+    stages: [
+      { id: "implement", type: "agent", runtime: "mock", prompt: "Implement.", inputs: [], outputs: ["implementation"] },
+    ],
+  },
+};
+
 async function createRepo(allowedTypes?: string[]) {
   const repo = await mkdtemp(join(tmpdir(), "nitely-create-wi-"));
   await mkdir(join(repo, "flows"), { recursive: true });
@@ -68,6 +86,50 @@ describe("createFlowWorkItem", () => {
       inputs: { seed: { connector: "local-file", uri: "seeds/k.json" } },
     });
     expect("specPath" in item).toBe(false);
+  });
+
+  it("persists normalized flow configuration separately from artifact inputs", async () => {
+    const repo = await createRepo();
+    await writeFile(
+      join(repo, "flows/configured-dev.json"),
+      JSON.stringify(configurableFlow),
+      "utf8",
+    );
+
+    const item = await createFlowWorkItem(
+      repo,
+      {
+        title: "Configure run",
+        flowPath: "flows/configured-dev.json",
+        inputs: {},
+        configuration: { scope: "checkout" },
+      },
+      { createId: () => "wi-configured" },
+    );
+
+    expect(item.inputs).toEqual({});
+    expect(item.configuration).toEqual({
+      scope: "checkout",
+      dryRun: true,
+    });
+  });
+
+  it("rejects missing required flow configuration", async () => {
+    const repo = await createRepo();
+    await writeFile(
+      join(repo, "flows/configured-dev.json"),
+      JSON.stringify(configurableFlow),
+      "utf8",
+    );
+
+    await expect(
+      createFlowWorkItem(repo, {
+        title: "Configure run",
+        flowPath: "flows/configured-dev.json",
+        inputs: {},
+        configuration: {},
+      }),
+    ).rejects.toThrow("missing required configurable: scope");
   });
 
   it("rejects a high-risk type that is not allow-listed", async () => {

@@ -1,0 +1,65 @@
+{
+  "apiVersion": "nitely.dev/v1alpha1",
+  "kind": "Flow",
+  "metadata": {
+    "name": "implement-spec-bootstrap-pi"
+  },
+  "spec": {
+    "maxAttempts": 2,
+    "stages": [
+      {
+        "id": "write-tests",
+        "type": "agent",
+        "runtime": "pi",
+        "capabilities": {
+          "write": { "scope": "worktree", "allow": ["test/"] },
+          "commands": { "mode": "none" }
+        },
+        "prompt": "Write only the tests for the supplied Nitely feature specification and technical design with Pi. Add or extend test files so every acceptance scenario and functional requirement that can be asserted has a test naming the behavior it demands, and assert the demanded values rather than restating whatever the current code returns. Do not write or change production code, do not delete or weaken existing tests, and do not try to make the suite green: these tests are expected to fail until the implement stage lands. Produce a tests artifact listing each test file you touched, each test name you added, and the specification requirement it pins.",
+        "inputs": ["spec", "tech-design"],
+        "context": { "fullReadInputs": ["spec", "tech-design"] },
+        "outputs": ["tests"]
+      },
+      {
+        "id": "implement",
+        "type": "agent",
+        "runtime": "pi",
+        "capabilities": {
+          "write": { "scope": "worktree" },
+          "commands": { "mode": "unrestricted" }
+        },
+        "prompt": "Implement the supplied Nitely feature specification and technical design with Pi. Make the tests written in the write-tests stage pass. Keep the change scoped, update docs when behavior changes, and avoid weakening existing tests. The tests supplied by the write-tests stage are a contract: do not delete them, mark them skipped, or loosen their expected values to reach green. If a supplied test contradicts the specification or technical design, leave it failing and record the disagreement under a `Test contract change` heading in the implementation artifact, quoting the specification text that justifies the change.",
+        "inputs": ["spec", "tech-design", "tests"],
+        "context": { "fullReadInputs": ["spec", "tech-design", "tests"] },
+        "outputs": ["implementation"]
+      },
+      {
+        "id": "test",
+        "type": "command",
+        "command": "pnpm exec vitest run && pnpm run check && pnpm run build",
+        "timeoutMs": 600000,
+        "inputs": ["implementation"],
+        "outputs": ["test-report"]
+      },
+      {
+        "id": "review",
+        "type": "agent",
+        "runtime": "pi",
+        "capabilities": {
+          "write": { "scope": "none" },
+          "commands": { "mode": "none" }
+        },
+        "prompt": "Review the implementation against the specification and technical design with Pi. Check for missing tests, broken CLI contracts, unsafe filesystem behavior, weak event semantics, and incomplete documentation. Do not modify files during review. Compare the implementation against the tests artifact: treat a deleted, skipped, or weakened test from the write-tests stage as a blocking finding unless the implementation artifact justifies it under a `Test contract change` heading.",
+        "inputs": ["spec", "tech-design", "tests", "implementation", "test-report"],
+        "outputs": ["review"]
+      },
+      {
+        "id": "publish",
+        "type": "publish-change",
+        "provider": "github-cli",
+        "inputs": ["implementation", "test-report", "review"],
+        "outputs": ["change-request"]
+      }
+    ]
+  }
+}

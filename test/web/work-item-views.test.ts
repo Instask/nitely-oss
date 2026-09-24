@@ -46,6 +46,59 @@ async function writeRun(
 }
 
 describe("work item views", () => {
+  it("builds list and detail enrichment from a supplied Work item snapshot", async () => {
+    const repo = await createRepo();
+    await writeFile(join(repo, "seed-a.json"), "snapshot A", "utf8");
+    await writeFile(join(repo, "seed-b.json"), "persisted B", "utf8");
+    const snapshot = await createWorkItem(
+      repo,
+      {
+        title: "Snapshot view",
+        workItemType: "autofarm.site",
+        flowPath: "flows/autofarm-site.json",
+        inputs: {
+          seed: { connector: "local-file", uri: "seed-a.json" },
+        },
+      },
+      { createId: () => "wi-snapshot" },
+    );
+    await writeFile(
+      join(repo, ".nitely/work-items/wi-snapshot/work-item.json"),
+      JSON.stringify(
+        {
+          ...snapshot,
+          status: "running",
+          inputs: {
+            seed: { connector: "local-file", uri: "seed-b.json" },
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    const views = await listWorkItemViews(repo, undefined, [snapshot]);
+    const detail = await getWorkItemView(
+      repo,
+      snapshot.id,
+      undefined,
+      [snapshot],
+    );
+
+    expect(views[0]).toMatchObject({
+      id: snapshot.id,
+      status: "ready",
+      inputs: { seed: { uri: "seed-a.json" } },
+    });
+    expect(detail).toMatchObject({
+      id: snapshot.id,
+      status: "ready",
+      inputs: { seed: { uri: "seed-a.json" } },
+      inputContents: { seed: "snapshot A" },
+    });
+  });
+
   it("lists legacy dev tasks and generic work items with their type", async () => {
     const repo = await createRepo();
     await createTask(

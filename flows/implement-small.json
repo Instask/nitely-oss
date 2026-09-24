@@ -1,0 +1,35 @@
+{
+  "apiVersion": "nitely.dev/v1alpha1",
+  "kind": "Flow",
+  "metadata": {
+    "name": "implement-small"
+  },
+  "spec": {
+    "maxAttempts": 2,
+    "stages": [
+      {
+        "id": "implement",
+        "type": "agent",
+        "runtime": "codex",
+        "prompt": "Implement the supplied Nitely feature specification and technical design. Add or update focused tests for the requested behavior, keep the change scoped, update docs when behavior changes, and avoid weakening existing tests. Produce a concise implementation summary and one-line pr-title artifact.",
+        "inputs": ["spec", "tech-design"],
+        "outputs": ["implementation", "pr-title"]
+      },
+      {
+        "id": "test",
+        "type": "command",
+        "command": "pnpm exec vitest run && pnpm run check && pnpm run build",
+        "timeoutMs": 600000,
+        "inputs": ["implementation"],
+        "outputs": ["test-report"]
+      },
+      {
+        "id": "publish",
+        "type": "publish-change",
+        "provider": "github-cli",
+        "inputs": ["implementation", "test-report", "pr-title"],
+        "outputs": ["change-request"]
+      }
+    ]
+  }
+}
