@@ -21,7 +21,7 @@ Codex、Claude、GLM、Grok Build、Pi 以及未来的 coding agent 都只是 Ni
 `Nitely` 目前仅是内部临时代号。在公开 landing page、SaaS control plane、付费
 offer 或 package 发布前，必须完成更名与专业商标清查。
 
-项目目前处于 bootstrap 阶段。`master` 上已实现的能力见
+项目目前处于 bootstrap 阶段。`main` 上已实现的能力见
 [docs/status.zh-CN.md](docs/status.zh-CN.md)。Planner 可以从 GitHub issue、Jira ticket 或 prompt
 起草 spec。已交付的生命周期见
 [docs/approval-first-ticket-to-pr.md](docs/approval-first-ticket-to-pr.md)。
@@ -63,6 +63,9 @@ pnpm dev -- --help
 node dist/index.js --help
 ```
 
+**第一次使用？从 [Quickstart](docs/quickstart.md) 开始**：先离线跑一遍完整流程，
+再在自己的仓库上做第一次真实运行（英文）。
+
 ## 安装 Nitely Agent Skill
 
 `skills/nitely/` 是一个 agent skill，它把 Nitely 的安装、配置和操作方式（安装路径、
@@ -77,7 +80,7 @@ scripts/install-nitely-skill
 没有 checkout 时：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Instask/nitely-oss/master/scripts/install-nitely-skill | bash
+curl -fsSL https://raw.githubusercontent.com/Instask/nitely-oss/main/scripts/install-nitely-skill | bash
 ```
 
 两者都会把个人 Claude Code skill 安装到
@@ -95,8 +98,9 @@ skill；源内容 hash 变化时会阻止应用。
 
 本文件是入口。操作手册按事情拆开：
 
+- [Quickstart](docs/quickstart.md) — 离线演示，然后第一次真实运行（英文）。
 - [产品定义](docs/product.zh-CN.md) — 四条约束和决策检验。
-- [当前状态](docs/status.zh-CN.md) — `master` 上已实现的能力。
+- [当前状态](docs/status.zh-CN.md) — `main` 上已实现的能力。
 - [运行 Flow](docs/running-flows.zh-CN.md) — 校验、运行、input、evidence、agent runtime。
 - [执行后端](docs/execution-backends.zh-CN.md) — local、mise 和 OCI。
 - [返工与恢复](docs/rework-and-recovery.zh-CN.md) — rework、resume 和 retry。

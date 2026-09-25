@@ -34,9 +34,12 @@ The runner owns host execution concerns: checkout preparation, local credentials
 toolchain availability, run admission, log/artifact streaming, cancellation, and
 heartbeat reporting.
 
-### `nitely-control-plane`
+### `nitely-control-plane` (private)
 
-The commercial coordination application. It should not execute customer code.
+The commercial coordination application. Its repository is private; it
+consumes the protocol this repository exports under
+`nitely/runner-control-plane/*` and must not become a second home for runtime
+behavior. It should not execute customer code.
 It owns organization workflows: users, repositories, work queues, policy,
 approval, runner registration, run scheduling, status projection, evidence
 search, and audit.

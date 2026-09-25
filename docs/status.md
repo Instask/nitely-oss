@@ -1,8 +1,8 @@
 # Current Status
 
-Implemented behavior on `master`. The product definition is [product.md](product.md). Installation and the documentation map are in the [README](../README.md).
+Implemented behavior on `main`. The product definition is [product.md](product.md). Installation and the documentation map are in the [README](../README.md).
 
-Implemented on `master`:
+Implemented on `main`:
 
 - JSON flow loading and validation.
 - Local-file and Google Drive input connectors.

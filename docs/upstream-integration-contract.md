@@ -42,10 +42,10 @@ versioned envelopes instead of adding provider fields to the run model.
 {
   "apiVersion": "nitely.dev/integration/v1",
   "kind": "ExecutionRequest",
-  "idempotencyKey": "github:Instask/nitely:issue:397:2026-07-13T16:47:02Z",
+  "idempotencyKey": "github:acme/app:issue:397:2026-07-13T16:47:02Z",
   "source": {
     "type": "github.issue",
-    "url": "https://github.com/Instask/nitely/issues/397",
+    "url": "https://github.com/acme/app/issues/397",
     "repository": {
       "host": "github.com",
       "owner": "Instask",
@@ -62,7 +62,7 @@ versioned envelopes instead of adding provider fields to the run model.
     "flow": "pilot-approved-spec-pr",
     "approval": {
       "state": "approved",
-      "actor": "github:jerryleooo",
+      "actor": "github:octocat",
       "at": "2026-07-13T17:00:00.000Z",
       "artifactIds": ["spec", "tech-design"]
     },
@@ -70,7 +70,7 @@ versioned envelopes instead of adding provider fields to the run model.
       {
         "id": "source",
         "mediaType": "application/json",
-        "uri": "snapshot://github/Instask/nitely/issues/397/2026-07-13T16:47:02Z"
+        "uri": "snapshot://github/acme/app/issues/397/2026-07-13T16:47:02Z"
       },
       {
         "id": "spec",
@@ -146,14 +146,14 @@ request digest)` before starting a run:
   "kind": "ExecutionResult",
   "eventId": "run-01J2-example:42",
   "sequence": 42,
-  "idempotencyKey": "github:Instask/nitely:issue:397:2026-07-13T16:47:02Z",
+  "idempotencyKey": "github:acme/app:issue:397:2026-07-13T16:47:02Z",
   "occurredAt": "2026-07-14T01:00:00.000Z",
   "taskId": "task-397",
   "runId": "run-01J2-example",
   "status": "completed",
   "changeRequest": {
     "provider": "github",
-    "url": "https://github.com/Instask/nitely/pull/398",
+    "url": "https://github.com/acme/app/pull/398",
     "number": 398,
     "baseBranch": "master",
     "headBranch": "nitely/run-01J2-example",

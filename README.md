@@ -24,7 +24,7 @@ The operating rhythm is: plan by day, execute by night, review by morning. See
 professionally cleared before any public landing page, SaaS control plane, paid
 offer, or package launch.
 
-The project is in bootstrap. Implemented behavior on `master` is listed in
+The project is in bootstrap. Implemented behavior on `main` is listed in
 [docs/status.md](docs/status.md). The shipped lifecycle is the
 [approval-first ticket-to-PR contract](docs/approval-first-ticket-to-pr.md).
 
@@ -83,6 +83,9 @@ Run the built CLI:
 node dist/index.js --help
 ```
 
+**New here? Start with the [Quickstart](docs/quickstart.md)**: an offline demo of
+the whole loop, then a first real run on your own repository.
+
 ## Install The Nitely Agent Skill
 
 `skills/nitely/` is an agent skill that teaches a coding agent how to install,
@@ -96,7 +99,7 @@ scripts/install-nitely-skill
 Without a checkout:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Instask/nitely-oss/master/scripts/install-nitely-skill | bash
+curl -fsSL https://raw.githubusercontent.com/Instask/nitely-oss/main/scripts/install-nitely-skill | bash
 ```
 
 Both install the personal Claude Code skill at
@@ -109,8 +112,9 @@ to replace an existing install. See [docs/nitely-skill.md](docs/nitely-skill.md)
 
 This file is the front door. The operator manual is split by job:
 
+- [Quickstart](docs/quickstart.md) — offline demo, then a first real run.
 - [Product definition](docs/product.md) — the four constraints and the decision test.
-- [Current status](docs/status.md) — what is implemented on `master`.
+- [Current status](docs/status.md) — what is implemented on `main`.
 - [Running flows](docs/running-flows.md) — validate, run, inputs, evidence, agent runtimes.
 - [Execution backends](docs/execution-backends.md) — local, mise, and OCI.
 - [Rework and recovery](docs/rework-and-recovery.md) — rework, resume, and retry.

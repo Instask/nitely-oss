@@ -313,9 +313,14 @@ ${sourceExcerpt(body)}
   };
 }
 
+/**
+ * A bare issue number resolves against `defaultRepository` (`owner/repo`),
+ * normally the GitHub repository the task belongs to. Without one, only full
+ * issue URLs are accepted.
+ */
 export function parseGitHubIssueReference(
   value: string,
-  defaultRepository = "Instask/nitely",
+  defaultRepository?: string,
 ): GitHubIssueReference {
   const input = normalizeText(value);
   if (!input) {
@@ -336,6 +341,11 @@ export function parseGitHubIssueReference(
     };
   }
   if (/^\d+$/.test(input)) {
+    if (!defaultRepository) {
+      throw new Error(
+        "issue number needs a repository with a GitHub source URL; use the full issue URL",
+      );
+    }
     const [owner, repo] = defaultRepository.split("/");
     if (!owner || !repo) {
       throw new Error("default GitHub repository must be owner/repo");
