@@ -8,7 +8,7 @@ import {
   summarizeFlowArtifactGraph,
   type FlowArtifactGraphView,
 } from "../flows/artifact-graph.js";
-import { resolveBuiltinFlowPath } from "../flows/paths.js";
+import { bundledFlowsRoot, resolveBuiltinFlowPath } from "../flows/paths.js";
 import { openFlowStore, type FlowRecord } from "../flows/store.js";
 import type { FlowTemplateLineage } from "../flows/templates.js";
 import { inferExternalInputs, validateFlowDocument } from "../flows/validate.js";
@@ -131,19 +131,30 @@ export function flowRecordWritableByUser(
   return record.ownerId === user.id;
 }
 
-async function readBuiltinFlows(
-  repoPath: string,
-): Promise<Array<{ id: string; document: string }>> {
-  const flowsDirectory = join(resolve(repoPath), "flows");
-  let entries: string[];
+async function readFlowEntries(root: string): Promise<string[]> {
   try {
-    entries = await readdir(flowsDirectory);
+    return await readdir(join(resolve(root), "flows"));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return [];
     }
     throw error;
   }
+}
+
+/**
+ * Built-in flows are the repository's `flows/` plus the flows shipped with this
+ * installation; resolveBuiltinFlowPath lets the repository's copy win.
+ */
+async function readBuiltinFlows(
+  repoPath: string,
+): Promise<Array<{ id: string; document: string }>> {
+  const entries = [
+    ...new Set([
+      ...(await readFlowEntries(repoPath)),
+      ...(await readFlowEntries(bundledFlowsRoot())),
+    ]),
+  ].sort();
   const flows = await Promise.all(
     entries
       .filter((entry) => entry.endsWith(".json"))

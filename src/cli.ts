@@ -1,4 +1,5 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { bundledFlowsRoot, resolveBuiltinFlowPath } from "./flows/paths.js";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -5353,5 +5354,54 @@ export async function runCli(
     return 1;
   }
 
-  return await command.run({ argv, io, dependencies });
+  return await command.run({
+    argv: await withBundledFlowArgument(argv),
+    io,
+    dependencies,
+  });
+}
+
+const POSITIONAL_FLOW_COMMANDS = new Set([
+  "doctor",
+  "graph",
+  "run",
+  "run-stage",
+  "validate",
+]);
+
+/**
+ * `nitely run flows/<name>.json` from a repository without that file uses the
+ * flow shipped with this installation, so built-in flows work from any
+ * checkout. A file at the given path always wins.
+ */
+export async function withBundledFlowArgument(
+  argv: string[],
+  cwd: string = process.cwd(),
+  bundledRoot: string = bundledFlowsRoot(),
+): Promise<string[]> {
+  const flowArgument = argv[1];
+  if (
+    !POSITIONAL_FLOW_COMMANDS.has(argv[0] ?? "") ||
+    !flowArgument ||
+    flowArgument.startsWith("-") ||
+    (await pathExists(resolve(cwd, flowArgument)))
+  ) {
+    return argv;
+  }
+  let bundled: Awaited<ReturnType<typeof resolveBuiltinFlowPath>>;
+  try {
+    bundled = await resolveBuiltinFlowPath(bundledRoot, flowArgument);
+  } catch {
+    return argv;
+  }
+  return [argv[0]!, bundled.absolutePath, ...argv.slice(2)];
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
