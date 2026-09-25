@@ -119,8 +119,18 @@ describe("flows API", () => {
     const body = (await json(await fetch(`${server.url}/api/flows`))) as {
       flows: Array<{ id: string; source: string; name: string }>;
     };
-    const builtin = body.flows.find((f) => f.source === "builtin");
-    expect(builtin?.name).toBe("implement-spec-bootstrap");
+    const builtin = body.flows.find(
+      (f) => f.id === "flows/implement-spec-bootstrap.json",
+    );
+    expect(builtin).toMatchObject({
+      source: "builtin",
+      name: "implement-spec-bootstrap",
+    });
+    // Flows shipped with the installation are listed even when the
+    // repository does not carry them.
+    expect(body.flows).toContainEqual(
+      expect.objectContaining({ id: "flows/implement-small.json", source: "builtin" }),
+    );
   });
 
   it("lets a tasks:read API token read the flow catalog and nothing else", async () => {

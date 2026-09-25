@@ -6380,6 +6380,11 @@ describe("web server API and HTML", () => {
 
   it("preserves a 400 response when a Task Flow disappears before preflight", async () => {
     const repoPath = await createRepo();
+    // A flow only this repository has, so no shipped flow can stand in for it.
+    await writeFile(
+      join(repoPath, "flows/repository-only.json"),
+      await readFile(join(repoPath, "flows/implement-spec-bootstrap.json"), "utf8"),
+    );
     const server = await startTestServer(repoPath);
     const created = (await json(
       await fetch(`${server.url}/api/tasks`, {
@@ -6389,10 +6394,11 @@ describe("web server API and HTML", () => {
           title: "Missing Flow preflight",
           spec: "Spec body",
           techDesign: "Design body",
+          flowPath: "flows/repository-only.json",
         }),
       }),
     )) as { task: { id: string } };
-    await rm(join(repoPath, "flows/implement-spec-bootstrap.json"));
+    await rm(join(repoPath, "flows/repository-only.json"));
 
     await expectWebInputError(
       await fetch(`${server.url}/api/tasks/${created.task.id}/preflight`),
