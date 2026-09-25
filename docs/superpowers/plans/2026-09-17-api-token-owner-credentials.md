@@ -14,7 +14,7 @@
 
 - Node.js 24+, pnpm 11; run everything from the worktree root.
 - `pnpm check` must stay clean after every task.
-- Vitest suites that start a web server without executing a real run work on macOS: `test/web/api-tokens.test.ts`, `test/web/server.test.ts`, `test/web/device-flow-api.test.ts`, `test/web/flows-api.test.ts`, `test/web/users.test.ts`, `test/mcp/server.test.ts`, `test/cli.test.ts`, `test/run/preflight.test.ts`. Anything touching Run-owned files must run on the Linux dev box (`jerry@100.96.111.79:/home/jerry/dev/nitely-agent-test`, see memory `run-tests-on-linux-box`).
+- Vitest suites that start a web server without executing a real run work on macOS: `test/web/api-tokens.test.ts`, `test/web/server.test.ts`, `test/web/device-flow-api.test.ts`, `test/web/flows-api.test.ts`, `test/web/users.test.ts`, `test/mcp/server.test.ts`, `test/cli.test.ts`, `test/run/preflight.test.ts`. Anything touching Run-owned files must run on the Linux dev box (`<linux-dev-box>:~/dev/nitely-agent-test`, see memory `run-tests-on-linux-box`).
 - Never print or log a raw token; tests already assert this and must keep passing.
 - Commit messages end with `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`.
 - Match surrounding comment density and style; comments explain *why*, not *what*.
@@ -932,8 +932,8 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - [ ] **Step 1: Sync and run the full suite remotely**
 
 ```bash
-rsync -a --delete --exclude .git --exclude node_modules --exclude .nitely ./ jerry@100.96.111.79:/home/jerry/dev/nitely-agent-test/
-ssh jerry@100.96.111.79 'export PATH=$HOME/.nvm/versions/node/v24.17.0/bin:$PATH; cd /home/jerry/dev/nitely-agent-test && pnpm install --frozen-lockfile && pnpm exec vitest run 2>&1 | tail -30'
+rsync -a --delete --exclude .git --exclude node_modules --exclude .nitely ./ <linux-dev-box>:~/dev/nitely-agent-test/
+ssh <linux-dev-box> 'export PATH=$HOME/.nvm/versions/node/v24.17.0/bin:$PATH; cd ~/dev/nitely-agent-test && pnpm install --frozen-lockfile && pnpm exec vitest run 2>&1 | tail -30'
 ```
 
 Expected: 0 failures. A failure in a suite this plan did not touch that mints a token (search `createApiToken(` under `test/`) means Task 1 missed a call site — fix it there.

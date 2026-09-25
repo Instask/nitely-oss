@@ -2804,7 +2804,7 @@ describe("runCli", () => {
     const connectedErr: string[] = [];
     expect(
       await runCli(
-        ["connect", "--server", "http://192.168.50.177:4173/"],
+        ["connect", "--server", "http://192.0.2.10:4173/"],
         {
           stdout: (line) => connectedOut.push(line),
           stderr: (line) => connectedErr.push(line),
@@ -2814,7 +2814,7 @@ describe("runCli", () => {
     ).toBe(0);
     expect(connectedErr).toEqual([]);
     expect(connectedOut).toEqual([
-      "Connected: http://192.168.50.177:4173",
+      "Connected: http://192.0.2.10:4173",
       "API token: configured",
     ]);
     expect(connectedOut.join("\n")).not.toContain("nitely_api_secret");
@@ -2828,7 +2828,7 @@ describe("runCli", () => {
       ),
     ).toBe(0);
     expect(whoamiOut).toEqual([
-      "Connected: http://192.168.50.177:4173",
+      "Connected: http://192.0.2.10:4173",
       "API token: configured",
     ]);
     expect(whoamiOut.join("\n")).not.toContain("nitely_api_secret");

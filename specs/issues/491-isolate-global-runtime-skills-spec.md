@@ -7,8 +7,8 @@ Nitely already hides worktree `AGENTS.md` and `CLAUDE.md` when
 dogfood run still opened every implement attempt with:
 
 ```
-sed -n '1,240p' /home/jerry/.codex/superpowers/skills/using-superpowers/SKILL.md
-sed -n '1,260p' /home/jerry/.codex/plugins/cache/openai-curated/.../SKILL.md
+sed -n '1,240p' ~/.codex/superpowers/skills/using-superpowers/SKILL.md
+sed -n '1,260p' ~/.codex/plugins/cache/openai-curated/.../SKILL.md
 ```
 
 Those are the operator's user-global Codex skill packs. `codex exec --cd

@@ -14,7 +14,7 @@ CLI reachable.
 ## 2. Clone and build
 
 ```bash
-git clone https://github.com/jerryleooo/nitely.git
+git clone https://github.com/Instask/nitely-oss.git nitely
 cd nitely
 pnpm install
 pnpm run build

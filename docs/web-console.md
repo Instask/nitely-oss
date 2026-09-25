@@ -119,10 +119,10 @@ After changing GitHub provider or draft-spec ingestion behavior, smoke the
 configured dev Web path instead of relying only on shell credentials:
 
 ```bash
-/home/jerry/bin/nitely-dev-web-start
+pnpm dev -- web --home ../nitely-runtime --port 4174 &
 NITELY_SERVER_URL=http://127.0.0.1:4174 \
   pnpm dev -- smoke github-issue-intake \
-  --issue https://github.com/Instask/nitely/issues/296
+  --issue https://github.com/<owner>/<repo>/issues/<number>
 ```
 
 Configure the GitHub provider through the Web Console provider settings before

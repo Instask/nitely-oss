@@ -52,7 +52,7 @@ describe("syncStoredWebRepository", () => {
       {
         id: "acme-nitely",
         name: "acme/nitely",
-        path: "/home/jerry/nitely",
+        path: "/srv/acme/nitely",
         sourceUrl: "https://github.com/acme/nitely.git",
         home: true,
       },

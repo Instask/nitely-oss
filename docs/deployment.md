@@ -10,12 +10,17 @@ Use the production deploy helper from a clean local checkout after the target PR
 has merged:
 
 ```bash
-scripts/nitely-prod-web-deploy
+scripts/nitely-prod-web-deploy \
+  --remote deploy@nitely-host \
+  --prod-dir /srv/nitely \
+  --node-bin /opt/node-24/bin \
+  --restart-script /srv/bin/nitely-prod-web-restart
 ```
 
-The helper deploys `origin/master` on `jerry@100.96.111.79` from
-`/home/jerry/nitely`, builds the checkout, and calls
-`/home/jerry/bin/nitely-prod-web-restart`. It prepends the production Node bin
+The helper has no host-specific defaults; keep the values for a particular
+deployment in that deployment's own runbook or wrapper. It deploys
+`origin/master` into `--prod-dir` on `--remote`, builds the checkout, and calls
+`--restart-script`. It prepends the production Node bin
 directory to `PATH` before installing and building. Before pulling, it reports
 dirty tracked and untracked files in the remote production checkout. By default
 it preserves that state with a named stash and prints the stash hash plus the
@@ -26,13 +31,17 @@ Production Web can also be managed by a user-systemd unit while keeping the same
 deploy entrypoint:
 
 ```bash
-scripts/nitely-prod-web-systemd-install
+scripts/nitely-prod-web-systemd-install \
+  --remote deploy@nitely-host \
+  --prod-dir /srv/nitely \
+  --node-bin /opt/node-24/bin \
+  --restart-script /srv/bin/nitely-prod-web-restart
 ```
 
 The installer writes `~/.config/systemd/user/nitely-web.service` on
-`jerry@100.96.111.79`, binds to `127.0.0.1:4173` with required authentication,
+`--remote`, binds to `127.0.0.1:4173` with required authentication,
 and rewrites
-`/home/jerry/bin/nitely-prod-web-restart` as a small
+`--restart-script` as a small
 `systemctl --user restart nitely-web.service` wrapper. After installation,
 `scripts/nitely-prod-web-deploy` still works the same way, but restart is owned
 by systemd instead of manual PID replacement. Use `--print-unit` to inspect the

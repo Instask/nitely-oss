@@ -23,7 +23,7 @@ Add:
 
 ```bash
 nitely task create \
-  --server http://192.168.50.177:4173 \
+  --server http://192.0.2.10:4173 \
   --title "Implement ordered runtime fallback" \
   --issue https://github.com/Instask/nitely/issues/77 \
   --spec specs/issues/077-runtime-fallback-spec.md \
