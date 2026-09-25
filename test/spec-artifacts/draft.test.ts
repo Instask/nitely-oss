@@ -130,11 +130,18 @@ describe("draft spec generation", () => {
       number: 111,
       url: "https://github.com/Instask/nitely/issues/111",
     });
-    expect(parseGitHubIssueReference("42")).toMatchObject({
-      owner: "Instask",
-      repo: "nitely",
+    expect(parseGitHubIssueReference("42", "acme/app")).toMatchObject({
+      owner: "acme",
+      repo: "app",
       number: 42,
+      url: "https://github.com/acme/app/issues/42",
     });
+  });
+
+  it("refuses a bare issue number when no repository is known", () => {
+    expect(() => parseGitHubIssueReference("42")).toThrow(
+      /use the full issue URL/,
+    );
   });
 
   it("fetches GitHub issue metadata and comments", async () => {

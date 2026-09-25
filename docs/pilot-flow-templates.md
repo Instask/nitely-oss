@@ -172,7 +172,7 @@ Failure and retry behavior:
 Example run:
 
 ```bash
-node dist/index.js rework-pr https://github.com/Instask/nitely/pull/182 \
+node dist/index.js rework-pr https://github.com/owner/repo/pull/182 \
   --repo . \
   --flow flows/pilot-pr-review-rework.json \
   --input review-feedback=docs/examples/sample-review-feedback.md \

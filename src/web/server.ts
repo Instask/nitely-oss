@@ -390,6 +390,7 @@ import {
 } from "./notification-delivery.js";
 import {
   addStoredWebRepository,
+  githubRepositorySlug,
   hasLegacyHomeState,
   LEGACY_DEFAULT_REPOSITORY_ID,
   loadWebRepositories,
@@ -8642,7 +8643,10 @@ async function handleApiRequest(
     if (isTicketSourceType(draftInput.sourceType)) {
       try {
         if (draftInput.sourceType === "github-issue") {
-          const reference = parseGitHubIssueReference(draftInput.issue ?? "");
+          const reference = parseGitHubIssueReference(
+            draftInput.issue ?? "",
+            githubRepositorySlug(repository),
+          );
           const issue: GitHubIssueContent = input.githubIssueFetcher
             ? await input.githubIssueFetcher(reference)
             : await defaultGitHubIssueFetcher(reference, {

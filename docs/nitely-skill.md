@@ -19,7 +19,7 @@ scripts/install-nitely-skill
 Without a checkout:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Instask/nitely-oss/master/scripts/install-nitely-skill | bash
+curl -fsSL https://raw.githubusercontent.com/Instask/nitely-oss/main/scripts/install-nitely-skill | bash
 ```
 
 Both install the personal Claude Code skill at

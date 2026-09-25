@@ -1,8 +1,8 @@
 # 当前状态
 
-`master` 上已经实现的行为。产品定义见 [product.zh-CN.md](product.zh-CN.md)。安装和文档地图见 [README](../README.zh-CN.md)。
+`main` 上已经实现的行为。产品定义见 [product.zh-CN.md](product.zh-CN.md)。安装和文档地图见 [README](../README.zh-CN.md)。
 
-`master` 上已经具备：
+`main` 上已经具备：
 
 - JSON flow 加载与校验。
 - Local-file 和 Google Drive 输入 connector。

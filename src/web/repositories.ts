@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 
+import { parseGitHubRemoteUrl } from "../scm/github.js";
 import { WebInputError, WebNotFoundError } from "./errors.js";
 
 export interface WebRepositoryInput {
@@ -628,6 +629,19 @@ export async function addStoredWebRepository(
     repositories: nextStored,
   });
   return repository;
+}
+
+/** `owner/repo` of a repository registered from a GitHub source URL. */
+export function githubRepositorySlug(
+  repository: Pick<WebRepository, "sourceUrl">,
+): string | undefined {
+  if (!repository.sourceUrl) return undefined;
+  try {
+    const { owner, repository: name } = parseGitHubRemoteUrl(repository.sourceUrl);
+    return owner && name ? `${owner}/${name}` : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

@@ -64,7 +64,7 @@ curl -s http://127.0.0.1:<port>/api/readiness
 tail -n 3 <production>/.nitely/web.log
 ```
 
-Production runs `master`; deploy a branch only when the operator says so.
+Production runs `main`; deploy a branch only when the operator says so.
 Service environment changes go in a systemd drop-in
 (`~/.config/systemd/user/<unit>.service.d/*.conf`) followed by
 `systemctl --user daemon-reload` and a restart — later drop-ins override

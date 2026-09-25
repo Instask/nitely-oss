@@ -2806,7 +2806,7 @@
           </select>
         </label>
         <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">GitHub issue URL <span style="font-weight:400;color:var(--faint);">optional</span>
-          <input name="issueUrl" autocomplete="off" placeholder="https://github.com/Instask/nitely/issues/…" style="{{ inputStyle }}">
+          <input name="issueUrl" autocomplete="off" placeholder="https://github.com/owner/repo/issues/…" style="{{ inputStyle }}">
         </label>
         <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">Specification
           <textarea name="spec" placeholder="What should change, and the acceptance criteria…" style="{{ textareaStyle }}"></textarea>
@@ -2846,10 +2846,10 @@
       </div>
       <form ref="{{ newRepoForm }}" style="padding:22px;display:flex;flex-direction:column;gap:16px;overflow-y:auto;">
         <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">GitHub URL
-          <input name="githubUrl" autocomplete="off" placeholder="https://github.com/Instask/nitely" style="{{ inputStyle }}">
+          <input name="githubUrl" autocomplete="off" placeholder="https://github.com/owner/repo" style="{{ inputStyle }}">
         </label>
         <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">Name <span style="font-weight:400;color:var(--faint);">optional</span>
-          <input name="name" autocomplete="off" placeholder="Instask/nitely" style="{{ inputStyle }}">
+          <input name="name" autocomplete="off" placeholder="owner/repo" style="{{ inputStyle }}">
         </label>
         <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">Default branch <span style="font-weight:400;color:var(--faint);">optional</span>
           <input name="defaultBranch" autocomplete="off" placeholder="master" style="{{ inputStyle }}">
