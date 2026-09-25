@@ -8,12 +8,12 @@ Usage: scripts/nitely-prod-web-deploy [options]
 Deploy Nitely production Web on the configured remote host.
 
 Options:
-  --remote HOST          SSH target. Default: jerry@100.96.111.79
-  --prod-dir PATH       Production checkout. Default: /home/jerry/nitely
+  --remote HOST          SSH target. Required.
+  --prod-dir PATH       Production checkout on the remote host. Required.
   --branch NAME         Branch to deploy. Default: master
   --dirty-mode MODE     stash or abort. Default: stash
-  --node-bin PATH       Production Node bin directory. Default: /home/jerry/.nvm/versions/node/v24.17.0/bin
-  --restart-script PATH Restart helper. Default: /home/jerry/bin/nitely-prod-web-restart
+  --node-bin PATH       Production Node bin directory. Default: remote PATH
+  --restart-script PATH Restart helper on the remote host. Required.
   -h, --help            Show this help.
 
 Environment variables with the same names are also supported:
@@ -22,12 +22,12 @@ Environment variables with the same names are also supported:
 USAGE
 }
 
-remote="${NITELY_DEPLOY_REMOTE:-jerry@100.96.111.79}"
-prod_dir="${NITELY_PROD_DIR:-/home/jerry/nitely}"
+remote="${NITELY_DEPLOY_REMOTE:-}"
+prod_dir="${NITELY_PROD_DIR:-}"
 branch="${NITELY_DEPLOY_BRANCH:-master}"
 dirty_mode="${NITELY_DEPLOY_DIRTY_MODE:-stash}"
-node_bin="${NITELY_PROD_NODE_BIN:-/home/jerry/.nvm/versions/node/v24.17.0/bin}"
-restart_script="${NITELY_PROD_RESTART:-/home/jerry/bin/nitely-prod-web-restart}"
+node_bin="${NITELY_PROD_NODE_BIN:-}"
+restart_script="${NITELY_PROD_RESTART:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -74,6 +74,14 @@ case "$dirty_mode" in
     exit 64
     ;;
 esac
+
+for required in remote prod_dir restart_script; do
+  if [[ -z "${!required}" ]]; then
+    printf 'missing --%s; this helper has no host-specific defaults\n\n' "${required//_/-}" >&2
+    usage >&2
+    exit 64
+  fi
+done
 
 ssh "$remote" bash -s -- "$prod_dir" "$branch" "$dirty_mode" "$node_bin" "$restart_script" <<'REMOTE_SCRIPT'
 set -euo pipefail

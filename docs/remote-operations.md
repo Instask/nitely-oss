@@ -46,7 +46,7 @@ Connect the CLI to a running Nitely server once, then later processes on the
 same machine can omit `--server`:
 
 ```bash
-NITELY_API_TOKEN='nitely_api_...' pnpm dev -- connect --server http://192.168.50.177:4173
+NITELY_API_TOKEN='nitely_api_...' pnpm dev -- connect --server http://192.0.2.10:4173
 pnpm dev -- whoami
 ```
 
@@ -76,7 +76,7 @@ List the Flows the connected instance exposes before choosing one:
 
 ```bash
 pnpm dev -- flow list
-pnpm dev -- flow list --server http://192.168.50.177:4173 --json
+pnpm dev -- flow list --server http://192.0.2.10:4173 --json
 ```
 
 `flow list` queries `GET /api/flows` on every invocation, so a Flow added,
@@ -116,7 +116,7 @@ Create a task on a running Nitely server from local markdown files:
 
 ```bash
 pnpm dev -- task create \
-  --server http://192.168.50.177:4173 \
+  --server http://192.0.2.10:4173 \
   --title "Implement ordered runtime fallback" \
   --issue https://github.com/Instask/nitely/issues/77 \
   --spec specs/issues/077-runtime-fallback-spec.md \
@@ -175,7 +175,7 @@ List what the connected instance already holds before watching anything:
 pnpm dev -- task list
 pnpm dev -- run list
 pnpm dev -- run list --status running
-pnpm dev -- run list --server http://192.168.50.177:4173 --json
+pnpm dev -- run list --server http://192.0.2.10:4173 --json
 ```
 
 `task list` queries `GET /api/tasks` and prints the task id, its display status,
@@ -191,8 +191,8 @@ reading the repository named by `--repo`.
 Watch remote progress without keeping the original start request open:
 
 ```bash
-pnpm dev -- run watch <run-id> --server http://192.168.50.177:4173
-pnpm dev -- task watch <task-id> --server http://192.168.50.177:4173
+pnpm dev -- run watch <run-id> --server http://192.0.2.10:4173
+pnpm dev -- task watch <task-id> --server http://192.0.2.10:4173
 ```
 
 Both commands accept `--interval-ms <n>`, or use `NITELY_SERVER_URL` or the
@@ -202,15 +202,15 @@ status/stage/output transition and exit zero only when the run completes.
 Trigger one scheduler cycle on the remote Nitely server:
 
 ```bash
-NITELY_SERVER_URL=http://192.168.50.177:4173 pnpm dev -- scheduler --once
+NITELY_SERVER_URL=http://192.0.2.10:4173 pnpm dev -- scheduler --once
 # or
-pnpm dev -- scheduler --server http://192.168.50.177:4173 --once
+pnpm dev -- scheduler --server http://192.0.2.10:4173 --once
 ```
 
 Run continuous scheduler cycles while the local clock is inside a window:
 
 ```bash
-pnpm dev -- scheduler --server http://192.168.50.177:4173 \
+pnpm dev -- scheduler --server http://192.0.2.10:4173 \
   --window 22:00-06:00 --interval-ms 60000
 ```
 

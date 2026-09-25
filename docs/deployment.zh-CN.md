@@ -7,12 +7,16 @@ server 上的部署目录应始终保持在 `master`。Nitely 生成的分支和
 目标 PR 合并后，从干净的本地 checkout 运行生产部署 helper：
 
 ```bash
-scripts/nitely-prod-web-deploy
+scripts/nitely-prod-web-deploy \
+  --remote deploy@nitely-host \
+  --prod-dir /srv/nitely \
+  --node-bin /opt/node-24/bin \
+  --restart-script /srv/bin/nitely-prod-web-restart
 ```
 
-该 helper 会在 `jerry@100.96.111.79` 上部署 `/home/jerry/nitely` 的
-`origin/master`，构建 checkout，并调用
-`/home/jerry/bin/nitely-prod-web-restart`。安装和构建前，它会把生产 Node bin
+该 helper 没有任何主机相关的默认值，具体部署的取值应放在该部署自己的
+runbook 或 wrapper 中。它会在 `--remote` 上把 `--prod-dir` 更新到
+`origin/master`，构建 checkout，并调用 `--restart-script`。安装和构建前，它会把生产 Node bin
 目录加入 `PATH`。pull 之前，它会报告远端生产 checkout 中 dirty 的 tracked 和
 untracked 文件。默认会用命名 stash 保留这些改动，并在 release summary 中打印
 stash hash 和实际部署的 commit。需要在远端有本地改动时直接中止，可使用
@@ -21,13 +25,17 @@ stash hash 和实际部署的 commit。需要在远端有本地改动时直接�
 生产 Web 也可以交给 user-systemd unit 管理，同时保持同一个部署入口：
 
 ```bash
-scripts/nitely-prod-web-systemd-install
+scripts/nitely-prod-web-systemd-install \
+  --remote deploy@nitely-host \
+  --prod-dir /srv/nitely \
+  --node-bin /opt/node-24/bin \
+  --restart-script /srv/bin/nitely-prod-web-restart
 ```
 
-该 installer 会在 `jerry@100.96.111.79` 写入
+该 installer 会在 `--remote` 上写入
 `~/.config/systemd/user/nitely-web.service`，默认以 required auth 绑定
 `127.0.0.1:4173`，
-并把 `/home/jerry/bin/nitely-prod-web-restart` 改写为
+并把 `--restart-script` 改写为
 `systemctl --user restart nitely-web.service` 的轻量 wrapper。安装后继续运行
 `scripts/nitely-prod-web-deploy` 即可，restart 会由 systemd 管理，而不是手动
 替换 PID。可用 `--print-unit` 在不打开 SSH 的情况下检查 unit 内容；只想安装

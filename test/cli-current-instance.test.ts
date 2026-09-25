@@ -36,7 +36,7 @@ describe("current CLI instance", () => {
   it("writes, reads, and clears a saved instance without echoing the token", async () => {
     const env = await isolatedEnv();
     const path = await writeCurrentInstance(env, {
-      serverUrl: "http://192.168.50.177:4173/",
+      serverUrl: "http://192.0.2.10:4173/",
       apiToken: "nitely_api_secret",
     });
 
@@ -49,12 +49,12 @@ describe("current CLI instance", () => {
     const saved = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
     expect(saved).toEqual({
       version: 1,
-      serverUrl: "http://192.168.50.177:4173",
+      serverUrl: "http://192.0.2.10:4173",
       apiToken: "nitely_api_secret",
     });
 
     await expect(readCurrentInstance(env)).resolves.toEqual({
-      serverUrl: "http://192.168.50.177:4173",
+      serverUrl: "http://192.0.2.10:4173",
       apiToken: "nitely_api_secret",
     });
 

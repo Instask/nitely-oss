@@ -80,10 +80,10 @@ exchange/rotation、hosted multi-process leases 和自动启动 run 仍不在这
 dev Web 路径，而不是只依赖当前 shell 的 credential：
 
 ```bash
-/home/jerry/bin/nitely-dev-web-start
+pnpm dev -- web --home ../nitely-runtime --port 4174 &
 NITELY_SERVER_URL=http://127.0.0.1:4174 \
   pnpm dev -- smoke github-issue-intake \
-  --issue https://github.com/Instask/nitely/issues/296
+  --issue https://github.com/<owner>/<repo>/issues/<number>
 ```
 
 如果 issue 需要仓库访问权限，先通过 Web Console 的 provider 设置配置 GitHub
@@ -167,7 +167,7 @@ production 控制状态，但不包含 credential。
 `--server`：
 
 ```bash
-NITELY_API_TOKEN='nitely_api_...' pnpm dev -- connect --server http://192.168.50.177:4173
+NITELY_API_TOKEN='nitely_api_...' pnpm dev -- connect --server http://192.0.2.10:4173
 pnpm dev -- whoami
 ```
 
@@ -196,7 +196,7 @@ CLI 会在 stderr 打印一个 URL 和一个短码，尝试打开浏览器并开
 
 ```bash
 pnpm dev -- flow list
-pnpm dev -- flow list --server http://192.168.50.177:4173 --json
+pnpm dev -- flow list --server http://192.0.2.10:4173 --json
 ```
 
 `flow list` 每次调用都会请求 `GET /api/flows`，所以实例上新增、改名或删除的
@@ -233,7 +233,7 @@ task，并报告 drift，而不是悄悄替换已批准的 baseline。API token 
 
 ```bash
 pnpm dev -- task create \
-  --server http://192.168.50.177:4173 \
+  --server http://192.0.2.10:4173 \
   --title "Implement ordered runtime fallback" \
   --issue https://github.com/Instask/nitely/issues/77 \
   --spec specs/issues/077-runtime-fallback-spec.md \
@@ -282,7 +282,7 @@ payload。API token 需要 `spec:approve` 才能做两个审批，需要 `tasks:
 pnpm dev -- task list
 pnpm dev -- run list
 pnpm dev -- run list --status running
-pnpm dev -- run list --server http://192.168.50.177:4173 --json
+pnpm dev -- run list --server http://192.0.2.10:4173 --json
 ```
 
 `task list` 调用 `GET /api/tasks`，输出 task id、显示状态和标题；`run list` 调用
@@ -297,15 +297,15 @@ pnpm dev -- run list --server http://192.168.50.177:4173 --json
 也可以从任意本地 repo 触发远端 Nitely scheduler 跑一轮：
 
 ```bash
-NITELY_SERVER_URL=http://192.168.50.177:4173 pnpm dev -- scheduler --once
+NITELY_SERVER_URL=http://192.0.2.10:4173 pnpm dev -- scheduler --once
 # 或
-pnpm dev -- scheduler --server http://192.168.50.177:4173 --once
+pnpm dev -- scheduler --server http://192.0.2.10:4173 --once
 ```
 
 也可以在本地时间处于指定窗口内时连续触发 scheduler：
 
 ```bash
-pnpm dev -- scheduler --server http://192.168.50.177:4173 \
+pnpm dev -- scheduler --server http://192.0.2.10:4173 \
   --window 22:00-06:00 --interval-ms 60000
 ```
 

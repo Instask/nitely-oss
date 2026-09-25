@@ -378,7 +378,7 @@ Add `managed: true,` to the repository objects in `"refreshes a checkout Nitely 
       {
         id: "acme-nitely",
         name: "acme/nitely",
-        path: "/home/jerry/nitely",
+        path: "~/nitely",
         sourceUrl: "https://github.com/acme/nitely.git",
         home: true,
       },
@@ -1420,13 +1420,13 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - [ ] **Step 1: Sync to the Linux dev box**
 
 ```bash
-rsync -a --delete --exclude .git --exclude node_modules --exclude .nitely ./ jerry@100.96.111.79:/home/jerry/dev/nitely-agent-test/
+rsync -a --delete --exclude .git --exclude node_modules --exclude .nitely ./ <linux-dev-box>:~/dev/nitely-agent-test/
 ```
 
 - [ ] **Step 2: Run the merge gate remotely**
 
 ```bash
-ssh jerry@100.96.111.79 'export PATH=$HOME/.nvm/versions/node/v24.17.0/bin:$PATH && cd /home/jerry/dev/nitely-agent-test && pnpm install --frozen-lockfile && pnpm run check && pnpm run test:run 2>&1 | tail -40'
+ssh <linux-dev-box> 'export PATH=$HOME/.nvm/versions/node/v24.17.0/bin:$PATH && cd ~/dev/nitely-agent-test && pnpm install --frozen-lockfile && pnpm run check && pnpm run test:run 2>&1 | tail -40'
 ```
 
 Expected: `check` clean, `test:run` 0 failed. Any failure is a finding for this PR — fix it here; do not label it baseline.

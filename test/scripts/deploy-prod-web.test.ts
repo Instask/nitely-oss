@@ -28,4 +28,17 @@ describe("production deploy helper", () => {
       expect(failure.stderr).toContain("invalid --dirty-mode overwrite");
     }
   });
+
+  it("requires the deployment target instead of assuming a host", async () => {
+    try {
+      await execFileAsync(script, [], {
+        env: { ...process.env, NITELY_DEPLOY_REMOTE: "", NITELY_PROD_DIR: "" },
+      });
+      throw new Error("expected deploy helper to require --remote");
+    } catch (error) {
+      const failure = error as Error & { code?: number; stderr?: string };
+      expect(failure.code).toBe(64);
+      expect(failure.stderr).toContain("missing --remote");
+    }
+  });
 });

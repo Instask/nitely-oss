@@ -8,13 +8,13 @@ Usage: scripts/nitely-prod-web-systemd-install [options]
 Install a user-systemd unit for the Nitely production Web server.
 
 Options:
-  --remote HOST          SSH target. Default: jerry@100.96.111.79
-  --prod-dir PATH       Production checkout. Default: /home/jerry/nitely
+  --remote HOST          SSH target. Required unless --print-unit.
+  --prod-dir PATH       Production checkout on the remote host. Required to install.
   --port NUMBER         Web port. Default: 4173
   --host HOST           Web bind host. Default: 127.0.0.1
   --trusted-proxy       Declare an external trusted TLS reverse-proxy boundary.
-  --node-bin PATH       Production Node bin directory. Default: /home/jerry/.nvm/versions/node/v24.17.0/bin
-  --restart-script PATH Restart helper wrapper. Default: /home/jerry/bin/nitely-prod-web-restart
+  --node-bin PATH       Production Node bin directory. Required to install.
+  --restart-script PATH Restart helper wrapper. Required unless --print-unit.
   --unit-name NAME      User-systemd unit name. Default: nitely-web
   --replace-existing    Back up and replace an existing unit after security review.
   --no-start            Install the unit and wrapper without restarting it.
@@ -28,13 +28,13 @@ Environment variables with the same names are also supported:
 USAGE
 }
 
-remote="${NITELY_DEPLOY_REMOTE:-jerry@100.96.111.79}"
-prod_dir="${NITELY_PROD_DIR:-/home/jerry/nitely}"
+remote="${NITELY_DEPLOY_REMOTE:-}"
+prod_dir="${NITELY_PROD_DIR:-}"
 port="${NITELY_PROD_WEB_PORT:-4173}"
 host="${NITELY_PROD_WEB_HOST:-127.0.0.1}"
 trusted_proxy="${NITELY_PROD_WEB_TRUSTED_PROXY:-no}"
-node_bin="${NITELY_PROD_NODE_BIN:-/home/jerry/.nvm/versions/node/v24.17.0/bin}"
-restart_script="${NITELY_PROD_RESTART:-/home/jerry/bin/nitely-prod-web-restart}"
+node_bin="${NITELY_PROD_NODE_BIN:-}"
+restart_script="${NITELY_PROD_RESTART:-}"
 unit_name="${NITELY_PROD_WEB_UNIT:-nitely-web}"
 start_after_install="yes"
 print_unit="no"
@@ -164,6 +164,20 @@ unit_file="${unit_name}.service"
 if [[ -z "$unit_name" ]]; then
   printf 'invalid --unit-name; expected a non-empty unit name\n' >&2
   exit 64
+fi
+
+if [[ "$print_unit" == "yes" ]]; then
+  # A preview needs no host; show placeholders for paths that were not given.
+  prod_dir="${prod_dir:-<prod-dir>}"
+  node_bin="${node_bin:-<node-bin>}"
+else
+  for required in remote prod_dir node_bin restart_script; do
+    if [[ -z "${!required}" ]]; then
+      printf 'missing --%s; this installer has no host-specific defaults\n\n' "${required//_/-}" >&2
+      usage >&2
+      exit 64
+    fi
+  done
 fi
 
 render_unit() {

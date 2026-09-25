@@ -78,7 +78,7 @@ scripts/install-nitely-skill
 没有 checkout 时：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jerryleooo/nitely/master/scripts/install-nitely-skill | bash
+curl -fsSL https://raw.githubusercontent.com/Instask/nitely-oss/master/scripts/install-nitely-skill | bash
 ```
 
 两者都会把个人 Claude Code skill 安装到
