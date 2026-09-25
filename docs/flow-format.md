@@ -203,7 +203,7 @@ stages.
 
 Skill improvement observations are kept in `.nitely/skill-improvements.db` and require
 operator confirmation. Review them with `skill improvements list`; use `confirm` for a
-papercut, `propose` with pinned #429 eval cases, then `decide` and `evaluate`. Nitely
+papercut, `propose` with pinned eval cases, then `decide` and `evaluate`. Nitely
 never edits or publishes a skill automatically, and a changed source hash blocks application.
 
 Publish and update stages can consume an agent-produced PR title artifact. By

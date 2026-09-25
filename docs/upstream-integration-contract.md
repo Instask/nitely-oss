@@ -1,6 +1,6 @@
 # Upstream Intake And Result Contract
 
-Status: proposed adapter contract for #397. This document defines the payload
+Status: proposed adapter contract. This document defines the payload
 boundary future GitHub, Linear, Jira, or Agent-workforce adapters should use. It
 does **not** claim that Nitely currently exposes a public webhook, callback
 dispatcher, or hosted control plane.

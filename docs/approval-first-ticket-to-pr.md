@@ -5,9 +5,8 @@ wedge. It describes the shipped, local-first workflow that turns a GitHub issue
 or Jira ticket into an evidence-backed draft pull request, keeps human approval
 ahead of implementation, and routes review feedback back into the same change.
 
-The contract closes the product epic tracked in #226. It is intentionally
-narrower than a general software factory: coding agents remain replaceable
-runtimes inside a governed delivery workflow.
+The contract is intentionally narrower than a general software factory: coding
+agents remain replaceable runtimes inside a governed delivery workflow.
 
 ## Acceptance Matrix
 
@@ -21,8 +20,6 @@ runtimes inside a governed delivery workflow.
 - GitHub and Jira status sync are optional, customer-controlled side effects;
   local planning remains authoritative when sync is disabled or unavailable.
 
-Shipped workstreams: #227 and #231.
-
 ### 2. Generate and approve planning artifacts
 
 - Nitely generates a source-grounded specification, then a technical design.
@@ -31,8 +28,6 @@ Shipped workstreams: #227 and #231.
   current, and human-approved.
 - Approval Inbox actions record the actor, action, reason when required, and
   exact task/run/artifact linkage.
-
-Shipped workstreams: #218, #222, #235, #237, #278, #279, and #305.
 
 ### 3. Execute implementation through a draft PR
 
@@ -43,8 +38,6 @@ Shipped workstreams: #218, #222, #235, #237, #278, #279, and #305.
 - A failed or interrupted run remains inspectable and recoverable through
   bounded retry, structured rework, operator questions, and resume.
 
-Shipped workstreams: #223, #224, #228, #233, #238, and #395.
-
 ### 4. Review the pull request
 
 - The draft pull request links back to run evidence and stays a human review
@@ -53,8 +46,6 @@ Shipped workstreams: #223, #224, #228, #233, #238, and #395.
   the exact pull request discussion plus optional team delivery channels.
 - Review, verification, blocker, approval, and publication outcomes remain
   visible from the task and run surfaces.
-
-Shipped workstreams: #6, #152, #160, #235, and #241.
 
 ### 5. Route feedback into same-PR rework
 
@@ -65,8 +56,6 @@ Shipped workstreams: #6, #152, #160, #235, and #241.
 - The original run, feedback, rework route, child run, and updated PR remain
   linked as one reviewable chain.
 
-Shipped workstreams: #15, #22, #171, #172, #229, and #234.
-
 ### 6. Preserve reusable memory and closeout evidence
 
 - Reflection and reviewer feedback can propose repository context knowledge;
@@ -75,8 +64,6 @@ Shipped workstreams: #15, #22, #171, #172, #229, and #234.
   deduplicated GitHub issues.
 - Local evidence supports metadata search, checksummed closeout export, and
   dry-run-first retention cleanup without hosted source-code custody.
-
-Shipped workstreams: #109, #110, #225, #241, and #276.
 
 ## Live And Deterministic Proof Boundaries
 
@@ -93,10 +80,10 @@ The two acceptance paths prove different things and should not be conflated.
   rework checkout, and update-change stage. This path is repeatable in CI and
   fails closed when any proof signal is false.
 
-Run the deterministic proof from the repository root:
+Run the deterministic proof from any directory:
 
 ```sh
-pnpm dev -- smoke golden-path --output /tmp/nitely-golden-path
+nitely smoke golden-path --output /tmp/nitely-golden-path
 ```
 
 The generated `summary.json` must contain:
@@ -201,7 +188,7 @@ Use these checks after changing the product contract or its core lifecycle:
 ```sh
 pnpm vitest run test/docs/approval-first-ticket-to-pr.test.ts
 pnpm vitest run test/demo/golden-path.test.ts
-pnpm dev -- smoke golden-path --output /tmp/nitely-golden-path
+nitely smoke golden-path --output /tmp/nitely-golden-path
 pnpm check
 pnpm build
 ```

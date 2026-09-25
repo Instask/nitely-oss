@@ -1,6 +1,6 @@
 # Open-Core Feature Audit
 
-Status: completed for #176.
+Status: completed.
 
 This audit inventories the implemented Nitely feature surface and classifies
 what should remain open-source core, what belongs in a commercial/team layer, and

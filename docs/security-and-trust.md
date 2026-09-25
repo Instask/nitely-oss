@@ -1,6 +1,6 @@
 # Security and Trust Model
 
-Status: current implementation plus intended future boundary for #98.
+Status: current implementation plus intended future boundary.
 
 Nitely is designed around a local-first trust model:
 

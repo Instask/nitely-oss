@@ -14,7 +14,7 @@ Bootstrap the first global administrator on an empty user store:
 NITELY_ADMIN_EMAIL=admin@example.test \
 NITELY_ADMIN_PASSWORD='replace-with-a-unique-long-passphrase' \
 NITELY_WEB_AUTH=required \
-pnpm dev -- web --home . --host 127.0.0.1 --port 4173
+nitely web --home . --host 127.0.0.1 --port 4173
 ```
 
 The equivalent CLI flag is `--auth required`. After the first user exists, the

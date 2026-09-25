@@ -18,13 +18,18 @@ git clone https://github.com/Instask/nitely-oss.git nitely
 cd nitely
 pnpm install
 pnpm run build
+npm link
 ```
 
 Check it:
 
 ```bash
-node dist/index.js --help
+nitely --help
 ```
+
+`npm link` puts `nitely` on `PATH` (pnpm 11 has no global link). Built-in
+`flows/<name>.json` then resolve from this checkout from any directory, unless
+the target repository has its own copy.
 
 ## 3. Choose an entry point
 
@@ -34,13 +39,8 @@ node dist/index.js --help
 | Built | `node dist/index.js <args>` | Stable local use from the checkout |
 | Global | `nitely <args>` | Driving other repositories from anywhere |
 
-For the global form, either link the package:
-
-```bash
-pnpm link --global   # from the Nitely checkout
-```
-
-or drop a wrapper on `PATH`, which survives rebuilds and pnpm store changes:
+For the global form, `npm link` from step 2 is enough. Where the npm global
+prefix is not writable, drop a wrapper on `PATH` instead:
 
 ```bash
 mkdir -p ~/.local/bin

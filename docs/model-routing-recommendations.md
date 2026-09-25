@@ -2,7 +2,7 @@
 
 Nitely does not change a Flow or route production traffic automatically from model experiments.
 
-Create a `nitely.model-routing-experiment.v1` document that pins the Flow digest, the baseline cohort manifest digest, one stage, a finite candidate matrix, and bounded runs/cost/time/tokens. Each candidate points to an ordinary #429 cohort manifest and its `nitely.eval-report.v1` output. Run:
+Create a `nitely.model-routing-experiment.v1` document that pins the Flow digest, the baseline cohort manifest digest, one stage, a finite candidate matrix, and bounded runs/cost/time/tokens. Each candidate points to an ordinary eval cohort manifest and its `nitely.eval-report.v1` output. Run:
 
 ```sh
 nitely eval recommend routing-experiment.json --repo . 

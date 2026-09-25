@@ -121,7 +121,7 @@ describe("governed production release Flow documentation", () => {
       "Same-PR review rework remains the separate `pilot-pr-review-rework` Flow",
     );
     expect(section).toContain(
-      "node dist/index.js run flows/pilot-issue-to-production.json",
+      "nitely run flows/pilot-issue-to-production.json",
     );
   });
 

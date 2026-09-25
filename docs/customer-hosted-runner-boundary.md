@@ -1,7 +1,6 @@
 # Customer-Hosted Runner Boundary
 
-Status: architecture design for #97 with a minimal local protocol stub for
-#275. The production hosted control plane is still future work; the executable
+Status: architecture design with a minimal local protocol stub. The production hosted control plane is still future work; the executable
 stub exists so paid-pilot protocol behavior can be tested without SaaS.
 
 Nitely's runner model should preserve the security rule from

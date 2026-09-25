@@ -1,6 +1,6 @@
 # Nitely Open-Core Boundary
 
-Status: source of truth for #94.
+Status: source of truth.
 
 Nitely's open-source core should let one engineer inspect, run, verify, recover,
 and trust local spec-to-PR execution. Commercial products should help teams
@@ -145,16 +145,9 @@ That audit is the source of truth for which implemented features are:
 - commercial/team layer;
 - boundary decisions that need careful handling before SaaS work.
 
-## Related Issues
+## Related Documents
 
 Future commercial, SaaS, and control-plane work should reference this boundary.
-Current related issues include:
-
-- #95 Package the first paid pilot offering.
-- #97 Design customer-hosted runners with a cloud coordination boundary.
-- #98 Write the security and trust model for code, secrets, logs, and evidence.
-- #99 Extract SaaS control-plane requirements from paid pilots.
-- #177 Link SaaS and commercial backlog items to the open-core boundary.
-
+The security and trust model is in [security-and-trust.md](security-and-trust.md).
 The customer-hosted runner boundary is described in
 [customer-hosted-runner-boundary.md](customer-hosted-runner-boundary.md).

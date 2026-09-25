@@ -42,11 +42,11 @@ describe("planning intake contract", () => {
 
     for (const readmeFile of [remoteOperations, chineseConsole]) {
       expect(readmeFile).toContain("planning-intake.md");
-      expect(readmeFile).toContain("pnpm dev -- task plan --prompt");
-      expect(readmeFile).toContain("pnpm dev -- task plan --issue");
-      expect(readmeFile).toContain("pnpm dev -- task plan --jira");
+      expect(readmeFile).toContain("nitely task plan --prompt");
+      expect(readmeFile).toContain("nitely task plan --issue");
+      expect(readmeFile).toContain("nitely task plan --jira");
       expect(readmeFile).toContain("--document-url https://example.feishu.cn/docx/ABC123");
-      expect(readmeFile).toContain("pnpm dev -- task draft-tech-design <task-id>");
+      expect(readmeFile).toContain("nitely task draft-tech-design <task-id>");
     }
   });
 });

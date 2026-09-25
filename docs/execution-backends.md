@@ -1,6 +1,6 @@
 # Execution Backends
 
-Where a run executes: the host, a mise toolchain, or an OCI sandbox. Commands are run from the repository root. How to start a run is in [running-flows.md](running-flows.md).
+Where a run executes: the host, a mise toolchain, or an OCI sandbox. Commands use the `nitely` CLI ([install](../README.md#install)) and run in the repository Nitely works on. How to start a run is in [running-flows.md](running-flows.md).
 
 Nitely defaults to the `local` execution backend: each run uses a host git
 worktree and executes command stages and agent CLIs directly on the host.
@@ -9,7 +9,7 @@ For repositories that declare per-project toolchains, Nitely can use a
 lightweight `mise` backend:
 
 ```bash
-NITELY_EXECUTION_BACKEND=mise pnpm dev -- web --home . --host 127.0.0.1 --port 4173
+NITELY_EXECUTION_BACKEND=mise nitely web --home . --host 127.0.0.1 --port 4173
 nitely run flows/implement-spec-bootstrap.json --repo . --backend mise
 ```
 

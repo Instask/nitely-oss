@@ -1,6 +1,6 @@
 # Schedules
 
-Status: first-class time triggers for #623; reliability and operations for #624.
+Status: first-class time triggers, with reliability and operations.
 
 A **Schedule** decides *when work is created*. It never runs anything itself:
 each firing materializes one new Task plus one Factory Queue candidate, and

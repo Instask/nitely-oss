@@ -1,6 +1,6 @@
 # 返工与恢复
 
-已发布的 pull request 如何返工，blocked 或 interrupted 的 run 如何恢复，以及 retry 如何保持有界。命令从仓库根目录运行。
+已发布的 pull request 如何返工，blocked 或 interrupted 的 run 如何恢复，以及 retry 如何保持有界。命令使用 `nitely` CLI（安装见 [README](../README.zh-CN.md#安装)），在 Nitely 要操作的仓库中运行。
 
 ## Rework 已有 PR
 
@@ -8,7 +8,7 @@
 `rework-pr`：
 
 ```bash
-node dist/index.js rework-pr 22 \
+nitely rework-pr 22 \
   --repo . \
   --flow flows/rework-pr-bootstrap.json \
   --input spec=./spec.md \
@@ -29,7 +29,7 @@ stage 把 commit push 回同一个 PR 分支。Rework flow 必须使用 `update-
 webhook server 或 daemon：
 
 ```bash
-node dist/index.js pr-comments 22 \
+nitely pr-comments 22 \
   --repo . \
   --flow flows/rework-pr-bootstrap.json \
   --allow-author trusted-login
@@ -55,7 +55,7 @@ rework run，并向 PR 发布包含新 run id 和 evidence path 的简短 commen
 `resolve-conflicts-bootstrap`：
 
 ```bash
-node dist/index.js rework-pr <pr> \
+nitely rework-pr <pr> \
   --repo . \
   --flow flows/resolve-conflicts-bootstrap.json \
   --input spec=./spec.md \
@@ -84,12 +84,12 @@ Run directory: <absolute-repo-path>/.nitely/runs/<run-id>
 ```
 
 ```bash
-node dist/index.js runs --repo .
-node dist/index.js status <run-id> --repo .
-node dist/index.js diagnose <run-id> --repo .
-node dist/index.js logs <run-id> --repo .
-node dist/index.js logs <run-id> --repo . --stage implement
-node dist/index.js resume <run-id> --repo .
+nitely runs --repo .
+nitely status <run-id> --repo .
+nitely diagnose <run-id> --repo .
+nitely logs <run-id> --repo .
+nitely logs <run-id> --repo . --stage implement
+nitely resume <run-id> --repo .
 ```
 
 如果 `status` 在当前选定的 repo 下找不到 run，错误信息会提示用 `run` 时的
@@ -115,11 +115,11 @@ admission 上再次撞上同一个上限。
 Nitely 会以 `awaiting_operator_answer` 阻塞，而不会记录失败 attempt。查看并回答后再 resume：
 
 ```bash
-node dist/index.js questions <run-id> --repo .
-node dist/index.js answer <run-id> <question-id> --option <option-id> --actor <name> --repo .
+nitely questions <run-id> --repo .
+nitely answer <run-id> <question-id> --option <option-id> --actor <name> --repo .
 # 或提供自由文本：
-node dist/index.js answer <run-id> <question-id> --text "<answer>" --actor <name> --repo .
-node dist/index.js resume <run-id> --repo .
+nitely answer <run-id> <question-id> --text "<answer>" --actor <name> --repo .
+nitely resume <run-id> --repo .
 ```
 
 下一次 attempt 会把问题和回答作为权威 prompt section 注入；两个 event 都会保留在

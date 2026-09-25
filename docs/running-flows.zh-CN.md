@@ -1,11 +1,11 @@
 # 运行 Flow
 
-如何在 Nitely checkout 中校验、运行并配置 Flow。命令从仓库根目录运行。安装见 [README](../README.zh-CN.md)。
+如何校验、运行并配置 Flow。命令使用 `nitely` CLI（安装见 [README](../README.zh-CN.md#安装)），在 Nitely 要操作的仓库中运行。
 
 ## 校验 Flow
 
 ```bash
-node dist/index.js validate flows/implement-spec-bootstrap.json \
+nitely validate flows/implement-spec-bootstrap.json \
   --external-input spec \
   --external-input tech-design
 ```
@@ -13,10 +13,10 @@ node dist/index.js validate flows/implement-spec-bootstrap.json \
 ## 查看 Flow 图
 
 ```bash
-node dist/index.js graph flows/implement-spec-bootstrap.json \
+nitely graph flows/implement-spec-bootstrap.json \
   --external-input spec \
   --external-input tech-design
-node dist/index.js graph flows/implement-spec-bootstrap.json --format mermaid \
+nitely graph flows/implement-spec-bootstrap.json --format mermaid \
   --external-input spec \
   --external-input tech-design
 ```
@@ -30,7 +30,7 @@ DAG 编辑器。Rework 回边不会出现在图里：投影只覆盖静态的 pr
 bootstrap flow 接收一份 spec 和一份 technical design 作为 local-file 输入：
 
 ```bash
-node dist/index.js run flows/implement-spec-bootstrap.json \
+nitely run flows/implement-spec-bootstrap.json \
   --repo . \
   --input spec=./spec.md \
   --input tech-design=./tech-design.md
@@ -59,9 +59,9 @@ nitely run flows/implement-medium.json --repo . \
 使用 `run-stage` 可以查看或重放单个 stage，不会执行 flow 的其他 stage：
 
 ```bash
-node dist/index.js run-stage flows/implement-spec-bootstrap.json review \
+nitely run-stage flows/implement-spec-bootstrap.json review \
   --dry-run
-node dist/index.js run-stage flows/implement-spec-bootstrap.json test \
+nitely run-stage flows/implement-spec-bootstrap.json test \
   --repo . --input-dir .nitely/runs/<run-id>/stages/implement/1
 ```
 
@@ -78,7 +78,7 @@ update、sync 和 approval stage 通过此命令只能 dry-run。
 operator 可以把一次观测到的 GitHub check 失败提交给有界修复循环：
 
 ```bash
-node dist/index.js ci-repair submit ./ci-failure.json \
+nitely ci-repair submit ./ci-failure.json \
   --repo . --flow flows/rework-pr-bootstrap.json \
   --input spec=./spec.md --input tech-design=./tech-design.md
 ```
@@ -93,7 +93,7 @@ node dist/index.js ci-repair submit ./ci-failure.json \
 人工决定可以记录下来，但不会触发 merge 或 deploy：
 
 ```bash
-node dist/index.js ci-repair decide <idempotency-key> \
+nitely ci-repair decide <idempotency-key> \
   --repo . --decision reject --actor leo --reason "需要人工修复"
 ```
 
@@ -113,7 +113,7 @@ node dist/index.js ci-repair decide <idempotency-key> \
 `model`，因此沿用本地 CLI 的默认模型：
 
 ```bash
-node dist/index.js run flows/implement-spec-bootstrap-grok.json \
+nitely run flows/implement-spec-bootstrap-grok.json \
   --repo . \
   --input spec=./spec.md \
   --input tech-design=./tech-design.md
@@ -124,7 +124,7 @@ node dist/index.js run flows/implement-spec-bootstrap-grok.json \
 沿用本地 CLI 的默认模型。spec 与 tech-design 输入可以是任意本地文件：
 
 ```bash
-node dist/index.js run flows/implement-spec-bootstrap-pi.json \
+nitely run flows/implement-spec-bootstrap-pi.json \
   --repo . \
   --input spec=./spec.md \
   --input tech-design=./tech-design.md
@@ -136,7 +136,7 @@ node dist/index.js run flows/implement-spec-bootstrap-pi.json \
 保留 blocking 的 `review` gate 和末尾的 `reflect` stage。
 
 ```bash
-node dist/index.js run flows/implement-spec-bootstrap-claude.json \
+nitely run flows/implement-spec-bootstrap-claude.json \
   --repo . \
   --input spec=./spec.md \
   --input tech-design=./tech-design.md

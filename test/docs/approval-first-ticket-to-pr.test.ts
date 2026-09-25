@@ -35,7 +35,7 @@ describe("approval-first ticket-to-PR product contract", () => {
     expect(contract).toContain("Live-provider path");
     expect(contract).toContain("Deterministic proof path");
     expect(contract).toContain(
-      "pnpm dev -- smoke golden-path --output /tmp/nitely-golden-path",
+      "nitely smoke golden-path --output /tmp/nitely-golden-path",
     );
     const proofExample = contract.match(
       /The generated `summary\.json` must contain:\s+```json\s+([\s\S]*?)\s+```/,

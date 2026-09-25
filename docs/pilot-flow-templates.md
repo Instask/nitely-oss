@@ -73,7 +73,7 @@ Failure and retry behavior:
 Example run:
 
 ```bash
-node dist/index.js run flows/pilot-approved-spec-pr.json \
+nitely run flows/pilot-approved-spec-pr.json \
   --repo . \
   --input spec=./spec.md \
   --input tech-design=./tech-design.md
@@ -124,7 +124,7 @@ Failure and retry behavior:
 Example run:
 
 ```bash
-node dist/index.js run flows/pilot-bug-ticket-fix-pr.json \
+nitely run flows/pilot-bug-ticket-fix-pr.json \
   --repo . \
   --input bug-ticket=docs/examples/sample-bug-ticket.md \
   --input repo-notes=docs/examples/sample-repo-notes.md
@@ -172,7 +172,7 @@ Failure and retry behavior:
 Example run:
 
 ```bash
-node dist/index.js rework-pr https://github.com/owner/repo/pull/182 \
+nitely rework-pr https://github.com/owner/repo/pull/182 \
   --repo . \
   --flow flows/pilot-pr-review-rework.json \
   --input review-feedback=docs/examples/sample-review-feedback.md \
@@ -209,7 +209,7 @@ Stages:
 Example run:
 
 ```bash
-node dist/index.js run flows/security-fix-pr.json \
+nitely run flows/security-fix-pr.json \
   --repo . \
   --input finding=security/finding.md \
   --input repo-notes=docs/examples/sample-repo-notes.md
@@ -383,7 +383,7 @@ permission to repeat side effects.
 Start a run with repository-local input files:
 
 ```bash
-node dist/index.js run flows/pilot-issue-to-production.json \
+nitely run flows/pilot-issue-to-production.json \
   --repo . \
   --input issue=issue.md \
   --input repo-notes=repo-notes.md \
@@ -394,9 +394,9 @@ At each reported approval pause, inspect and resolve the exact approval before
 resuming:
 
 ```bash
-node dist/index.js approvals <run-id> --repo .
-node dist/index.js approve <run-id> <approval-id> \
+nitely approvals <run-id> --repo .
+nitely approve <run-id> <approval-id> \
   --repo . \
   --actor human:release-operator
-node dist/index.js resume <run-id> --repo .
+nitely resume <run-id> --repo .
 ```

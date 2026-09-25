@@ -60,28 +60,27 @@ and Android support boundary.
   `provider: "github-cli"` legacy fallback.
 - Local agent CLI and credentials for each `agent` stage runtime you use. Codex
   uses the local `codex` CLI authentication, Claude requires
-  `ANTHROPIC_API_KEY`, GLM requires one of `NITELY_GLM_API_KEY`, `GLM_API_KEY`,
+  `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`, GLM requires one of `NITELY_GLM_API_KEY`, `GLM_API_KEY`,
   or `ZHIPUAI_API_KEY`, Grok Build uses local `grok login` or `XAI_API_KEY`,
   and Pi uses the local Pi CLI/model configuration.
 
 ## Install
 
+Nitely is not published to a package registry yet; install it from source and
+link the `nitely` command:
+
 ```bash
+git clone https://github.com/Instask/nitely-oss.git nitely
+cd nitely
 pnpm install
 pnpm run build
+npm link
+nitely --help
 ```
 
-Run the CLI from source:
-
-```bash
-pnpm dev -- --help
-```
-
-Run the built CLI:
-
-```bash
-node dist/index.js --help
-```
+`nitely` then works from any directory. Built-in flows such as
+`flows/implement-small.json` resolve from this checkout unless the repository
+you run in has its own copy. After pulling updates, run `pnpm run build` again.
 
 **New here? Start with the [Quickstart](docs/quickstart.md)**: an offline demo of
 the whole loop, then a first real run on your own repository.
@@ -126,9 +125,18 @@ This file is the front door. The operator manual is split by job:
 
 ## Development
 
+Run the CLI from source without building:
+
 ```bash
-pnpm exec vitest run
+pnpm dev -- --help
+```
+
+CI runs these on Linux for every pull request; see [AGENTS.md](AGENTS.md) and
+[CONTRIBUTING.md](CONTRIBUTING.md):
+
+```bash
 pnpm run check
+pnpm run test:run
 pnpm run build
 ```
 
