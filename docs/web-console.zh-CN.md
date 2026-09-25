@@ -1,11 +1,11 @@
 # Web Console
 
-本地 Web Console 显示什么、如何启动，以及针对正在运行的 server 的远程 CLI。命令从仓库根目录运行。
+本地 Web Console 显示什么、如何启动，以及针对正在运行的 server 的远程 CLI。命令使用 `nitely` CLI（安装见 [README](../README.zh-CN.md#安装)），在 Nitely 要操作的仓库中运行。
 
 在仓库 checkout 中启动本地 console：
 
 ```bash
-pnpm dev -- web --home . --host 127.0.0.1 --port 4173
+nitely web --home . --host 127.0.0.1 --port 4173
 ```
 
 ## 截图导览
@@ -59,7 +59,7 @@ NITELY_GITHUB_WEBHOOK_ASSIGNEES='nitely-bot' \
 NITELY_GITHUB_WEBHOOK_MENTIONS='@nitely' \
 NITELY_GITHUB_WEBHOOK_FLOW='flows/implement-spec-bootstrap.json' \
 NITELY_GITHUB_WEBHOOK_REWORK_FLOW='flows/rework-pr-bootstrap.json' \
-pnpm dev -- web --home . --host 127.0.0.1 --port 4173
+nitely web --home . --host 127.0.0.1 --port 4173
 ```
 
 映射右侧的值是 Repos 页面显示的 repository id；home checkout 会根据自己的
@@ -100,7 +100,7 @@ provider。provider 未配置时，该 smoke 会以 skip reason 成功退出；�
 ```bash
 NITELY_ADMIN_EMAIL=admin@example.test \
 NITELY_ADMIN_PASSWORD='replace-me' \
-pnpm dev -- web --home . --host 127.0.0.1 --port 4173 --auth required
+nitely web --home . --host 127.0.0.1 --port 4173 --auth required
 ```
 
 也可以设置 `NITELY_WEB_AUTH=required`。首次启动时，如果
@@ -124,7 +124,7 @@ non-loopback bind 还必须显式声明 TLS reverse-proxy boundary，并启用 s
 NITELY_WEB_AUTH=required \
 NITELY_WEB_TRUSTED_PROXY=true \
 NITELY_WEB_SECURE_COOKIE=true \
-pnpm dev -- web --home . --host 0.0.0.0 --port 4173
+nitely web --home . --host 0.0.0.0 --port 4173
 ```
 
 在 trusted-proxy 模式下若走明文局域网 HTTP（例如 `http://0.0.0.0:4173`），
@@ -167,8 +167,8 @@ production 控制状态，但不包含 credential。
 `--server`：
 
 ```bash
-NITELY_API_TOKEN='nitely_api_...' pnpm dev -- connect --server http://192.0.2.10:4173
-pnpm dev -- whoami
+NITELY_API_TOKEN='nitely_api_...' nitely connect --server http://192.0.2.10:4173
+nitely whoami
 ```
 
 当前实例保存在 `$NITELY_CONFIG_DIR/current-instance.json`，否则
@@ -195,8 +195,8 @@ CLI 会在 stderr 打印一个 URL 和一个短码，尝试打开浏览器并开
 在选择 Flow 之前，可以先列出所连实例上可用的 Flow：
 
 ```bash
-pnpm dev -- flow list
-pnpm dev -- flow list --server http://192.0.2.10:4173 --json
+nitely flow list
+nitely flow list --server http://192.0.2.10:4173 --json
 ```
 
 `flow list` 每次调用都会请求 `GET /api/flows`，所以实例上新增、改名或删除的
@@ -208,14 +208,14 @@ Flow 会立刻反映出来。每行输出 Flow id、来源（`builtin` 或 `user
 design：
 
 ```bash
-pnpm dev -- task plan --prompt "Let operators import repositories from a pasted GitHub URL."
-pnpm dev -- task plan --issue https://github.com/owner/repo/issues/578
-pnpm dev -- task plan --jira PLAT-142
-pnpm dev -- task plan \
+nitely task plan --prompt "Let operators import repositories from a pasted GitHub URL."
+nitely task plan --issue https://github.com/owner/repo/issues/578
+nitely task plan --jira PLAT-142
+nitely task plan \
   --document-url https://example.feishu.cn/docx/ABC123 \
   --document-file ./exported-policy.md \
   --document-version rev-42
-pnpm dev -- task plan --conversation ./intake.json --title "Repository import"
+nitely task plan --conversation ./intake.json --title "Repository import"
 ```
 
 `task plan` POST 到 `POST /api/draft-specs`，即 Web Console **Plan work** 表单使
@@ -232,7 +232,7 @@ task，并报告 drift，而不是悄悄替换已批准的 baseline。API token 
 也可以直接从本地 markdown 文件在远端 Nitely server 上创建 task：
 
 ```bash
-pnpm dev -- task create \
+nitely task create \
   --server http://192.0.2.10:4173 \
   --title "Implement ordered runtime fallback" \
   --issue https://github.com/owner/repo/issues/77 \
@@ -252,10 +252,10 @@ repo。远程命令按 `--server`、`NITELY_SERVER_URL`、已保存实例的顺�
 也可以不打开 Web Console，直接在 CLI 上走完 Task 的规划审批并启动 Run：
 
 ```bash
-pnpm dev -- task approve-spec <task-id>
-pnpm dev -- task draft-tech-design <task-id>
-pnpm dev -- task approve-tech-design <task-id>
-pnpm dev -- task start <task-id>
+nitely task approve-spec <task-id>
+nitely task draft-tech-design <task-id>
+nitely task approve-tech-design <task-id>
+nitely task start <task-id>
 ```
 
 `task approve-spec` 和 `task approve-tech-design` 分别 POST 到
@@ -279,10 +279,10 @@ payload。API token 需要 `spec:approve` 才能做两个审批，需要 `tasks:
 还可以列出所连实例上已有的 Task 和 Run：
 
 ```bash
-pnpm dev -- task list
-pnpm dev -- run list
-pnpm dev -- run list --status running
-pnpm dev -- run list --server http://192.0.2.10:4173 --json
+nitely task list
+nitely run list
+nitely run list --status running
+nitely run list --server http://192.0.2.10:4173 --json
 ```
 
 `task list` 调用 `GET /api/tasks`，输出 task id、显示状态和标题；`run list` 调用
@@ -297,15 +297,15 @@ pnpm dev -- run list --server http://192.0.2.10:4173 --json
 也可以从任意本地 repo 触发远端 Nitely scheduler 跑一轮：
 
 ```bash
-NITELY_SERVER_URL=http://192.0.2.10:4173 pnpm dev -- scheduler --once
+NITELY_SERVER_URL=http://192.0.2.10:4173 nitely scheduler --once
 # 或
-pnpm dev -- scheduler --server http://192.0.2.10:4173 --once
+nitely scheduler --server http://192.0.2.10:4173 --once
 ```
 
 也可以在本地时间处于指定窗口内时连续触发 scheduler：
 
 ```bash
-pnpm dev -- scheduler --server http://192.0.2.10:4173 \
+nitely scheduler --server http://192.0.2.10:4173 \
   --window 22:00-06:00 --interval-ms 60000
 ```
 

@@ -1,11 +1,11 @@
 # Running Flows
 
-How to validate, run, and configure a flow from a Nitely checkout. Commands are run from the repository root. Installation is in the [README](../README.md).
+How to validate, run, and configure a flow. Commands use the `nitely` CLI ([install](../README.md#install)) and run in the repository Nitely works on.
 
 ## Validate A Flow
 
 ```bash
-node dist/index.js validate flows/implement-spec-bootstrap.json \
+nitely validate flows/implement-spec-bootstrap.json \
   --external-input spec \
   --external-input tech-design
 ```
@@ -13,10 +13,10 @@ node dist/index.js validate flows/implement-spec-bootstrap.json \
 ## Inspect A Flow Graph
 
 ```bash
-node dist/index.js graph flows/implement-spec-bootstrap.json \
+nitely graph flows/implement-spec-bootstrap.json \
   --external-input spec \
   --external-input tech-design
-node dist/index.js graph flows/implement-spec-bootstrap.json --format mermaid \
+nitely graph flows/implement-spec-bootstrap.json --format mermaid \
   --external-input spec \
   --external-input tech-design
 ```
@@ -32,7 +32,7 @@ producer/consumer graph.
 The bootstrap flow accepts a specification and a technical design as local-file inputs:
 
 ```bash
-node dist/index.js run flows/implement-spec-bootstrap.json \
+nitely run flows/implement-spec-bootstrap.json \
   --repo . \
   --input spec=./spec.md \
   --input tech-design=./tech-design.md
@@ -66,9 +66,9 @@ Use `run-stage` to inspect or replay one stage without running the rest of a
 flow:
 
 ```bash
-node dist/index.js run-stage flows/implement-spec-bootstrap.json review \
+nitely run-stage flows/implement-spec-bootstrap.json review \
   --dry-run
-node dist/index.js run-stage flows/implement-spec-bootstrap.json test \
+nitely run-stage flows/implement-spec-bootstrap.json test \
   --repo . --input-dir .nitely/runs/<run-id>/stages/implement/1
 ```
 
@@ -87,7 +87,7 @@ command to avoid accidental external side effects.
 Operators can submit one observed GitHub check failure to a bounded repair cycle:
 
 ```bash
-node dist/index.js ci-repair submit ./ci-failure.json \
+nitely ci-repair submit ./ci-failure.json \
   --repo . --flow flows/rework-pr-bootstrap.json \
   --input spec=./spec.md --input tech-design=./tech-design.md
 ```
@@ -103,7 +103,7 @@ persisted local/remote evidence and keeps the two-observation budget.
 Human decisions can be recorded without triggering a merge or deploy:
 
 ```bash
-node dist/index.js ci-repair decide <idempotency-key> \
+nitely ci-repair decide <idempotency-key> \
   --repo . --decision reject --actor leo --reason "Needs manual fix"
 ```
 
@@ -126,7 +126,7 @@ Grok variant. A real run requires the local `grok` CLI (`grok login` or
 authoritative:
 
 ```bash
-node dist/index.js run flows/implement-spec-bootstrap-grok.json \
+nitely run flows/implement-spec-bootstrap-grok.json \
   --repo . \
   --input spec=./spec.md \
   --input tech-design=./tech-design.md
@@ -138,7 +138,7 @@ the Pi CLI); the flow leaves `model` unset so the CLI default remains
 authoritative. Spec and tech-design inputs can be any local files:
 
 ```bash
-node dist/index.js run flows/implement-spec-bootstrap-pi.json \
+nitely run flows/implement-spec-bootstrap-pi.json \
   --repo . \
   --input spec=./spec.md \
   --input tech-design=./tech-design.md
@@ -151,7 +151,7 @@ the Grok and Pi variants, this one mirrors the Codex baseline in full: it keeps
 the blocking `review` gate and the final `reflect` stage.
 
 ```bash
-node dist/index.js run flows/implement-spec-bootstrap-claude.json \
+nitely run flows/implement-spec-bootstrap-claude.json \
   --repo . \
   --input spec=./spec.md \
   --input tech-design=./tech-design.md
@@ -181,7 +181,7 @@ Publish a committed Markdown task artifact into the repository configured as
 the checkout's `origin`:
 
 ```bash
-node dist/index.js tasks-to-issues \
+nitely tasks-to-issues \
   --repo . \
   --tasks specs/example/tasks.md \
   --spec specs/example/spec.md \
@@ -245,8 +245,8 @@ whole run directories, event histories, logs, registered artifacts, and
 Inspect the effective policy before cleanup:
 
 ```bash
-node dist/index.js evidence policy --repo .
-node dist/index.js evidence prune --repo .
+nitely evidence policy --repo .
+nitely evidence prune --repo .
 ```
 
 `evidence prune` is a dry-run unless `--apply` is explicitly present, and active
@@ -255,8 +255,8 @@ status, PR, blocker, date, and artifact metadata, then build a checksummed
 metadata-only closeout package:
 
 ```bash
-node dist/index.js evidence search --repo . --status blocked
-node dist/index.js evidence export --repo . \
+nitely evidence search --repo . --status blocked
+nitely evidence export --repo . \
   --run <run-id> \
   --output ./nitely-closeout
 ```

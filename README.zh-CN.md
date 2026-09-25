@@ -40,28 +40,26 @@ agent runtime 分发、context/redaction、日志、evidence、retry/resume 和 
   `GITHUB_TOKEN`。
 - 可选：只有显式使用 `provider: "github-cli"` legacy fallback 时，才需要已登录的 GitHub CLI (`gh`)。
 - 根据所使用的 `agent` stage runtime 配置本地 CLI 和凭据。Codex 使用本地
-  `codex` CLI 的登录状态；Claude 需要 `ANTHROPIC_API_KEY`；GLM 需要
+  `codex` CLI 的登录状态；Claude 需要 `ANTHROPIC_API_KEY` 或 `CLAUDE_CODE_OAUTH_TOKEN`；GLM 需要
   `NITELY_GLM_API_KEY`、`GLM_API_KEY` 或 `ZHIPUAI_API_KEY` 之一；Grok Build
   使用本地 `grok login` 或 `XAI_API_KEY`；Pi 使用本地 Pi CLI/model 配置。
 
 ## 安装
 
+Nitely 尚未发布到包管理仓库，需要从源码安装并链接 `nitely` 命令：
+
 ```bash
+git clone https://github.com/Instask/nitely-oss.git nitely
+cd nitely
 pnpm install
 pnpm run build
+npm link
+nitely --help
 ```
 
-从源码运行 CLI：
-
-```bash
-pnpm dev -- --help
-```
-
-运行构建后的 CLI：
-
-```bash
-node dist/index.js --help
-```
+之后在任意目录都可以使用 `nitely`。`flows/implement-small.json` 这类内置 flow
+默认从这个 checkout 解析；如果当前仓库自带同名 flow，则优先使用仓库里的。拉取更新后
+需要重新 `pnpm run build`。
 
 **第一次使用？从 [Quickstart](docs/quickstart.md) 开始**：先离线跑一遍完整流程，
 再在自己的仓库上做第一次真实运行（英文）。
@@ -90,7 +88,7 @@ curl -fsSL https://raw.githubusercontent.com/Instask/nitely-oss/main/scripts/ins
 [docs/nitely-skill.md](docs/nitely-skill.md)。
 
 Skill 改进观察记录在 `.nitely/skill-improvements.db` 中，并且必须经过 operator 确认。
-可用 `skill improvements list` 查看，使用 `confirm` 确认 papercut，再用带固定 #429
+可用 `skill improvements list` 查看，使用 `confirm` 确认 papercut，再用带固定
 评测用例的 `propose`，最后通过 `decide` 和 `evaluate` 完成审核。Nitely 不会自动编辑或发布
 skill；源内容 hash 变化时会阻止应用。
 
@@ -111,9 +109,18 @@ skill；源内容 hash 变化时会阻止应用。
 
 ## 开发
 
+不构建、直接从源码运行 CLI：
+
 ```bash
-pnpm exec vitest run
+pnpm dev -- --help
+```
+
+CI 会在 Linux 上对每个 pull request 运行以下命令，见 [AGENTS.md](AGENTS.md) 和
+[CONTRIBUTING.md](CONTRIBUTING.md)：
+
+```bash
 pnpm run check
+pnpm run test:run
 pnpm run build
 ```
 

@@ -1,6 +1,6 @@
 # Rework And Recovery
 
-How a published pull request is reworked, how a blocked or interrupted run resumes, and how retries stay bounded. Commands are run from the repository root.
+How a published pull request is reworked, how a blocked or interrupted run resumes, and how retries stay bounded. Commands use the `nitely` CLI ([install](../README.md#install)) and run in the repository Nitely works on.
 
 ## Rework An Existing PR
 
@@ -8,7 +8,7 @@ Use `rework-pr` when review feedback or a follow-up spec should update an
 existing pull request branch instead of opening a new PR:
 
 ```bash
-node dist/index.js rework-pr 22 \
+nitely rework-pr 22 \
   --repo . \
   --flow flows/rework-pr-bootstrap.json \
   --input spec=./spec.md \
@@ -31,7 +31,7 @@ Use `pr-comments` to scan a PR for explicit `@nitely` commands without running a
 webhook server or daemon:
 
 ```bash
-node dist/index.js pr-comments 22 \
+nitely pr-comments 22 \
   --repo . \
   --flow flows/rework-pr-bootstrap.json \
   --allow-author trusted-login
@@ -58,7 +58,7 @@ Use `resolve-conflicts-bootstrap` when an existing same-repository PR branch is
 stale or conflicts with its base branch:
 
 ```bash
-node dist/index.js rework-pr <pr> \
+nitely rework-pr <pr> \
   --repo . \
   --flow flows/resolve-conflicts-bootstrap.json \
   --input spec=./spec.md \
@@ -89,12 +89,12 @@ Run directory: <absolute-repo-path>/.nitely/runs/<run-id>
 ```
 
 ```bash
-node dist/index.js runs --repo .
-node dist/index.js status <run-id> --repo .
-node dist/index.js diagnose <run-id> --repo .
-node dist/index.js logs <run-id> --repo .
-node dist/index.js logs <run-id> --repo . --stage implement
-node dist/index.js resume <run-id> --repo .
+nitely runs --repo .
+nitely status <run-id> --repo .
+nitely diagnose <run-id> --repo .
+nitely logs <run-id> --repo .
+nitely logs <run-id> --repo . --stage implement
+nitely resume <run-id> --repo .
 ```
 
 If `status` cannot find a run under the selected repo, the error mentions
@@ -125,11 +125,11 @@ validated `question.json`. Nitely blocks with `awaiting_operator_answer`
 without recording a failed attempt. Inspect and answer it, then resume:
 
 ```bash
-node dist/index.js questions <run-id> --repo .
-node dist/index.js answer <run-id> <question-id> --option <option-id> --actor <name> --repo .
+nitely questions <run-id> --repo .
+nitely answer <run-id> <question-id> --option <option-id> --actor <name> --repo .
 # Or provide a free-text alternative:
-node dist/index.js answer <run-id> <question-id> --text "<answer>" --actor <name> --repo .
-node dist/index.js resume <run-id> --repo .
+nitely answer <run-id> <question-id> --text "<answer>" --actor <name> --repo .
+nitely resume <run-id> --repo .
 ```
 
 The next attempt receives the question and answer as an authoritative prompt
@@ -157,12 +157,12 @@ For a blocked **review gate** only, a qualified human reviewer may instead
 attach a manual verdict to the exact artifacts declared by that gate:
 
 ```bash
-node dist/index.js review-verdict <run-id> \
+nitely review-verdict <run-id> \
   --file review.md \
   --actor reviewer@example.com \
   --reviewed-artifact implementation \
   --repo .
-node dist/index.js resume <run-id> --repo .
+nitely resume <run-id> --repo .
 ```
 
 The review file must contain the normal review signal, such as

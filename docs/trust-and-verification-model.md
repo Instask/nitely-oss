@@ -1,6 +1,6 @@
 # Nitely Trust and Verification Model
 
-Status: canonical product and architecture doctrine for #588.
+Status: canonical product and architecture doctrine.
 
 Nitely is a **trust and verification layer for AI-generated software changes**.
 Its initial wedge is governed spec-to-PR execution: turning approved
@@ -165,11 +165,13 @@ This model sharpens existing work; it does not replace it:
   artifact, command, gate, and timeline evidence.
 - [Security and Trust Model](security-and-trust.md) defines local execution,
   secret, redaction, and future control-plane boundaries.
-- #467, #471, #570, and #572 cover structured review, independent
-  perspectives, Judge stages, and risk-based policy.
-- #587 evaluates whether reviewers actually detect defects and control false
-  positives; reviewer trust must be earned through that evidence.
-- #429 supplies replayable eval cohorts and provenance for comparison.
+- [Multi-perspective review](multi-perspective-review.md) and
+  [risk-based review policy](risk-based-review-policy.md) cover structured
+  review, independent perspectives, Judge stages, and risk-based policy.
+- [Reviewer effectiveness evals](reviewer-effectiveness-evals.md) measure
+  whether reviewers actually detect defects and control false positives;
+  reviewer trust must be earned through that evidence.
+- Replayable eval cohorts supply provenance for comparison.
 
 Nitely should remain a narrow, local-first delivery and verification layer. It
 may integrate with GitHub, Jira, Linear, or an Agent-workforce intake system,

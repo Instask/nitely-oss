@@ -10,7 +10,7 @@ evidence-backed efficiency findings.
 | Symptom | Cause and fix |
 | --- | --- |
 | `Unsupported engine` / syntax errors on startup | Node older than 24. `nvm use` inside the checkout (`.nvmrc`), then re-run |
-| `nitely: command not found` | Not linked. Use `node dist/index.js`, `pnpm dev --`, or add the wrapper from `install.md` |
+| `nitely: command not found` | Not linked. Run `npm link` in the Nitely checkout, add the wrapper from `install.md`, or call `node dist/index.js` there |
 | `Cannot find module .../dist/index.js` | Never built, or built output is stale after a pull. `pnpm install && pnpm run build` |
 | A flag the docs mention is rejected | The checkout predates it. `git pull`, rebuild, then check `nitely --help` |
 

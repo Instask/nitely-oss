@@ -11,7 +11,7 @@ Start Nitely on a loopback address from the repository whose runtime state it
 should operate:
 
 ```bash
-pnpm dev -- web --home . --host 127.0.0.1 --port 4173
+nitely web --home . --host 127.0.0.1 --port 4173
 ```
 
 The MCP subprocess connects to this server. It does not start a second Web
@@ -32,7 +32,7 @@ once (see the [Web Console bootstrap](web-console.md)):
 ```bash
 NITELY_ADMIN_EMAIL=admin@example.test \
 NITELY_ADMIN_PASSWORD='replace-with-a-unique-long-passphrase' \
-  pnpm dev -- web --home . --host 127.0.0.1 --port 4173
+  nitely web --home . --host 127.0.0.1 --port 4173
 # stop the server once the admin is created (Ctrl-C), then mint the token
 # against that account's email with --owner below.
 ```
@@ -40,7 +40,7 @@ NITELY_ADMIN_PASSWORD='replace-with-a-unique-long-passphrase' \
 Create a token with only the capabilities needed by the client:
 
 ```bash
-pnpm dev -- mcp token create \
+nitely mcp token create \
   --repo . \
   --name "Claude Code" \
   --owner <email> \
@@ -80,8 +80,8 @@ other JSON endpoints.
 List or revoke tokens without exposing their secret values:
 
 ```bash
-pnpm dev -- mcp token list --repo .
-pnpm dev -- mcp token revoke <token-id> --repo .
+nitely mcp token list --repo .
+nitely mcp token revoke <token-id> --repo .
 ```
 
 ## Configure An MCP Client

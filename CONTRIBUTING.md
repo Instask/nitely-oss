@@ -12,18 +12,22 @@ Requirements:
 - pnpm 11.
 - Git.
 
-Install and verify:
+Install and verify with the same commands CI runs:
 
 ```bash
 pnpm install
 pnpm run check
+pnpm run test:run
 pnpm run build
-pnpm test -- --run
 ```
 
-If `pnpm` is unavailable in a local environment, `npm install --package-lock=false`
-can be used for temporary validation, but package lock changes should not be
-committed unless the project intentionally switches package managers.
+Run the suite on Linux before asking for review. Part of it asserts Linux
+descriptor-relative path handling and cannot pass on macOS; a macOS run that
+stops there has not verified the change. [AGENTS.md](AGENTS.md) has the full
+verification boundary.
+
+Use pnpm (the version is pinned in `package.json`); do not commit other
+package managers' lockfiles.
 
 ## Pull Requests
 

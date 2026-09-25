@@ -56,7 +56,7 @@ review output, and implementation summary.
 ## Example
 
 ```bash
-node dist/index.js run flows/security-fix-pr.json \
+nitely run flows/security-fix-pr.json \
   --repo . \
   --input finding=security/finding.md \
   --input repo-notes=docs/examples/sample-repo-notes.md

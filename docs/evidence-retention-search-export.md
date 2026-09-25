@@ -52,8 +52,8 @@ effectively capped by whole-run removal.
 Inspect and validate the configured and effective policy:
 
 ```bash
-node dist/index.js evidence policy --repo .
-node dist/index.js evidence policy --repo . --json
+nitely evidence policy --repo .
+nitely evidence policy --repo . --json
 ```
 
 Invalid JSON, unknown fields, unsupported versions, negative/fractional days,
@@ -66,13 +66,13 @@ Search reads the local event projection and artifact registries on demand. It
 does not create a hosted index or upload content.
 
 ```bash
-node dist/index.js evidence search --repo . --status blocked
-node dist/index.js evidence search --repo . \
+nitely evidence search --repo . --status blocked
+nitely evidence search --repo . \
   --repository payments \
   --flow release \
   --from 2026-07-01T00:00:00Z \
   --to 2026-07-07T23:59:59Z
-node dist/index.js evidence search --repo . --artifact closeout --json
+nitely evidence search --repo . --artifact closeout --json
 ```
 
 Available filters are `--run`, `--task`, `--repository`, `--flow`, `--status`,
@@ -92,7 +92,7 @@ format. Use the export command for that boundary.
 Select one or more exact run ids and a new output directory:
 
 ```bash
-node dist/index.js evidence export --repo . \
+nitely evidence export --repo . \
   --run run-01 \
   --run run-02 \
   --output ./nitely-closeout-2026-w28
@@ -132,7 +132,7 @@ before sharing it outside the intended audience.
 Raw material is opt-in:
 
 ```bash
-node dist/index.js evidence export --repo . \
+nitely evidence export --repo . \
   --run run-01 \
   --output ./nitely-closeout-raw \
   --include-raw
@@ -155,8 +155,8 @@ location are approved for that content.
 The prune command is always a dry-run unless `--apply` is present:
 
 ```bash
-node dist/index.js evidence prune --repo .
-node dist/index.js evidence prune --repo . --json
+nitely evidence prune --repo .
+nitely evidence prune --repo . --json
 ```
 
 The plan lists the run, category, target count, and cutoff. Only terminal
@@ -168,7 +168,7 @@ separate action and is deleted only as a complete run history.
 After reviewing the plan, apply the same policy:
 
 ```bash
-node dist/index.js evidence prune --repo . --apply
+nitely evidence prune --repo . --apply
 ```
 
 `--at <ISO timestamp>` pins the evaluation time for an auditable/reproducible

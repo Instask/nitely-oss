@@ -1,6 +1,6 @@
 # Provider Connections
 
-Status: connection model for #621 and #635; Web connect flows for #622.
+Status: connection model and Web connect flows.
 
 A **Provider** is something Nitely authenticates to (GitHub, Anthropic, Google
 Drive, …). A **Provider Connection** is one credential for that provider,

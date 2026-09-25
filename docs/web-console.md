@@ -5,7 +5,7 @@ The local Web Console: what it shows, and how to start it. Remote CLI commands a
 Start the local console from a repository checkout:
 
 ```bash
-pnpm dev -- web --home . --host 127.0.0.1 --port 4173
+nitely web --home . --host 127.0.0.1 --port 4173
 ```
 
 The console centers on **Tasks** as the user-facing unit of work. `/tasks`
@@ -67,7 +67,7 @@ NITELY_GITHUB_WEBHOOK_ASSIGNEES='nitely-bot' \
 NITELY_GITHUB_WEBHOOK_MENTIONS='@nitely' \
 NITELY_GITHUB_WEBHOOK_FLOW='flows/implement-spec-bootstrap.json' \
 NITELY_GITHUB_WEBHOOK_REWORK_FLOW='flows/rework-pr-bootstrap.json' \
-pnpm dev -- web --home . --host 127.0.0.1 --port 4173
+nitely web --home . --host 127.0.0.1 --port 4173
 ```
 
 The right-hand side of each mapping is the repository id shown on the Repos
@@ -82,7 +82,7 @@ NITELY_GITHUB_APP_ID='12345' \
 NITELY_GITHUB_APP_PRIVATE_KEY_BASE64='base64-encoded-pem' \
 NITELY_GITHUB_WEBHOOK_STATUS_BASE_URL='https://nitely.example' \
 NITELY_GITHUB_WEBHOOK_CHECK_NAME='Nitely' \
-pnpm dev -- web --home . --host 127.0.0.1 --port 4173
+nitely web --home . --host 127.0.0.1 --port 4173
 ```
 
 The secret, repository mapping, actor allowlist, and Flow are required.
@@ -165,7 +165,7 @@ For a shared console, require login:
 ```bash
 NITELY_ADMIN_EMAIL=admin@example.test \
 NITELY_ADMIN_PASSWORD='replace-with-a-unique-long-passphrase' \
-pnpm dev -- web --home . --host 127.0.0.1 --port 4173 --auth required
+nitely web --home . --host 127.0.0.1 --port 4173 --auth required
 ```
 
 `NITELY_WEB_AUTH=required` is also supported. On first start, if
@@ -200,7 +200,7 @@ hatch for LAN HTTP dogfood:
 NITELY_WEB_AUTH=required \
 NITELY_WEB_TRUSTED_PROXY=true \
 NITELY_WEB_SECURE_COOKIE=true \
-pnpm dev -- web --home . --host 0.0.0.0 --port 4173
+nitely web --home . --host 0.0.0.0 --port 4173
 ```
 
 For trusted-proxy production Web over plain LAN HTTP (for example

@@ -8,7 +8,7 @@ work is complete.
 Use the built-in flow:
 
 ```bash
-node dist/index.js run flows/converge-feature-artifacts.json \
+nitely run flows/converge-feature-artifacts.json \
   --repo . \
   --input spec=specs/feature.md \
   --input plan=docs/plans/feature.md \

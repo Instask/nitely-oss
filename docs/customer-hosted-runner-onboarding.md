@@ -1,6 +1,6 @@
 # Customer-Hosted Runner Onboarding
 
-Status: paid-pilot onboarding package for #232. This document is for pilots that
+Status: paid-pilot onboarding package. This document is for pilots that
 run Nitely in the customer's environment. The future runner/control-plane design
 remains separate in [customer-hosted-runner-boundary.md](customer-hosted-runner-boundary.md).
 
@@ -12,7 +12,7 @@ agent runtimes, verification commands, and local evidence boundaries.
 From the customer repository checkout, run:
 
 ```bash
-pnpm dev -- pilot setup-report \
+nitely pilot setup-report \
   --repo . \
   --flow flows/pilot-approved-spec-pr.json \
   --runtime codex \
@@ -23,7 +23,7 @@ pnpm dev -- pilot setup-report \
 For pilots that use multiple agent runtimes, repeat `--runtime`:
 
 ```bash
-pnpm dev -- pilot setup-report \
+nitely pilot setup-report \
   --repo . \
   --flow flows/pilot-pr-review-rework.json \
   --runtime codex \

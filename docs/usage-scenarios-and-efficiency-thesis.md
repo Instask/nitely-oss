@@ -1,6 +1,6 @@
 # Usage Scenarios And Efficiency Thesis
 
-Status: product thesis and demo script package for #220.
+Status: product thesis and demo script package.
 
 Nitely's value is not "AI writes code." The stronger promise is:
 

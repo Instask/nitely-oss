@@ -13,10 +13,13 @@ git clone https://github.com/Instask/nitely-oss.git nitely
 cd nitely
 pnpm install
 pnpm run build
+npm link
+nitely --help
 ```
 
-The CLI is `node dist/index.js` (or `pnpm dev --` to run from source). The
-examples below use `node dist/index.js`.
+`npm link` puts `nitely` on your `PATH`; the rest of this guide runs it from
+anywhere. Built-in flows (`flows/<name>.json`) resolve from this checkout unless
+the repository you run in has its own copy.
 
 ## 1. Watch the whole loop offline
 
@@ -25,7 +28,7 @@ evidence writer against a fixture repository, with the coding agent and GitHub
 mocked:
 
 ```bash
-node dist/index.js smoke golden-path --output /tmp/nitely-golden-path
+nitely smoke golden-path --output /tmp/nitely-golden-path
 ```
 
 It plans a task, approves it, implements it in an isolated worktree, verifies and
@@ -46,9 +49,9 @@ held. The evidence file is what a reviewer reads next to a real PR. See
 A Flow is a declared sequence of stages. Validate one and print its stage graph:
 
 ```bash
-node dist/index.js validate flows/implement-spec-bootstrap-claude.json \
+nitely validate flows/implement-spec-bootstrap-claude.json \
   --external-input spec --external-input tech-design
-node dist/index.js graph flows/implement-spec-bootstrap-claude.json \
+nitely graph flows/implement-spec-bootstrap-claude.json \
   --external-input spec --external-input tech-design
 ```
 
@@ -60,20 +63,24 @@ starting points; [flow-format.md](flow-format.md) describes the schema.
 
 A real run needs:
 
-- a Git repository whose `origin` is on GitHub, with a clean working tree;
+- a Git repository whose `origin` is on GitHub (runs start from its latest
+  default branch, not from your working tree);
 - `NITELY_GITHUB_TOKEN` (or `GITHUB_TOKEN`) that can push branches and open
   draft PRs there;
 - the agent CLI the flow uses. The flow above uses Claude Code with
-  `ANTHROPIC_API_KEY`; `flows/implement-spec-bootstrap.json` uses the Codex CLI.
+  `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`; `flows/implement-spec-bootstrap.json` uses the Codex CLI.
 
 The built-in flows verify with Nitely's own commands
-(`pnpm exec vitest run && pnpm run check && pnpm run build`). Copy the flow and
-point its `test` stage at your repository's checks:
+(`pnpm exec vitest run && pnpm run check && pnpm run build`). Copy the flow into
+your repository, where it takes precedence over the built-in one, and point its
+`test` stage at your repository's checks:
 
 ```bash
-cp flows/implement-spec-bootstrap-claude.json /tmp/my-flow.json
+cd /path/to/your/repo
+mkdir -p flows
+cp /path/to/nitely/flows/implement-spec-bootstrap-claude.json flows/
 # edit the "command" of the stage with "id": "test", e.g. "npm test" or "make check"
-node dist/index.js validate /tmp/my-flow.json \
+nitely validate flows/implement-spec-bootstrap-claude.json \
   --external-input spec --external-input tech-design
 ```
 
@@ -82,13 +89,13 @@ and [templates/nitely-technical-plan.md](templates/nitely-technical-plan.md), an
 keep the first change small: one behavior, one test.
 
 ```bash
-node dist/index.js run /tmp/my-flow.json \
-  --repo /path/to/your/repo \
-  --input spec=/path/to/spec.md \
-  --input tech-design=/path/to/tech-design.md
+nitely run flows/implement-spec-bootstrap-claude.json \
+  --repo . \
+  --input spec=./spec.md \
+  --input tech-design=./tech-design.md
 ```
 
-Nitely creates a branch and worktree under `/path/to/your/repo/.nitely/runs/<run-id>/`,
+Nitely creates a branch and worktree under `.nitely/runs/<run-id>/`,
 leaves your checkout untouched, and ends with a draft PR whose description is
 the run's evidence. If a stage fails or needs a decision, the run stops as
 failed or blocked instead of guessing; [rework-and-recovery.md](rework-and-recovery.md)
@@ -97,7 +104,7 @@ covers resume, retry, and rework.
 ## 4. Use the Web Console
 
 ```bash
-node dist/index.js web --home /path/to/your/repo --host 127.0.0.1 --port 4173
+nitely web --home . --host 127.0.0.1 --port 4173
 ```
 
 Open <http://127.0.0.1:4173>. Tasks are where planned work, approvals, runs,

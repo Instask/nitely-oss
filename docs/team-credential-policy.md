@@ -1,6 +1,6 @@
 # Team Credential Policy
 
-Status: provider credential policy package for #274.
+Status: provider credential policy package.
 
 Nitely's local-first trust model must still answer team questions: who owns a
 provider credential, which repositories it can touch, how it is rotated, and

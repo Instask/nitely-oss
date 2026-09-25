@@ -1,6 +1,6 @@
 # 执行后端
 
-一次 run 在哪里执行：宿主机、mise toolchain，或 OCI sandbox。命令从仓库根目录运行。如何启动 run 见 [running-flows.zh-CN.md](running-flows.zh-CN.md)。
+一次 run 在哪里执行：宿主机、mise toolchain，或 OCI sandbox。命令使用 `nitely` CLI（安装见 [README](../README.zh-CN.md#安装)），在 Nitely 要操作的仓库中运行。如何启动 run 见 [running-flows.zh-CN.md](running-flows.zh-CN.md)。
 
 Nitely 默认使用 `local` execution backend：每次 run 创建宿主机 git worktree，
 command stage 和 agent CLI 都直接在宿主机执行。
@@ -8,7 +8,7 @@ command stage 和 agent CLI 都直接在宿主机执行。
 如果目标 repo 声明了项目级 toolchain，可以启用轻量 `mise` backend：
 
 ```bash
-NITELY_EXECUTION_BACKEND=mise pnpm dev -- web --home . --host 127.0.0.1 --port 4173
+NITELY_EXECUTION_BACKEND=mise nitely web --home . --host 127.0.0.1 --port 4173
 nitely run flows/implement-spec-bootstrap.json --repo . --backend mise
 ```
 

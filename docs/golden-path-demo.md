@@ -17,10 +17,10 @@ spec-to-PR claim without relying on a live coding-agent or SCM provider:
    verification/review, draft PR publication, durable evidence, and controlled
    same-PR rework are all proven.
 
-Run it from the repository root:
+Run it from any directory:
 
 ```sh
-pnpm dev -- smoke golden-path --output /tmp/nitely-golden-path
+nitely smoke golden-path --output /tmp/nitely-golden-path
 ```
 
 The command recreates the output directory and writes:

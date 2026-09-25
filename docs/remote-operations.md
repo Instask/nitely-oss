@@ -1,6 +1,6 @@
 # Remote Operations
 
-CLI commands against a running Nitely Web server: connect, list flows, plan a task, approve, start, and watch. Commands are run from the repository root. The stdio MCP server, capability table, and audit files are in [local-mcp.md](local-mcp.md). Console screens are in [web-console.md](web-console.md).
+CLI commands against a running Nitely Web server: connect, list flows, plan a task, approve, start, and watch. Commands use the `nitely` CLI ([install](../README.md#install)) and run in the repository Nitely works on. The stdio MCP server, capability table, and audit files are in [local-mcp.md](local-mcp.md). Console screens are in [web-console.md](web-console.md).
 
 External coding tools can drive the task-to-run slice without shelling out for
 each action. Create a least-privilege token, keep its one-time value in the
@@ -14,12 +14,12 @@ account's email:
 ```bash
 NITELY_ADMIN_EMAIL=admin@example.test \
 NITELY_ADMIN_PASSWORD='replace-with-a-unique-long-passphrase' \
-  pnpm dev -- web --home . --host 127.0.0.1 --port 4173
+  nitely web --home . --host 127.0.0.1 --port 4173
 # stop the server once the admin is created (Ctrl-C), then:
 ```
 
 ```bash
-pnpm dev -- mcp token create \
+nitely mcp token create \
   --repo . \
   --name "Claude Code" \
   --owner <email> \
@@ -27,7 +27,7 @@ pnpm dev -- mcp token create \
   --capability runs:read
 
 NITELY_API_TOKEN='one-time-token-value' \
-  pnpm dev -- mcp serve --server http://127.0.0.1:4173
+  nitely mcp serve --server http://127.0.0.1:4173
 ```
 
 `--owner` names the user the token acts as; the token resolves provider
@@ -46,8 +46,8 @@ Connect the CLI to a running Nitely server once, then later processes on the
 same machine can omit `--server`:
 
 ```bash
-NITELY_API_TOKEN='nitely_api_...' pnpm dev -- connect --server http://192.0.2.10:4173
-pnpm dev -- whoami
+NITELY_API_TOKEN='nitely_api_...' nitely connect --server http://192.0.2.10:4173
+nitely whoami
 ```
 
 The saved instance lives in `$NITELY_CONFIG_DIR/current-instance.json`, else
@@ -75,8 +75,8 @@ See [docs/local-mcp.md](local-mcp.md) for the `--auth local` alternative.
 List the Flows the connected instance exposes before choosing one:
 
 ```bash
-pnpm dev -- flow list
-pnpm dev -- flow list --server http://192.0.2.10:4173 --json
+nitely flow list
+nitely flow list --server http://192.0.2.10:4173 --json
 ```
 
 `flow list` queries `GET /api/flows` on every invocation, so a Flow added,
@@ -90,14 +90,14 @@ design first. The intake contract is
 [planning-intake.md](planning-intake.md):
 
 ```bash
-pnpm dev -- task plan --prompt "Let operators import repositories from a pasted GitHub URL."
-pnpm dev -- task plan --issue https://github.com/owner/repo/issues/578
-pnpm dev -- task plan --jira PLAT-142
-pnpm dev -- task plan \
+nitely task plan --prompt "Let operators import repositories from a pasted GitHub URL."
+nitely task plan --issue https://github.com/owner/repo/issues/578
+nitely task plan --jira PLAT-142
+nitely task plan \
   --document-url https://example.feishu.cn/docx/ABC123 \
   --document-file ./exported-policy.md \
   --document-version rev-42
-pnpm dev -- task plan --conversation ./intake.json --title "Repository import"
+nitely task plan --conversation ./intake.json --title "Repository import"
 ```
 
 `task plan` posts to `POST /api/draft-specs`, the same endpoint the Web Console
@@ -115,7 +115,7 @@ of silently replacing the approved baseline. An API token needs `tasks:write`.
 Create a task on a running Nitely server from local markdown files:
 
 ```bash
-pnpm dev -- task create \
+nitely task create \
   --server http://192.0.2.10:4173 \
   --title "Implement ordered runtime fallback" \
   --issue https://github.com/owner/repo/issues/77 \
@@ -138,10 +138,10 @@ Carry that Task through its planning gates and start its Run without the Web
 Console:
 
 ```bash
-pnpm dev -- task approve-spec <task-id>
-pnpm dev -- task draft-tech-design <task-id>
-pnpm dev -- task approve-tech-design <task-id>
-pnpm dev -- task start <task-id>
+nitely task approve-spec <task-id>
+nitely task draft-tech-design <task-id>
+nitely task approve-tech-design <task-id>
+nitely task start <task-id>
 ```
 
 `task approve-spec` and `task approve-tech-design` POST to
@@ -172,10 +172,10 @@ persisted, instead of waiting for every stage to complete. The response contains
 List what the connected instance already holds before watching anything:
 
 ```bash
-pnpm dev -- task list
-pnpm dev -- run list
-pnpm dev -- run list --status running
-pnpm dev -- run list --server http://192.0.2.10:4173 --json
+nitely task list
+nitely run list
+nitely run list --status running
+nitely run list --server http://192.0.2.10:4173 --json
 ```
 
 `task list` queries `GET /api/tasks` and prints the task id, its display status,
@@ -191,8 +191,8 @@ reading the repository named by `--repo`.
 Watch remote progress without keeping the original start request open:
 
 ```bash
-pnpm dev -- run watch <run-id> --server http://192.0.2.10:4173
-pnpm dev -- task watch <task-id> --server http://192.0.2.10:4173
+nitely run watch <run-id> --server http://192.0.2.10:4173
+nitely task watch <task-id> --server http://192.0.2.10:4173
 ```
 
 Both commands accept `--interval-ms <n>`, or use `NITELY_SERVER_URL` or the
@@ -202,15 +202,15 @@ status/stage/output transition and exit zero only when the run completes.
 Trigger one scheduler cycle on the remote Nitely server:
 
 ```bash
-NITELY_SERVER_URL=http://192.0.2.10:4173 pnpm dev -- scheduler --once
+NITELY_SERVER_URL=http://192.0.2.10:4173 nitely scheduler --once
 # or
-pnpm dev -- scheduler --server http://192.0.2.10:4173 --once
+nitely scheduler --server http://192.0.2.10:4173 --once
 ```
 
 Run continuous scheduler cycles while the local clock is inside a window:
 
 ```bash
-pnpm dev -- scheduler --server http://192.0.2.10:4173 \
+nitely scheduler --server http://192.0.2.10:4173 \
   --window 22:00-06:00 --interval-ms 60000
 ```
 

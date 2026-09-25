@@ -13,7 +13,7 @@ There is no dynamic fan-out and no voting configuration.
 Use the built-in flow:
 
 ```bash
-node dist/index.js run flows/pilot-approved-spec-pr-multi-review.json \
+nitely run flows/pilot-approved-spec-pr-multi-review.json \
   --repo . \
   --input spec=specs/feature.md \
   --input tech-design=docs/plans/feature.md
