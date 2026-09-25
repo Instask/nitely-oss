@@ -32,8 +32,8 @@ bootstrap flow 接收一份 spec 和一份 technical design 作为 local-file �
 ```bash
 node dist/index.js run flows/implement-spec-bootstrap.json \
   --repo . \
-  --input spec=specs/issues/005-run-state-logs-resume-spec.md \
-  --input tech-design=docs/plans/2026-06-19-run-state-logs-resume-tech-design.md
+  --input spec=./spec.md \
+  --input tech-design=./tech-design.md
 ```
 
 ### 按变更规模选择 flow
@@ -115,20 +115,19 @@ node dist/index.js ci-repair decide <idempotency-key> \
 ```bash
 node dist/index.js run flows/implement-spec-bootstrap-grok.json \
   --repo . \
-  --input spec=specs/issues/085-grok-bootstrap-flow-spec.md \
-  --input tech-design=docs/plans/2026-08-02-grok-bootstrap-flow-tech-design.md
+  --input spec=./spec.md \
+  --input tech-design=./tech-design.md
 ```
 
 若要用 Pi 而不是 Codex 跑同一条 bootstrap 路径，使用 Pi 变体。真实运行需要本地
 `pi` CLI（通过 Pi CLI 配置 model/provider 鉴权）；该 flow 不设置 `model`，因此
-沿用本地 CLI 的默认模型。spec 与 tech-design 输入可放在 `specs/issues/` 与
-`docs/plans/` 下：
+沿用本地 CLI 的默认模型。spec 与 tech-design 输入可以是任意本地文件：
 
 ```bash
 node dist/index.js run flows/implement-spec-bootstrap-pi.json \
   --repo . \
-  --input spec=specs/issues/455-pi-bootstrap-flow-spec.md \
-  --input tech-design=docs/plans/2026-08-02-pi-bootstrap-flow-tech-design.md
+  --input spec=./spec.md \
+  --input tech-design=./tech-design.md
 ```
 
 若要用 Claude Code 而不是 Codex 跑同一条 bootstrap 路径，使用 Claude 变体。真实
@@ -139,8 +138,8 @@ node dist/index.js run flows/implement-spec-bootstrap-pi.json \
 ```bash
 node dist/index.js run flows/implement-spec-bootstrap-claude.json \
   --repo . \
-  --input spec=specs/issues/005-run-state-logs-resume-spec.md \
-  --input tech-design=docs/plans/2026-06-19-run-state-logs-resume-tech-design.md
+  --input spec=./spec.md \
+  --input tech-design=./tech-design.md
 ```
 
 Nitely 会：

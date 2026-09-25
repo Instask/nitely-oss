@@ -119,8 +119,8 @@ pnpm dev -- task create \
   --server http://192.0.2.10:4173 \
   --title "Implement ordered runtime fallback" \
   --issue https://github.com/owner/repo/issues/77 \
-  --spec specs/issues/077-runtime-fallback-spec.md \
-  --tech-design docs/plans/2026-06-21-runtime-fallback-tech-design.md \
+  --spec ./spec.md \
+  --tech-design ./tech-design.md \
   --flow flows/implement-spec-bootstrap.json
 ```
 
