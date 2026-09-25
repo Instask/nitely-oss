@@ -46,7 +46,6 @@
 ## 其他文档的位置
 
 - [信任与验证模型](trust-and-verification-model.md) — 一次变更如何在这些约束里赢得信任。
-- [定位](positioning.md) — 面向购买者的楔子，以及与 agent-workforce 产品的边界。
 - [Approval-first ticket-to-PR](approval-first-ticket-to-pr.md) — 已经交付的生命周期。
 - [Harness 与审计](harness-and-audit.md) — 第三条所要求的证据。
 - [安全与信任](security-and-trust.md) — 代码、secret、日志和执行可以去哪里。
