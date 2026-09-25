@@ -2,7 +2,7 @@
 
 如何更新本仓库的生产 Web checkout。本地开发命令见 [README](../README.zh-CN.md)。下面的命令从本仓库干净的本地 checkout 运行。
 
-server 上的部署目录应始终保持在 `master`。Nitely 生成的分支和 worktree 是用于审查的运行产物，只有对应 PR 合并后才应进入部署 checkout。
+server 上的部署目录应始终保持在 `main`。Nitely 生成的分支和 worktree 是用于审查的运行产物，只有对应 PR 合并后才应进入部署 checkout。
 
 目标 PR 合并后，从干净的本地 checkout 运行生产部署 helper：
 
@@ -16,7 +16,7 @@ scripts/nitely-prod-web-deploy \
 
 该 helper 没有任何主机相关的默认值，具体部署的取值应放在该部署自己的
 runbook 或 wrapper 中。它会在 `--remote` 上把 `--prod-dir` 更新到
-`origin/master`，构建 checkout，并调用 `--restart-script`。安装和构建前，它会把生产 Node bin
+`origin/main`，构建 checkout，并调用 `--restart-script`。安装和构建前，它会把生产 Node bin
 目录加入 `PATH`。pull 之前，它会报告远端生产 checkout 中 dirty 的 tracked 和
 untracked 文件。默认会用命名 stash 保留这些改动，并在 release summary 中打印
 stash hash 和实际部署的 commit。需要在远端有本地改动时直接中止，可使用
