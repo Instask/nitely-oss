@@ -8,3 +8,6 @@ dist/
 .pnpm-store/
 coverage/
 *.log
+
+# Agent working plans (superpowers skill); keep these out of the public repository.
+docs/superpowers/
