@@ -93,6 +93,8 @@ import { materializeDueSchedules } from "./schedules/materialize.js";
 import {
   createSchedule,
   deleteSchedule,
+  getSchedule,
+  listScheduleOccurrencesWithLineage,
   listSchedules,
   setScheduleEnabled,
 } from "./schedules/store.js";
@@ -3363,6 +3365,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
       "  schedule create --name <name> (--cron <expr> | --every <duration> | --at <iso>) --title <title> --spec-file <path> --tech-design-file <path> [--timezone <iana>] [--flow <path>] [--admission auto|review] [--misfire skip|run_once_now|catch_up] [--catch-up-limit <n>] [--overlap allow|skip|queue] [--repo <path>] [--json]",
       "  schedule list [--repo <path>] [--json]",
       "  schedule pause|resume|delete <schedule-id> [--repo <path>]",
+      "  schedule show <schedule-id> [--repo <path>] [--json]",
       "  schedule tick [--repo <path>] [--json]",
     ],
     run: async ({ argv, io, dependencies }) => {
@@ -3436,6 +3439,49 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
           );
           return 0;
         }
+        if (sub === "show") {
+          const id = argv[2];
+          if (!id || id.startsWith("--")) return fail("Usage: nitely schedule show <schedule-id> [--repo <path>] [--json]");
+          const { repoPath, nextIndex } = parseRepoOption(argv, 3);
+          const json = argv[nextIndex] === "--json";
+          if (!json && nextIndex < argv.length) return fail(`Unknown schedule option: ${argv[nextIndex]}`);
+          const schedule = await getSchedule(repoPath, id);
+          const occurrences = await listScheduleOccurrencesWithLineage(repoPath, { scheduleId: id });
+          const newestFirst = [...occurrences].reverse();
+          if (json) {
+            io.stdout(JSON.stringify({ schedule, occurrences: newestFirst }, null, 2));
+            return 0;
+          }
+          io.stdout(`${schedule.id}  ${schedule.name}`);
+          io.stdout(`trigger: ${describeTrigger(schedule.trigger)} ${schedule.timezone}`);
+          io.stdout(
+            `state: ${schedule.enabled ? (schedule.completedAt ? "completed" : "enabled") : "paused"}   revision: ${schedule.revision}   admission: ${schedule.admission}`,
+          );
+          io.stdout(
+            `misfire: ${schedule.misfire.policy}${schedule.misfire.limit !== undefined ? `(${schedule.misfire.limit})` : ""}   overlap: ${schedule.overlap}`,
+          );
+          io.stdout(`next: ${schedule.nextRunAt ?? "-"} last: ${schedule.lastRunAt ?? "-"}`);
+          if (newestFirst.length === 0) {
+            io.stdout("History: none");
+          } else {
+            io.stdout(`History (${newestFirst.length}):`);
+            for (const occurrence of newestFirst) {
+              const parts = [
+                occurrence.status,
+                occurrence.intendedFireAt,
+                `materialized ${occurrence.materializedAt}`,
+                `rev ${occurrence.scheduleRevision}`,
+              ];
+              if (occurrence.reason) parts.push(occurrence.reason);
+              if (occurrence.workItemId) {
+                parts.push(`task ${occurrence.workItemId} (${occurrence.lineage.taskStatus ?? "missing"})`);
+              }
+              if (occurrence.lineage.runId) parts.push(`run ${occurrence.lineage.runId}`);
+              io.stdout(`  ${parts.join("\t")}`);
+            }
+          }
+          return 0;
+        }
         if (sub === "tick") {
           const { repoPath, nextIndex } = parseRepoOption(argv, 2);
           const json = argv[nextIndex] === "--json";
@@ -3452,7 +3498,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
           }
           return 0;
         }
-        return fail("Usage: nitely schedule <create|list|pause|resume|delete|tick> ...");
+        return fail("Usage: nitely schedule <create|list|pause|resume|delete|show|tick> ...");
       } catch (error) {
         return fail(error instanceof Error ? error.message : String(error));
       }
