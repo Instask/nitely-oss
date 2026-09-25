@@ -271,7 +271,7 @@ export async function runGoldenPathDemo(
       spec: `# Feature Spec: Golden path fixture feature
 
 Status: approved
-Source: github-issue https://github.com/Instask/nitely/issues/golden-path-fixture
+Source: github-issue https://github.com/example/nitely-demo/issues/golden-path-fixture
 
 ## Background
 
@@ -310,17 +310,17 @@ Evaluators need deterministic proof that approved source-backed planning can pro
 - None.
 `,
       techDesign: "Use a single file change and verify it with a shell command.",
-      issueUrl: "https://github.com/Instask/nitely/issues/golden-path-fixture",
+      issueUrl: "https://github.com/example/nitely-demo/issues/golden-path-fixture",
       flowPath: "flows/golden-path-implementation.json",
     },
     {
       createId: () => "golden-path-task",
       source: {
         type: "github-issue",
-        uri: "https://github.com/Instask/nitely/issues/golden-path-fixture",
+        uri: "https://github.com/example/nitely-demo/issues/golden-path-fixture",
         title: "Golden path fixture issue",
         snapshot: {
-          uri: "https://github.com/Instask/nitely/issues/golden-path-fixture",
+          uri: "https://github.com/example/nitely-demo/issues/golden-path-fixture",
           title: "Golden path fixture issue",
           body: "Create a small file-backed feature, then handle one reviewer rework request.",
           fetchedAt: "2026-06-28T00:00:00.000Z",
@@ -395,11 +395,11 @@ Evaluators need deterministic proof that approved source-backed planning can pro
         publishChange: async (
           { branchName, evidencePath: publishedEvidencePath },
         ) => ({
-          url: `https://github.com/Instask/nitely/pull/${draftPullRequestNumber}`,
+          url: `https://github.com/example/nitely-demo/pull/${draftPullRequestNumber}`,
           evidencePath: publishedEvidencePath,
           changeRequest: {
             provider: "github",
-            url: `https://github.com/Instask/nitely/pull/${draftPullRequestNumber}`,
+            url: `https://github.com/example/nitely-demo/pull/${draftPullRequestNumber}`,
             number: draftPullRequestNumber,
             owner: "Instask",
             repository: "nitely",
@@ -451,7 +451,7 @@ Evaluators need deterministic proof that approved source-backed planning can pro
     owner: "Instask",
     repository: "nitely",
     number: draftPullRequestNumber,
-    url: `https://github.com/Instask/nitely/pull/${draftPullRequestNumber}`,
+    url: `https://github.com/example/nitely-demo/pull/${draftPullRequestNumber}`,
     baseBranch: "master",
     headBranch: implementation.branchName,
     headSha: previousHeadSha,
@@ -510,9 +510,9 @@ Evaluators need deterministic proof that approved source-backed planning can pro
         owner: "Instask",
         repository: "nitely",
         prNumber: 1,
-        prUrl: "https://github.com/Instask/nitely/pull/1",
+        prUrl: "https://github.com/example/nitely-demo/pull/1",
         commentId: "discussion_r1",
-        commentUrl: "https://github.com/Instask/nitely/pull/1#discussion_r1",
+        commentUrl: "https://github.com/example/nitely-demo/pull/1#discussion_r1",
         authorLogin: "reviewer",
         action: "rework",
       },

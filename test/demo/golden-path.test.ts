@@ -33,9 +33,9 @@ describe("golden path demo", () => {
       outputDir,
       taskId: "golden-path-task",
       implementationRunId: "run-golden-implementation",
-      draftPullRequestUrl: "https://github.com/Instask/nitely/pull/1",
+      draftPullRequestUrl: "https://github.com/example/nitely-demo/pull/1",
       reworkRunId: "run-golden-rework",
-      updatedPullRequestUrl: "https://github.com/Instask/nitely/pull/1",
+      updatedPullRequestUrl: "https://github.com/example/nitely-demo/pull/1",
       proof: {
         approvedPlanning: true,
         eligibleImplementationStart: true,

@@ -34,7 +34,7 @@ Targets (choose one, default --user):
   --dest PATH            PATH exactly, as the skill directory
 
 Options:
-  --ref REF              Git ref to download from in network mode. Default: master
+  --ref REF              Git ref to download from in network mode. Default: main
   --repo OWNER/NAME      Source GitHub repository. Default: Instask/nitely-oss
   --force                Replace an existing skill directory
   -h, --help             Show this help
@@ -45,11 +45,11 @@ Examples:
   scripts/install-nitely-skill                       # personal Claude Code skill
   scripts/install-nitely-skill --project ~/code/app  # only for that project
   scripts/install-nitely-skill --nitely-repo ~/code/app
-  curl -fsSL https://raw.githubusercontent.com/Instask/nitely-oss/master/scripts/install-nitely-skill | bash
+  curl -fsSL https://raw.githubusercontent.com/Instask/nitely-oss/main/scripts/install-nitely-skill | bash
 USAGE
 }
 
-ref="${NITELY_SKILL_REF:-master}"
+ref="${NITELY_SKILL_REF:-main}"
 source_repo="${NITELY_SKILL_REPO:-Instask/nitely-oss}"
 target=""
 target_label=""

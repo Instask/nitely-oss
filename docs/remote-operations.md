@@ -91,7 +91,7 @@ design first. The intake contract is
 
 ```bash
 pnpm dev -- task plan --prompt "Let operators import repositories from a pasted GitHub URL."
-pnpm dev -- task plan --issue https://github.com/Instask/nitely/issues/578
+pnpm dev -- task plan --issue https://github.com/owner/repo/issues/578
 pnpm dev -- task plan --jira PLAT-142
 pnpm dev -- task plan \
   --document-url https://example.feishu.cn/docx/ABC123 \
@@ -118,7 +118,7 @@ Create a task on a running Nitely server from local markdown files:
 pnpm dev -- task create \
   --server http://192.0.2.10:4173 \
   --title "Implement ordered runtime fallback" \
-  --issue https://github.com/Instask/nitely/issues/77 \
+  --issue https://github.com/owner/repo/issues/77 \
   --spec specs/issues/077-runtime-fallback-spec.md \
   --tech-design docs/plans/2026-06-21-runtime-fallback-tech-design.md \
   --flow flows/implement-spec-bootstrap.json
