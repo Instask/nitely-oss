@@ -10,7 +10,7 @@ Deploy Nitely production Web on the configured remote host.
 Options:
   --remote HOST          SSH target. Required.
   --prod-dir PATH       Production checkout on the remote host. Required.
-  --branch NAME         Branch to deploy. Default: master
+  --branch NAME         Branch to deploy. Default: main
   --dirty-mode MODE     stash or abort. Default: stash
   --node-bin PATH       Production Node bin directory. Default: remote PATH
   --restart-script PATH Restart helper on the remote host. Required.
@@ -24,7 +24,7 @@ USAGE
 
 remote="${NITELY_DEPLOY_REMOTE:-}"
 prod_dir="${NITELY_PROD_DIR:-}"
-branch="${NITELY_DEPLOY_BRANCH:-master}"
+branch="${NITELY_DEPLOY_BRANCH:-main}"
 dirty_mode="${NITELY_DEPLOY_DIRTY_MODE:-stash}"
 node_bin="${NITELY_PROD_NODE_BIN:-}"
 restart_script="${NITELY_PROD_RESTART:-}"

@@ -2,7 +2,7 @@
 
 How this repository's production Web checkout is updated. Local development commands are in the [README](../README.md). Commands below are run from a clean local checkout of this repository.
 
-The deployed server should stay on `master`. Nitely-generated branches and
+The deployed server should stay on `main`. Nitely-generated branches and
 worktrees are execution artifacts for review and should not become the deployed
 checkout until their PRs are merged.
 
@@ -19,7 +19,7 @@ scripts/nitely-prod-web-deploy \
 
 The helper has no host-specific defaults; keep the values for a particular
 deployment in that deployment's own runbook or wrapper. It deploys
-`origin/master` into `--prod-dir` on `--remote`, builds the checkout, and calls
+`origin/main` into `--prod-dir` on `--remote`, builds the checkout, and calls
 `--restart-script`. It prepends the production Node bin
 directory to `PATH` before installing and building. Before pulling, it reports
 dirty tracked and untracked files in the remote production checkout. By default
