@@ -77,6 +77,7 @@ describe("runCli", () => {
     expect(lines.join("\n")).toContain("tasks-to-issues");
     expect(lines.join("\n")).toContain("eval compare");
     expect(lines.join("\n")).toContain("knowledge-repo attach");
+    expect(lines.join("\n")).toContain("schedule show");
   });
 
   it("exports machine-readable factory metrics", async () => {
