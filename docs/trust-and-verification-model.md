@@ -159,8 +159,6 @@ Be cautious about:
 This model sharpens existing work; it does not replace it:
 
 - [Product definition](product.md) states the four constraints this model serves.
-- [Positioning](positioning.md) describes the governed spec-to-PR wedge and
-  boundaries against Agent-workforce products.
 - [Approval-First Ticket-to-PR Product Contract](approval-first-ticket-to-pr.md)
   defines the shipped lifecycle and proof contract.
 - [Harness and Audit Evidence](harness-and-audit.md) describes enforced

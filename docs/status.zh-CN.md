@@ -24,9 +24,7 @@
 - 主确定性 golden-path demo：从 approved task 经过 verification 和 evidence-backed
   draft PR 发布，再处理 reviewer feedback 并受控更新同一个 PR。见
   [docs/golden-path-demo.md](golden-path-demo.md)。
-- Buyer-facing 定位明确为受治理的 spec-to-PR 执行系统，而不是 Agent-workforce
-  平台；同时定义 GitHub-first 的上游 intake/result contract。见
-  [docs/positioning.md](positioning.md) 与
+- GitHub-first 的上游 intake/result contract。见
   [docs/upstream-integration-contract.md](upstream-integration-contract.md)。
 - canonical 的 trust-and-verification 产品与架构原则：以证据支撑的软件变更、
   独立验证、基于风险的人类注意力和有界恢复。见

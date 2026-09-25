@@ -9,8 +9,8 @@ configures otherwise.
 
 ## Discovery-Call Mapping
 
-Use [customer-validation.md](customer-validation.md) to collect and classify
-real failed AI coding attempts before choosing a pilot template.
+Collect and classify real failed AI coding attempts before choosing a pilot
+template.
 
 | Failure mode heard in discovery | Template | Why it fits |
 | --- | --- | --- |

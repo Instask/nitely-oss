@@ -60,7 +60,6 @@ Otherwise it waits.
 ## Where the other documents sit
 
 - [Trust and verification model](trust-and-verification-model.md) — how a change earns trust inside these constraints.
-- [Positioning](positioning.md) — the buyer-facing wedge and the boundary against agent-workforce products.
 - [Approval-first ticket-to-PR](approval-first-ticket-to-pr.md) — the shipped lifecycle.
 - [Harness and audit](harness-and-audit.md) — the evidence the third line requires.
 - [Security and trust](security-and-trust.md) — where code, secrets, logs, and execution are allowed to go.

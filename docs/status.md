@@ -36,14 +36,7 @@ Implemented on `master`:
   verification, evidence-backed draft PR publication, reviewer feedback, and
   controlled same-PR rework. See
   [docs/golden-path-demo.md](golden-path-demo.md).
-- First paid pilot package for high-touch customer pilots. See
-  [docs/paid-pilot-offering.md](paid-pilot-offering.md).
-- Customer validation workflow for interviewing teams already using AI coding
-  tools. See [docs/customer-validation.md](customer-validation.md).
-- Buyer-facing positioning package for explaining Nitely as a governed
-  spec-to-PR execution system rather than an Agent-workforce platform, plus a
-  GitHub-first upstream intake/result contract. See
-  [docs/positioning.md](positioning.md) and
+- GitHub-first upstream intake/result contract. See
   [docs/upstream-integration-contract.md](upstream-integration-contract.md).
 - Canonical trust-and-verification model: evidence-backed software changes,
   independent verification, risk-based human attention, and bounded recovery.

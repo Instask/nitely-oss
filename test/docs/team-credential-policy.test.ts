@@ -7,10 +7,10 @@ const repositoryRoot = join(import.meta.dirname, "..", "..");
 
 describe("team credential policy docs", () => {
   it("documents provider credential ownership, metadata, and vault-ready boundaries", async () => {
-    const [doc, paidPilot] = await Promise.all([
-      readFile(join(repositoryRoot, "docs", "team-credential-policy.md"), "utf8"),
-      readFile(join(repositoryRoot, "docs", "paid-pilot-offering.md"), "utf8"),
-    ]);
+    const doc = await readFile(
+      join(repositoryRoot, "docs", "team-credential-policy.md"),
+      "utf8",
+    );
 
     expect(doc).toContain("## Credential Scopes");
     expect(doc).toContain("user-scoped");
@@ -24,6 +24,5 @@ describe("team credential policy docs", () => {
     expect(doc).toContain("## Vault-Ready Resolution");
     expect(doc).toContain("## Audit Events");
     expect(doc).toContain("credential set, clear, and status-check actions");
-    expect(paidPilot).toContain("team-credential-policy.md");
   });
 });

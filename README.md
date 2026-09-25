@@ -22,8 +22,7 @@ The operating rhythm is: plan by day, execute by night, review by morning. See
 
 `Nitely` is a temporary internal codename. The public brand must be renamed and
 professionally cleared before any public landing page, SaaS control plane, paid
-offer, or package launch. See the dated
-[naming strategy](docs/naming-strategy.md).
+offer, or package launch.
 
 The project is in bootstrap. Implemented behavior on `master` is listed in
 [docs/status.md](docs/status.md). The shipped lifecycle is the
@@ -46,8 +45,7 @@ and [docs/open-core-feature-audit.md](docs/open-core-feature-audit.md) for the
 current feature inventory. See [docs/security-and-trust.md](docs/security-and-trust.md)
 for code, secret, log, evidence, retention, and future control-plane data
 boundaries. See [docs/trust-and-verification-model.md](docs/trust-and-verification-model.md)
-for how a change earns trust under the product definition. See [docs/positioning.md](docs/positioning.md)
-for the buyer-facing positioning package. See
+for how a change earns trust under the product definition. See
 [docs/mobile-support-boundary.md](docs/mobile-support-boundary.md) for the iOS
 and Android support boundary.
 

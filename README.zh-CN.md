@@ -19,8 +19,7 @@ Codex、Claude、GLM、Grok Build、Pi 以及未来的 coding agent 都只是 Ni
 [docs/usage-scenarios-and-efficiency-thesis.md](docs/usage-scenarios-and-efficiency-thesis.md)。
 
 `Nitely` 目前仅是内部临时代号。在公开 landing page、SaaS control plane、付费
-offer 或 package 发布前，必须完成更名与专业商标清查。决策和发布门槛见带日期的
-[命名策略](docs/naming-strategy.md)。
+offer 或 package 发布前，必须完成更名与专业商标清查。
 
 项目目前处于 bootstrap 阶段。`master` 上已实现的能力见
 [docs/status.zh-CN.md](docs/status.zh-CN.md)。Planner 可以从 GitHub issue、Jira ticket 或 prompt

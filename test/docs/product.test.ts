@@ -14,7 +14,7 @@ const constraints = [
 
 describe("product definition", () => {
   it("states the four constraints on the front door and in the definition docs", async () => {
-    const [readme, chineseReadme, product, chineseProduct, trust, positioning] =
+    const [readme, chineseReadme, product, chineseProduct, trust] =
       await Promise.all([
         readFile(join(repositoryRoot, "README.md"), "utf8"),
         readFile(join(repositoryRoot, "README.zh-CN.md"), "utf8"),
@@ -24,7 +24,6 @@ describe("product definition", () => {
           join(repositoryRoot, "docs", "trust-and-verification-model.md"),
           "utf8",
         ),
-        readFile(join(repositoryRoot, "docs", "positioning.md"), "utf8"),
       ]);
 
     for (const line of constraints) {
@@ -42,8 +41,6 @@ describe("product definition", () => {
     expect(chineseReadme).toContain("意图必须明确。");
     expect(chineseReadme).toContain("人保留决定权。");
     expect(product).toContain("## Decision test");
-    expect(positioning).toContain("humans retain authority");
-    expect(positioning).toContain("product.md");
 
     for (const manual of [
       "docs/running-flows.md",

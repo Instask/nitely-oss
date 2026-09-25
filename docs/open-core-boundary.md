@@ -67,8 +67,7 @@ Good commercial boundaries include:
   administration;
 - managed coordination for customer-hosted runners;
 - cloud-visible runner health, scheduling, retries, and fleet operations;
-- high-touch paid pilot and flow implementation services, starting from the
-  package in [paid-pilot-offering.md](paid-pilot-offering.md).
+- high-touch paid pilot and flow implementation services.
 
 These features can be commercial because they coordinate people, repositories,
 retention, policy, or hosted operations. They should not require customers to
