@@ -11,8 +11,8 @@
 node dist/index.js rework-pr 22 \
   --repo . \
   --flow flows/rework-pr-bootstrap.json \
-  --input spec=specs/issues/022-pr-rework-flow-spec.md \
-  --input tech-design=docs/plans/2026-06-19-pr-rework-flow-tech-design.md
+  --input spec=./spec.md \
+  --input tech-design=./tech-design.md
 ```
 
 目标可以是 PR number，也可以是 GitHub PR URL。Nitely 会通过配置的 SCM
@@ -58,8 +58,8 @@ rework run，并向 PR 发布包含新 run id 和 evidence path 的简短 commen
 node dist/index.js rework-pr <pr> \
   --repo . \
   --flow flows/resolve-conflicts-bootstrap.json \
-  --input spec=specs/issues/023-conflict-resolution-flow-spec.md \
-  --input tech-design=docs/plans/2026-06-19-conflict-resolution-flow-tech-design.md
+  --input spec=./spec.md \
+  --input tech-design=./tech-design.md
 ```
 
 `<pr>` 可以是 PR number，也可以是 GitHub PR URL。第一版的 `sync-change` 只支持

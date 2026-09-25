@@ -34,8 +34,8 @@ The bootstrap flow accepts a specification and a technical design as local-file 
 ```bash
 node dist/index.js run flows/implement-spec-bootstrap.json \
   --repo . \
-  --input spec=specs/issues/005-run-state-logs-resume-spec.md \
-  --input tech-design=docs/plans/2026-06-19-run-state-logs-resume-tech-design.md
+  --input spec=./spec.md \
+  --input tech-design=./tech-design.md
 ```
 
 ### Change-size flows
@@ -128,21 +128,20 @@ authoritative:
 ```bash
 node dist/index.js run flows/implement-spec-bootstrap-grok.json \
   --repo . \
-  --input spec=specs/issues/085-grok-bootstrap-flow-spec.md \
-  --input tech-design=docs/plans/2026-08-02-grok-bootstrap-flow-tech-design.md
+  --input spec=./spec.md \
+  --input tech-design=./tech-design.md
 ```
 
 To dogfood the same bootstrap path with Pi instead of Codex, use the Pi variant.
 A real run requires the local `pi` CLI (configure model/provider auth through
 the Pi CLI); the flow leaves `model` unset so the CLI default remains
-authoritative. Spec and tech-design inputs may live under `specs/issues/` and
-`docs/plans/`:
+authoritative. Spec and tech-design inputs can be any local files:
 
 ```bash
 node dist/index.js run flows/implement-spec-bootstrap-pi.json \
   --repo . \
-  --input spec=specs/issues/455-pi-bootstrap-flow-spec.md \
-  --input tech-design=docs/plans/2026-08-02-pi-bootstrap-flow-tech-design.md
+  --input spec=./spec.md \
+  --input tech-design=./tech-design.md
 ```
 
 To dogfood the same bootstrap path with Claude Code instead of Codex, use the
@@ -154,8 +153,8 @@ the blocking `review` gate and the final `reflect` stage.
 ```bash
 node dist/index.js run flows/implement-spec-bootstrap-claude.json \
   --repo . \
-  --input spec=specs/issues/005-run-state-logs-resume-spec.md \
-  --input tech-design=docs/plans/2026-06-19-run-state-logs-resume-tech-design.md
+  --input spec=./spec.md \
+  --input tech-design=./tech-design.md
 ```
 
 Nitely will:

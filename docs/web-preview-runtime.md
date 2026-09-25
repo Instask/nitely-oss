@@ -100,5 +100,5 @@ Native providers must not be enabled until their host preflight, app
 build/install/launch configuration, capability negotiation, cleanup, artifact,
 and security boundaries are implemented.
 
-See `specs/issues/420-native-visual-devtools-provider-spike.md` for the native
-capability matrix, reproducible blocked POC result, and scoped follow-up issues.
+The native capability matrix, the reproducible blocked POC result, and the
+scoped follow-up issues are tracked in jerryleooo/nitely#420.

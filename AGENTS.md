@@ -9,7 +9,9 @@ against the default branch, and deployments build from this repository.
   arguments; keep them in the deployment's own runbook.
 - Some work is tracked in a private issue tracker. Reference it by full
   `owner/repo#number` so closing keywords and links still resolve; do not copy
-  private issue text into this repository.
+  private issue text into this repository. Per-issue specs, technical designs,
+  and agent working plans for that tracker stay with it; do not commit them
+  under `specs/`, `docs/plans/`, or `docs/superpowers/` here.
 - Domain language lives in [CONTEXT.md](CONTEXT.md). Contribution rules live in
   [CONTRIBUTING.md](CONTRIBUTING.md).
 

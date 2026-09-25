@@ -75,8 +75,8 @@ Example run:
 ```bash
 node dist/index.js run flows/pilot-approved-spec-pr.json \
   --repo . \
-  --input spec=specs/issues/164-reflection-finalizers-spec.md \
-  --input tech-design=docs/plans/2026-06-25-reflection-finalizers-tech-design.md
+  --input spec=./spec.md \
+  --input tech-design=./tech-design.md
 ```
 
 ## Template: `pilot-bug-ticket-fix-pr`

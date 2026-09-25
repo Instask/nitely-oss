@@ -11,8 +11,8 @@ existing pull request branch instead of opening a new PR:
 node dist/index.js rework-pr 22 \
   --repo . \
   --flow flows/rework-pr-bootstrap.json \
-  --input spec=specs/issues/022-pr-rework-flow-spec.md \
-  --input tech-design=docs/plans/2026-06-19-pr-rework-flow-tech-design.md
+  --input spec=./spec.md \
+  --input tech-design=./tech-design.md
 ```
 
 The target may be a PR number or a GitHub PR URL. Nitely resolves the PR through
@@ -61,8 +61,8 @@ stale or conflicts with its base branch:
 node dist/index.js rework-pr <pr> \
   --repo . \
   --flow flows/resolve-conflicts-bootstrap.json \
-  --input spec=specs/issues/023-conflict-resolution-flow-spec.md \
-  --input tech-design=docs/plans/2026-06-19-conflict-resolution-flow-tech-design.md
+  --input spec=./spec.md \
+  --input tech-design=./tech-design.md
 ```
 
 `<pr>` may be a PR number or GitHub PR URL. The first version uses
