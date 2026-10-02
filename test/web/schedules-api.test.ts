@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { materializeDueSchedules } from "../../src/schedules/materialize.js";
 import { listScheduleOccurrences, listSchedules } from "../../src/schedules/store.js";
@@ -116,16 +116,18 @@ describe("schedules API", () => {
     expect(await listSchedules(repoPath)).toEqual([]);
     expect((await call(server, "GET", `/api/schedules/${schedule.id}`)).status).toBe(404);
 
-    const audit = (await listSecurityAuditEvents(repoPath)).map((event) => event.action);
-    expect(audit).toEqual(
-      expect.arrayContaining([
-        "schedules.create",
-        "schedules.update",
-        "schedules.pause",
-        "schedules.resume",
-        "schedules.delete",
-      ]),
-    );
+    await vi.waitFor(async () => {
+      const audit = (await listSecurityAuditEvents(repoPath)).map((event) => event.action);
+      expect(audit).toEqual(
+        expect.arrayContaining([
+          "schedules.create",
+          "schedules.update",
+          "schedules.pause",
+          "schedules.resume",
+          "schedules.delete",
+        ]),
+      );
+    }, { timeout: 5000 });
   });
 
   it("rejects invalid schedule input with a JSON 400", async () => {

@@ -262,18 +262,20 @@ export async function appendSecurityAuditEvent(
 async function readSecurityAuditEvents(
   repoPath: string,
 ): Promise<SecurityAuditEvent[]> {
-  let content: string;
-  try {
-    content = await readFile(securityAuditPath(repoPath), "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
-  if (!content.trim()) return [];
-  return content
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as SecurityAuditEvent);
+  return await withKnowledgeLease({ path: securityAuditPath(repoPath) + ".lock", waitMs: 10_000 }, async () => {
+    let content: string;
+    try {
+      content = await readFile(securityAuditPath(repoPath), "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+    if (!content.trim()) return [];
+    return content
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as SecurityAuditEvent);
+  });
 }
 
 export async function securityAuditEventById(
@@ -351,38 +353,40 @@ async function* iterateAuditEvents(repoPath: string, normalize = true): AsyncGen
 }
 
 export async function queryOrganizationAudit(repoPath: string, query: OrganizationAuditQuery): Promise<{ events: SecurityAuditEvent[]; nextCursor?: string }> {
-  validateMetadataId(query.organizationId, "organization id");
-  const limit = query.limit ?? 100;
-  if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error("security audit limit must be between 1 and 500");
-  for (const key of ["actorId", "cursor", "eventId", "repositoryId", "taskId", "runId", "providerId", "requestId", "sessionHash"] as const) {
-    if (query[key] !== undefined) validateMetadataId(query[key]!, key);
-  }
-  for (const key of ["action", "source"] as const) if (query[key] !== undefined) validateMetadataCode(query[key]!, key);
-  if (query.result !== undefined && !["success", "error"].includes(query.result)) throw new Error("invalid audit result");
-  for (const value of [query.from, query.until]) {
-    if (value !== undefined && (!/^\d{4}-\d{2}-\d{2}T.*Z$/.test(value) || !Number.isFinite(Date.parse(value)))) throw new Error("invalid audit time");
-  }
-  if (query.from && query.until && Date.parse(query.from) > Date.parse(query.until)) throw new Error("invalid audit time range");
-  const events: SecurityAuditEvent[] = [];
-  let foundCursor = !query.cursor;
-  for await (const event of iterateAuditEvents(repoPath)) {
-    if (eventOrganization(event) !== query.organizationId) continue;
-    if (query.eventId !== undefined && event.eventId !== query.eventId) continue;
-    if (event.eventId === query.cursor) { foundCursor = true; break; }
-    if (query.action !== undefined && event.action !== query.action || query.actorId !== undefined && event.actor.id !== query.actorId || query.source !== undefined && event.source !== query.source || query.result !== undefined && event.outcome !== query.result || query.from !== undefined && Date.parse(event.createdAt) < Date.parse(query.from) || query.until !== undefined && Date.parse(event.createdAt) > Date.parse(query.until)) continue;
-    if ((["repositoryId", "taskId", "runId", "providerId", "requestId", "sessionHash"] as const).some((key) => {
-      if (query[key] === undefined) return false;
-      const targetType = { repositoryId: "repository", taskId: "task", runId: "run", providerId: "provider", requestId: undefined, sessionHash: undefined }[key];
-      return (event.context?.[key] ?? (event.target?.type === targetType ? event.target?.id : undefined)) !== query[key];
-    })) continue;
-    events.push(event);
-    if (events.length > limit + 1) events.shift();
-  }
-  if (!foundCursor) throw new Error("audit cursor not found");
-  const more = events.length > limit;
-  if (more) events.shift();
-  events.reverse();
-  return { events, ...(more ? { nextCursor: events.at(-1)!.eventId } : {}) };
+  return await withKnowledgeLease({ path: securityAuditPath(repoPath) + ".lock", waitMs: 10_000 }, async () => {
+    validateMetadataId(query.organizationId, "organization id");
+    const limit = query.limit ?? 100;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error("security audit limit must be between 1 and 500");
+    for (const key of ["actorId", "cursor", "eventId", "repositoryId", "taskId", "runId", "providerId", "requestId", "sessionHash"] as const) {
+      if (query[key] !== undefined) validateMetadataId(query[key]!, key);
+    }
+    for (const key of ["action", "source"] as const) if (query[key] !== undefined) validateMetadataCode(query[key]!, key);
+    if (query.result !== undefined && !["success", "error"].includes(query.result)) throw new Error("invalid audit result");
+    for (const value of [query.from, query.until]) {
+      if (value !== undefined && (!/^\d{4}-\d{2}-\d{2}T.*Z$/.test(value) || !Number.isFinite(Date.parse(value)))) throw new Error("invalid audit time");
+    }
+    if (query.from && query.until && Date.parse(query.from) > Date.parse(query.until)) throw new Error("invalid audit time range");
+    const events: SecurityAuditEvent[] = [];
+    let foundCursor = !query.cursor;
+    for await (const event of iterateAuditEvents(repoPath)) {
+      if (eventOrganization(event) !== query.organizationId) continue;
+      if (query.eventId !== undefined && event.eventId !== query.eventId) continue;
+      if (event.eventId === query.cursor) { foundCursor = true; break; }
+      if (query.action !== undefined && event.action !== query.action || query.actorId !== undefined && event.actor.id !== query.actorId || query.source !== undefined && event.source !== query.source || query.result !== undefined && event.outcome !== query.result || query.from !== undefined && Date.parse(event.createdAt) < Date.parse(query.from) || query.until !== undefined && Date.parse(event.createdAt) > Date.parse(query.until)) continue;
+      if ((["repositoryId", "taskId", "runId", "providerId", "requestId", "sessionHash"] as const).some((key) => {
+        if (query[key] === undefined) return false;
+        const targetType = { repositoryId: "repository", taskId: "task", runId: "run", providerId: "provider", requestId: undefined, sessionHash: undefined }[key];
+        return (event.context?.[key] ?? (event.target?.type === targetType ? event.target?.id : undefined)) !== query[key];
+      })) continue;
+      events.push(event);
+      if (events.length > limit + 1) events.shift();
+    }
+    if (!foundCursor) throw new Error("audit cursor not found");
+    const more = events.length > limit;
+    if (more) events.shift();
+    events.reverse();
+    return { events, ...(more ? { nextCursor: events.at(-1)!.eventId } : {}) };
+  });
 }
 
 export interface OrganizationAuditRetention { version: 1; retentionDays: number | null }
