@@ -2032,15 +2032,16 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
   {
     name: "doctor",
     usage: [
-      "  doctor <flow> --repo <path> [--input <name>=<path>]",
+      "  doctor <flow> --repo <path> [--input <name>=<path>] [--backend local|mise|oci]",
     ],
     run: async ({ argv, io, dependencies }) => {
       const flowPath = argv[1];
       if (!flowPath) {
-        io.stderr("Usage: nitely doctor <flow> --repo <path> [--input <name>=<path>]");
+        io.stderr("Usage: nitely doctor <flow> --repo <path> [--input <name>=<path>] [--backend local|mise|oci]");
         return 1;
       }
       let repoPath = ".";
+      let executionBackend: string | undefined;
       const inputs: EvaluateRunPreflightInput["inputs"] = {};
       try {
         for (let index = 2; index < argv.length; index += 1) {
@@ -2048,6 +2049,11 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
           if (arg === "--repo") {
             repoPath = argv[++index] ?? "";
             if (!repoPath) throw new Error("Missing value for --repo");
+            continue;
+          }
+          if (arg === "--backend") {
+            executionBackend = argv[++index];
+            if (!executionBackend) throw new Error("Missing value for --backend");
             continue;
           }
           if (arg === "--input") {
@@ -2067,6 +2073,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
           repoPath,
           flowPath,
           inputs,
+          ...(executionBackend ? { executionBackend } : {}),
         });
         printRunPreflightReport(io, report);
         return report.status === "BLOCK" ? 1 : 0;

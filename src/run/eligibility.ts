@@ -79,6 +79,8 @@ export interface EvaluateWorkItemRunStartsInput {
   candidateIds?: readonly string[];
   intent: RunEligibilityIntent;
   providerStore?: ProviderConnectionStore;
+  executionBackend?: string;
+  env?: NodeJS.ProcessEnv;
   getChangeRequestStatus?: (
     url: string,
   ) => Promise<ChangeRequestStatus>;
@@ -479,6 +481,8 @@ export async function evaluateWorkItemRunStarts(
           flowDocument: resolvedFlow.flowDocument,
           inputs: workItem.inputs,
           configuration: workItem.configuration,
+          executionBackend: input.executionBackend,
+          env: input.env,
           ...(input.providerStore ? { providerStore: input.providerStore } : {}),
         }),
       ]);
@@ -510,6 +514,7 @@ export async function evaluateWorkItemRunStarts(
                 : {}),
               ...(input.repoName ? { repoName: input.repoName } : {}),
               inputs: workItem.inputs,
+              ...(input.executionBackend ? { executionBackend: input.executionBackend } : {}),
               ...(workItem.configuration
                 ? { configuration: workItem.configuration }
                 : {}),
