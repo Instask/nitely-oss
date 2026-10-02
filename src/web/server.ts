@@ -467,6 +467,8 @@ import {
 import {
   appendSecurityAuditEvent,
   listSecurityAuditEvents,
+  queryOrganizationAudit, getOrganizationAuditRetention, setOrganizationAuditRetention, pruneOrganizationAudit,
+  type OrganizationAuditQuery, type SecurityAuditContext,
   securityAuditSubjectFingerprint,
   type SecurityAuditActor,
   type SecurityAuditTarget,
@@ -625,6 +627,8 @@ interface PreparedApiTokenRequest {
   denial?: Error;
   denialReasonCode?: string;
 }
+
+const requestAuditContexts = new WeakMap<IncomingMessage, SecurityAuditContext>();
 
 const authorizedApiTokenRequests = new WeakMap<
   IncomingMessage,
@@ -885,6 +889,7 @@ async function auditWebSecurityAction(
   credential: string | null | undefined,
   status: number,
   reasonCode: string,
+  context?: SecurityAuditContext,
 ): Promise<void> {
   if (!action) return;
   const target = safeSecurityAuditTarget(action.target, credential);
@@ -897,6 +902,7 @@ async function auditWebSecurityAction(
     reasonCode,
     actor,
     ...(target ? { target } : {}),
+    context: { ...context, ...(target?.id && ["repository", "task", "run", "provider"].includes(target.type) ? { [target.type + "Id"]: target.id } : {}) },
   });
 }
 
@@ -1765,6 +1771,7 @@ async function securityAuditActorForRequest(
     Omit<StartWebServerInput, "host" | "port">,
   repoPath: string,
   preparedApiToken?: PreparedApiTokenRequest,
+  resourceOrganizationId?: string,
 ): Promise<SecurityAuditActor> {
   if (preparedApiToken) {
     if (preparedApiToken.tokenId && preparedApiToken.tokenName) {
@@ -1780,7 +1787,10 @@ async function securityAuditActorForRequest(
   if (!sessionId) return { type: "anonymous" };
   const user = await readSessionUser(repoPath, sessionId, { ...sessionRequestPolicyOptions(request, input), touch: false, auditBreakGlass: false });
   if (!user) return { type: "anonymous" };
-  const requestedOrganizationId = request.headers["x-nitely-organization-id"];
+  const routeOrg = /^\/api\/organizations\/([^/]+)/.exec(new URL(request.url ?? "/", "http://localhost").pathname);
+  let routeOrganizationId: string | undefined;
+  try { routeOrganizationId = routeOrg ? decodeURIComponent(routeOrg[1]) : undefined; } catch { /* Invalid resources remain unattributed. */ }
+  const requestedOrganizationId = resourceOrganizationId ?? routeOrganizationId ?? request.headers["x-nitely-organization-id"];
   const selected =
     typeof requestedOrganizationId === "string"
       ? (user.memberships ?? []).find(
@@ -3515,7 +3525,7 @@ function organizationProviderStore(input: RuntimeStartWebServerInput, homeRepoPa
     connectionAllowed: (record) => record.credential.organizationId === organizationId && (record.credential.scope === "org" || record.credential.scope === "external-vault-backed"),
     ...providerStoreOAuthOptions(input),
     onAudit: async (event) => { await appendSecurityAuditEvent(homeRepoPath, { action: "providers.connection." + event.action, decision: "allow", outcome: event.result === "failed" ? "error" : "success", httpStatus: 200, reasonCode: event.result,
-      actor: { type: "user", id: user.id, organizationId, organizationRole: member.role }, target: { type: "provider", id: event.connectionId ?? event.providerId } }); },
+      actor: { type: "user", id: user.id, organizationId, organizationRole: member.role }, context: { providerId: event.providerId }, target: { type: "provider", id: event.connectionId ?? event.providerId } }); },
   });
 }
 
@@ -3554,7 +3564,7 @@ function providerStoreForUser(
     },
     onAudit: async (event) => {
       if (event.action === "status-check" || !event.organizationId) return;
-      await appendSecurityAuditEvent(resolve(input.repoPath), { action: "providers.connection." + event.action, decision: "allow", outcome: event.result === "failed" ? "error" : "success", httpStatus: 200, reasonCode: event.result, actor: { type: "user", id: user.id, organizationId: event.organizationId, organizationRole: membership?.role }, target: { type: "provider", id: event.connectionId } });
+      await appendSecurityAuditEvent(resolve(input.repoPath), { action: "providers.connection." + event.action, decision: "allow", outcome: event.result === "failed" ? "error" : "success", httpStatus: 200, reasonCode: event.result, actor: { type: "user", id: user.id, organizationId: event.organizationId, organizationRole: membership?.role }, context: { repositoryId: context.repositoryId ?? undefined, providerId: event.providerId }, target: { type: "provider", id: event.connectionId } });
     },
     env: input.providerEnv ?? process.env,
     commandStatus: input.providerCommandStatus,
@@ -6944,8 +6954,17 @@ async function handleApiRequest(
   const runner = async (
     runInput: RunFlowInput,
     dependencies?: RunFlowDependencies,
-  ): Promise<RunFlowResult> =>
-    await baseRunner({ ...runInput, executionBackend: execution.backend }, dependencies);
+  ): Promise<RunFlowResult> => {
+    const auditContext = requestAuditContexts.get(request);
+    const [result, actor] = await Promise.all([
+      baseRunner({ ...runInput, executionBackend: execution.backend }, dependencies),
+      securityAuditActorForRequest(request, input, homeRepoPath, undefined, runInput.organizationId).catch(() => ({ type: "anonymous" as const })),
+    ]);
+    const repository = repositories.find((candidate) => resolve(candidate.path) === resolve(runInput.repoPath));
+    await appendSecurityAuditBestEffort(homeRepoPath, { action: "runs.execute", decision: "allow", outcome: "success", httpStatus: 200, reasonCode: "returned", source: "runtime", organizationId: runInput.organizationId,
+      actor, target: { type: "run", id: result.runId }, context: { ...auditContext, runId: result.runId, repositoryId: repository?.id, taskId: runInput.workItemId } });
+    return result;
+  };
 
   if (
     await dispatchHttpRoutes(
@@ -8178,6 +8197,55 @@ async function handleApiRequest(
       canManageAssignments: canManageNotificationAssignments(user),
     });
     return true;
+  }
+
+  const organizationAuditRoute = /^\/api\/organizations\/([^/]+)\/audit(?:\/(export|retention|prune|events)(?:\/([^/]+))?)?$/.exec(url.pathname);
+  if (organizationAuditRoute) {
+    if (authMode !== "required") throw new WebNotFoundError("organization audit requires authenticated mode");
+    const user = await requireUserContext(request, input, homeRepoPath);
+    let org: string; let eventId: string | undefined;
+    try { org = decodeURIComponent(organizationAuditRoute[1]); eventId = organizationAuditRoute[3] ? decodeURIComponent(organizationAuditRoute[3]) : undefined; } catch { throw new WebInputError("invalid audit resource"); }
+    const member = user.memberships?.find((membership) => membership.organizationId === org);
+    if (!member || !organizationSessionAccessAllowed(user, org)) throw new WebNotFoundError("organization not found");
+    const operation = organizationAuditRoute[2];
+    const manage = operation === "prune" || request.method === "PUT";
+    if (!organizationRoleHasPermission(member.role, manage ? "organizations:manage" : "organizations:audit:view")) throw new WebForbiddenError();
+    const actor = { ...securityAuditActorForUser(user), organizationId: org, organizationRole: member.role };
+    try {
+      if (operation === "retention" && !eventId && ["GET", "PUT"].includes(request.method ?? "")) {
+        const policy = request.method === "GET" ? await getOrganizationAuditRetention(homeRepoPath, org) : await setOrganizationAuditRetention(homeRepoPath, org, await readRequestJson(request), actor);
+        sendJson(response, 200, { policy }); return true;
+      }
+      if (operation === "prune" && !eventId && request.method === "POST") {
+        sendJson(response, 200, await pruneOrganizationAudit(homeRepoPath, org, actor)); return true;
+      }
+      if (request.method === "GET" && (!operation || operation === "export" || operation === "events" && eventId)) {
+        const query: OrganizationAuditQuery = { organizationId: org, ...(eventId ? { eventId } : {}) };
+        for (const key of ["action", "actorId", "source", "repositoryId", "taskId", "runId", "providerId", "from", "until", "cursor"] as const) {
+          const value = url.searchParams.get(key); if (value !== null) query[key] = value;
+        }
+        const limit = url.searchParams.get("limit"); if (limit !== null) query.limit = Number(limit);
+        const result = url.searchParams.get("result"); if (result !== null) query.result = result as OrganizationAuditQuery["result"];
+        const page = await queryOrganizationAudit(homeRepoPath, query);
+        if (eventId && !page.events.length) throw new WebNotFoundError("audit event not found");
+        if (operation === "export") {
+          if (url.searchParams.has("format") && url.searchParams.get("format") !== "jsonl") throw new WebInputError("supported audit export format is jsonl");
+          await appendSecurityAuditEvent(homeRepoPath, { action: "audit.export", decision: "allow", outcome: "success", httpStatus: 200, reasonCode: "ok", actor, organizationId: org, target: { type: "audit" } });
+          response.setHeader("content-type", "application/x-ndjson; charset=utf-8");
+          response.setHeader("cache-control", "no-store");
+          response.setHeader("content-disposition", 'attachment; filename="audit.jsonl"');
+          if (page.nextCursor) response.setHeader("x-nitely-next-cursor", page.nextCursor);
+          response.end(page.events.map((event) => JSON.stringify(event) + "\n").join(""));
+        } else sendJson(response, 200, eventId ? { event: page.events[0] } : page);
+        return true;
+      }
+    } catch (error) {
+      if (isWebError(error)) throw error;
+      if (error instanceof Error && error.message === "audit cursor not found") throw new WebNotFoundError("audit cursor not found");
+      if (error instanceof Error && /^(invalid audit|invalid security audit|security audit limit|retentionDays)/.test(error.message)) throw new WebInputError(error.message);
+      throw error;
+    }
+    throw new WebNotFoundError("organization audit endpoint not found");
   }
 
   if (request.method === "GET" && url.pathname === "/api/security/audit") {
@@ -11686,8 +11754,9 @@ export async function startWebServer(
       windowMs: 15 * 60 * 1_000,
     },
   );
+  const requestTasks = new Set<Promise<void>>();
   const server = createServer((request, response) => {
-    void (async () => {
+    const task = (async () => {
       const requestUrl = new URL(request.url ?? "/", "http://localhost");
       if (request.method === "GET" && requestUrl.pathname === "/api/readiness") {
         sendJson(response, readiness.ready ? 200 : 503, readiness);
@@ -11698,6 +11767,9 @@ export async function startWebServer(
         requestUrl.pathname,
       );
       const credential = bearerCredential(request);
+      const session = parseCookies(request.headers.cookie).nitely_session;
+      const auditContext: SecurityAuditContext = { requestId: randomUUID(), ...(session ? { sessionHash: createHash("sha256").update(session).digest("hex") } : {}) };
+      requestAuditContexts.set(request, auditContext);
       let securityActor: SecurityAuditActor = { type: "anonymous" };
       let preparedApiToken: PreparedApiTokenRequest | undefined;
       try {
@@ -11745,6 +11817,7 @@ export async function startWebServer(
             credential,
             response.statusCode,
             response.statusCode < 400 ? "ok" : `http_${response.statusCode}`,
+            auditContext,
           );
           return;
         }
@@ -11776,6 +11849,7 @@ export async function startWebServer(
           credential,
           404,
           "not_found",
+          auditContext,
         );
       } catch (error) {
         if (error instanceof ConnectionManagementDeniedError) error = new WebForbiddenError();
@@ -11798,12 +11872,16 @@ export async function startWebServer(
           credential,
           details.status,
           preparedApiToken?.denialReasonCode ?? details.code,
+          auditContext,
         );
         sendError(response, error);
       } finally {
         authorizedApiTokenRequests.delete(request);
+        requestAuditContexts.delete(request);
       }
     })();
+    requestTasks.add(task);
+    void task.then(() => requestTasks.delete(task), () => requestTasks.delete(task));
   });
   const closed = new Promise<void>((resolvePromise) => {
     server.once("close", resolvePromise);
@@ -11884,6 +11962,7 @@ export async function startWebServer(
       await new Promise<void>((resolvePromise, reject) => {
         server.close((error) => (error ? reject(error) : resolvePromise()));
       });
+      await Promise.allSettled(requestTasks);
     },
   };
 }

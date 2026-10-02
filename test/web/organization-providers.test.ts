@@ -11,7 +11,7 @@ import { createTask } from "../../src/web/tasks.js";
 import { FileProviderConnectionStore } from "../../src/providers/file-store.js";
 import { EventStore } from "../../src/events/store.js";
 import { eventStorePath } from "../../src/run/project.js";
-import { listSecurityAuditEvents } from "../../src/web/security-audit.js";
+import { listSecurityAuditEvents, queryOrganizationAudit } from "../../src/web/security-audit.js";
 
 const repos: string[] = [];
 afterEach(async () => { await Promise.all(repos.splice(0).map((repo) => rm(repo, { recursive: true, force: true }))); });
@@ -98,6 +98,8 @@ it("shares organization connections through real APIs and resolves actual task s
     expect(audit).toContainEqual(expect.objectContaining({ action: "providers.connection.use", actor: expect.objectContaining({ id: member.id, organizationId: org }), target: { type: "provider", id: shared.id } }));
     expect(audit).toContainEqual(expect.objectContaining({ action: "providers.connection.revoke", actor: expect.objectContaining({ id: owner.id, organizationId: org }) }));
     expect(JSON.stringify(audit)).not.toContain("rotated-org-secret");
+    const executions = await queryOrganizationAudit(repo, { organizationId: org, source: "runtime", runId });
+    expect(executions.events).toContainEqual(expect.objectContaining({ action: "runs.execute", actor: expect.objectContaining({ id: member.id, organizationId: org }), context: expect.objectContaining({ repositoryId: "home", runId }) }));
     const stored = await readFile(join(repo, ".nitely/organizations", createHash("sha256").update(org).digest("hex"), "connections.json"), "utf8");
     expect(stored).not.toContain("rotated-org-secret");
   } finally { await server.close(); }

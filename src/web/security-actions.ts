@@ -36,6 +36,8 @@ export function webSecurityActionForRequest(
   method: string | undefined,
   pathname: string,
 ): WebSecurityAction | null {
+  const audit = /^\/api\/organizations\/([^/]+)\/audit(?:\/|$)/.exec(pathname);
+  if (audit) return action(`audit.organization.${method === "GET" ? "view" : "manage"}`, method === "GET" ? "organizations:audit:view" : "organizations:manage", decodedTarget(pathname, /^\/api\/organizations\/([^/]+)/, "organization"));
   const organizationProvider = /^\/api\/organizations\/([^/]+)\/providers(?:\/|$)/.exec(pathname);
   if (organizationProvider) return action(`providers.organization.${method === "GET" ? "view" : "manage"}`, method === "GET" ? "providers:use:shared" : "providers:write:shared", decodedTarget(pathname, /^\/api\/organizations\/([^/]+)/, "organization"));
   const policy = /^\/api\/organizations\/([^/]+)\/security-policy(?:\/(revoke-sessions))?$/.exec(pathname);

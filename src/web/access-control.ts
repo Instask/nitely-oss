@@ -1,5 +1,6 @@
 export const WEB_PERMISSIONS = [
   "organizations:manage",
+  "organizations:audit:view",
   "tasks:view",
   "tasks:write",
   "planning:approve",
@@ -39,6 +40,7 @@ const organizationPermissions: Record<
   ReadonlySet<WebPermission>
 > = {
   owner: new Set([
+    "organizations:audit:view",
     "organizations:manage",
     "tasks:view",
     "tasks:write",
@@ -58,6 +60,7 @@ const organizationPermissions: Record<
     "preview:control",
   ]),
   maintainer: new Set([
+    "organizations:audit:view",
     "tasks:view",
     "tasks:write",
     "planning:approve",

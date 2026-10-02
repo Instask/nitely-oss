@@ -407,3 +407,43 @@ Connection mutations and use record actor, connection id, scope, and auth method
 without secret material. Reproducibility manifests retain the selected connection
 id and auth method. Later rotation/revocation leaves old run evidence untouched.
 Per-file leases serialize shared mutations and OAuth refreshes.
+
+### Organization audit
+
+Authenticated organization owners and maintainers have
+`organizations:audit:view`; maintainers serve as organization auditors. Global
+administrator status alone does not grant access to another organization's audit.
+`GET /api/organizations/:id/audit` returns newest events first with stable
+`eventId` and `createdAt`, and an optional `nextCursor`. Pass that cursor to
+retrieve older records. Filters are `from`/`until` (UTC ISO timestamps), `action`,
+`actorId`, `source`, `repositoryId`, `taskId`, `runId`, `providerId`, and `result`
+(`success` or `error`). Limits are 1–500, default 100. New events do not shift an
+existing cursor; a cursor removed by retention returns 404. Individual events use
+`GET .../audit/events/:eventId` with the same organization boundary.
+
+The first export format is JSONL: `GET .../audit/export?format=jsonl` accepts the
+same filters and limits. Each response is bounded to one page; continue with the
+`x-nitely-next-cursor` response header. Export keeps original ids/timestamps and
+records `audit.export` before releasing the response. Query and export scan the
+local file with bounded retained rows, rather than loading the entire log.
+
+`GET .../audit/retention` returns `{version:1,retentionDays:null}` until configured.
+Only organization owners can `PUT` that policy (`null` means retain indefinitely;
+integer days range from 1 to 3650). Changing policy does not delete records.
+`POST .../audit/prune` explicitly deletes only that organization's events strictly
+older than the configured cutoff, returning `deleted` and `cutoff`. Policy changes
+and prune requests are audited before mutation. Prune and all appends share a file
+lease and pruning uses a synced atomic replacement; other organizations' event
+metadata is preserved. Queries continue to include expired records until pruning.
+
+Audit records contain allowlisted metadata, source and organization attribution,
+request ids, and session hashes, without session cookies, credentials or run log
+payloads. Runtime execution and shared-provider use include resource identifiers
+when available. Legacy actor-attributed events remain queryable; unattributed
+legacy/local events remain available only through the operator's global audit API.
+
+Local JSONL is owner-only application-managed storage, not a tamper-proof ledger:
+file owners can edit it, there is no external signature chain, and retention
+intentionally rewrites it. Hosted deployments requiring immutable retention or
+multi-host writers must send audit metadata to an access-controlled external
+append-only store; the local file lease coordinates processes on one host only.
