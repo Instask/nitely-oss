@@ -4107,6 +4107,7 @@ async function runStoredWorkItem(
     dependencyGuards: workItemDependencyGuards(candidateSnapshot, workItems),
   };
   const starts = await evaluateWorkItemRunStarts({
+    executionBackend: webExecutionBackendPolicyForInput(serverInput, user.authMode).backend,
     repoPath,
     repoId: repository.id,
     repoName: repository.name,
@@ -4285,6 +4286,7 @@ async function buildAllSchedulerView(
           )
         ).map((view) => withRepository(view, repository));
         const starts = await evaluateWorkItemRunStarts({
+          executionBackend: webExecutionBackendPolicyForInput(input, user.authMode).backend,
           repoPath: repository.path,
           repoId: repository.id,
           repoName: repository.name,
@@ -9202,6 +9204,7 @@ async function handleApiRequest(
     );
     requireRecordAccess(snapshot.detail, user, "task not found");
     const preflight = await evaluateWebWorkItemRunPreflight({
+      executionBackend: execution.backend,
       repoPath: repository.path,
       workItem: snapshot.persisted ?? snapshot.detail,
       providerStore,
@@ -9228,6 +9231,7 @@ async function handleApiRequest(
     const persisted = snapshot.persisted;
     const starts = persisted
       ? await evaluateWorkItemRunStarts({
+            executionBackend: webExecutionBackendPolicyForInput(input, user.authMode).backend,
             repoPath: repository.path,
             repoId: repository.id,
             repoName: repository.name,
@@ -9246,6 +9250,7 @@ async function handleApiRequest(
     const preflight =
       eligibility?.checks.preflight ??
       (await evaluateWebWorkItemRunPreflight({
+      executionBackend: execution.backend,
         repoPath: repository.path,
         workItem: snapshot.detail,
         providerStore,
@@ -9849,6 +9854,7 @@ async function handleApiRequest(
       ),
     };
     const starts = await evaluateWorkItemRunStarts({
+      executionBackend: webExecutionBackendPolicyForInput(input, user.authMode).backend,
       repoPath: repository.path,
       repoId: repository.id,
       repoName: repository.name,
@@ -10321,6 +10327,7 @@ async function handleApiRequest(
     const persisted = snapshot.persisted;
     const starts = persisted
       ? await evaluateWorkItemRunStarts({
+          executionBackend: webExecutionBackendPolicyForInput(input, user.authMode).backend,
           repoPath: repository.path,
           repoId: repository.id,
           repoName: repository.name,

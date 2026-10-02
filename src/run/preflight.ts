@@ -530,9 +530,11 @@ export async function evaluateRunPreflight(
   const statuses = configuredProviderMap(
     await providerStatuses(repoPath, input.providerStore),
   );
-  const backend = normalizeExecutionBackendName(input.executionBackend ?? (input.env ?? process.env).NITELY_EXECUTION_BACKEND);
+  const executionEnv = input.env ?? (input.providerStore
+    ? await input.providerStore.resolveEnv() : process.env);
+  const backend = normalizeExecutionBackendName(input.executionBackend ?? executionEnv.NITELY_EXECUTION_BACKEND);
   const ociIssues = backend === "oci" ? await checkOciReadiness({
-    env: input.env,
+    env: executionEnv,
     stages: flow.spec.stages.filter(hasRuntimeCandidates).flatMap((stage) =>
       stageRuntimeCandidates(stage).map((candidate) => ({ ...stage, runtime: candidate.runtime }))),
   }) : [];
