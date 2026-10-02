@@ -28,6 +28,7 @@ import {
 } from "../run/run-flow.js";
 import {
   normalizeExecutionBackendName,
+  checkOciReadiness,
   type ExecutionBackendName,
 } from "../run/execution/backend.js";
 import { reapExpiredOciContainers } from "../run/execution/oci.js";
@@ -685,6 +686,7 @@ export interface WebSecurityReadiness {
       | "configured"
       | "unsafe-override";
     readonly unsafeOverride: boolean;
+    readonly issues?: readonly import("../run/execution/oci.js").OciReadinessIssue[];
   };
 }
 
@@ -11385,9 +11387,13 @@ export async function startWebServer(
       );
     }
   }
+  const executionEnv = runtimeInput.providerEnv || runtimeInput.authEnv
+    ? { ...runtimeInput.providerEnv, ...runtimeInput.authEnv } : process.env;
+  const executionIssues = securityPolicy.execution.backend === "oci"
+    ? await checkOciReadiness({ env: executionEnv }) : [];
   const readiness: WebSecurityReadiness = Object.freeze({
     schemaVersion: "nitely.web-security-readiness.v1",
-    ready: securityPolicy.authMode === "local" || adminConfigured,
+    ready: (securityPolicy.authMode === "local" || adminConfigured) && executionIssues.length === 0,
     production: securityPolicy.production,
     auth: {
       mode: securityPolicy.authMode,
@@ -11404,7 +11410,9 @@ export async function startWebServer(
       trustedProxy: securityPolicy.trustedProxy,
       secureCookie: securityPolicy.secureCookie,
     } as const,
-    execution: securityPolicy.execution,
+    execution: securityPolicy.execution.backend === "oci"
+      ? { ...securityPolicy.execution, issues: Object.freeze(executionIssues) }
+      : securityPolicy.execution,
   });
   Object.freeze(readiness.auth);
   Object.freeze(readiness.bind);
