@@ -1,7 +1,7 @@
 import { LocalExecutionBackend, type RuntimeEnv } from "./local.js";
 import { MiseExecutionBackend } from "./mise.js";
 import { parseNetworkAllowlist } from "./network-gateway.js";
-import { OciExecutionBackend } from "./oci.js";
+import { OciExecutionBackend, type OciReadinessIssue } from "./oci.js";
 import type { ExecutionBackend } from "./types.js";
 
 export type ExecutionBackendName = "local" | "mise" | "oci";
@@ -128,4 +128,34 @@ export function createExecutionBackend(
     });
   }
   return new LocalExecutionBackend({ env: input.env });
+}
+
+export async function checkOciReadiness(input: {
+  env?: RuntimeEnv;
+  stages?: import("./types.js").AgentRunnableStage[];
+} = {}): Promise<OciReadinessIssue[]> {
+  const env = input.env ?? process.env;
+  if (!env.NITELY_OCI_IMAGE?.trim()) {
+    return [{ code: "oci.image.missing", message: "NITELY_OCI_IMAGE is required for the OCI execution backend" }];
+  }
+  try {
+    const backend = createExecutionBackend({ backend: "oci", env }) as OciExecutionBackend;
+    if (!input.stages?.length) return await backend.checkReadiness();
+    const issues: OciReadinessIssue[] = [];
+    const groups = new Map<string, typeof input.stages>();
+    for (const stage of input.stages) groups.set(stage.id, [...(groups.get(stage.id) ?? []), stage]);
+    for (const stages of groups.values()) {
+      const failures: OciReadinessIssue[] = [];
+      let available = false;
+      for (const stage of stages) {
+        const result = await backend.checkReadiness(stage);
+        if (result.length === 0) { available = true; break; }
+        failures.push(...result);
+      }
+      if (!available) issues.push(...failures);
+    }
+    return issues;
+  } catch (error) {
+    return [{ code: "oci.configuration.invalid", message: error instanceof Error ? error.message : String(error) }];
+  }
 }

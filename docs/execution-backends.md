@@ -35,6 +35,17 @@ NITELY_OCI_NETWORK_ALLOWLIST=api.openai.com,api.anthropic.com \
 nitely run flows/implement-spec-bootstrap.json --repo .
 ```
 
+`GET /api/readiness` returns HTTP 503 with `execution.issues` when OCI
+cannot launch: `oci.image.missing`, `oci.image.not-local`,
+`oci.engine.not-rootless`, `oci.engine.unavailable`, or
+`oci.network.no-allowlist`. Startup probes are bounded and cached for the
+server process; restart after changing its execution environment.
+`nitely doctor <flow> --repo . --backend oci` checks the same conditions for
+the flow and verifies each selected runtime command inside the local image
+(`oci.runtime.unavailable`). `NITELY_<RUNTIME>_COMMAND` must name a command or
+path in the image, not a host installation. Probes use no network, credentials,
+or repository mounts.
+
 **Build the runner image first.** `--pull=never` means the image has to be on
 the host before a run starts. `docker/runner/` holds the in-repo baseline:
 

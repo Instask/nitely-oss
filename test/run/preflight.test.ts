@@ -419,3 +419,13 @@ it("checks repository command configuration before task admission", async () => 
   await writeFile(join(repoPath, ".nitely/instructions.json"), JSON.stringify({ configuration: { verifyCommand: "go test ./..." } }));
   expect((await evaluateRunPreflight(input)).issues.filter((issue) => issue.code === "flow-invalid")).toEqual([]);
 });
+
+it("blocks OCI doctor preflight on an unset image", async () => {
+  const repoPath = await mkdtemp(join(tmpdir(), "nitely-preflight-oci-"));
+  const report = await evaluateRunPreflight({
+    repoPath, flowPath: "fixture.json", flowDocument: JSON.stringify(flow()),
+    executionBackend: "oci", env: {}, providerStore: providerStore({ codex: true }),
+  });
+  expect(report.status).toBe("BLOCK");
+  expect(report.issues).toContainEqual(expect.objectContaining({ severity: "blocking", code: "oci.image.missing" }));
+});

@@ -935,6 +935,7 @@ export async function runSchedulerOnce(
       "automatic",
     );
     const starts = await evaluateWorkItemRunStarts({
+      executionBackend: input.executionBackend,
       repoPath,
       ...(input.repoId ? { repoId: input.repoId } : {}),
       ...(input.repoName ? { repoName: input.repoName } : {}),

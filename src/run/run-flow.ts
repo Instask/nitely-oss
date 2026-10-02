@@ -12538,6 +12538,7 @@ function createInjectedAgentMemoryScope(
         if (preparedContent === undefined) {
           const prepared = await prepareAgentMemory({
             repoPath: input.repoPath,
+            sourceRepoPath: input.workspace.path,
             runtime: runtime.runtime,
             model: runtime.model,
           });
