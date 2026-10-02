@@ -154,7 +154,7 @@ import type { ProviderOAuthOptions } from "../providers/file-store.js";
 import { bindProviderConnections, validateProviderConnectionBindings, resolveProviderStore } from "../providers/index.js";
 import { createProviderOAuthAdapters, PROVIDER_OAUTH_CLIENT_ENV } from "../providers/oauth/adapters.js";
 import type { ProviderOAuthAdapter } from "../providers/oauth/adapters.js";
-import { MissingConnectionError, ReconnectRequiredError } from "../providers/types.js";
+import { ConnectionManagementDeniedError, MissingConnectionError, ReconnectRequiredError } from "../providers/types.js";
 import { ProviderOAuthFlowError, ProviderOAuthFlowRegistry } from "./provider-oauth-flows.js";
 import type {
   ProviderAuthMethod,
@@ -11778,6 +11778,7 @@ export async function startWebServer(
           "not_found",
         );
       } catch (error) {
+        if (error instanceof ConnectionManagementDeniedError) error = new WebForbiddenError();
         if (error instanceof MissingConnectionError) error = new WebNotFoundError("provider connection not found");
         if (error instanceof ReconnectRequiredError) error = new WebInputError("provider connection requires reconnection");
         const details = errorStatusAndCode(error);
