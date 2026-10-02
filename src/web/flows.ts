@@ -1,3 +1,4 @@
+import { organizationSessionAccessAllowed, type OrganizationSessionAccess } from "./session-policy.js";
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
@@ -32,7 +33,7 @@ export interface FlowView {
   template?: FlowTemplateLineage;
 }
 
-export interface FlowAccessContext {
+export interface FlowAccessContext extends OrganizationSessionAccess {
   id: string;
   role: "admin" | "user";
   authMode: "local" | "required";
@@ -104,6 +105,7 @@ export function flowRecordVisibleToUser(
   record: Pick<FlowRecord, "ownerId" | "organizationId">,
   user?: FlowAccessContext,
 ): boolean {
+  if (!organizationSessionAccessAllowed(user, record.organizationId)) return false;
   if (!user || user.authMode === "local" || user.role === "admin") {
     return true;
   }
@@ -119,6 +121,7 @@ export function flowRecordWritableByUser(
   record: Pick<FlowRecord, "ownerId" | "organizationId">,
   user?: FlowAccessContext,
 ): boolean {
+  if (!organizationSessionAccessAllowed(user, record.organizationId)) return false;
   if (!user || user.authMode === "local" || user.role === "admin") {
     return true;
   }

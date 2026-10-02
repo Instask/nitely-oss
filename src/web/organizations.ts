@@ -22,6 +22,30 @@ export interface OrganizationRecord {
   members: Record<string, OrganizationMemberRecord>;
   createdAt: string;
   updatedAt: string;
+  securityPolicy?: OrganizationSecurityPolicy;
+  sessionRevocationVersion?: number;
+  userSessionRevocationVersions?: Record<string, number>;
+}
+
+export interface OrganizationSecurityPolicy {
+  version: 1;
+  maxSessionLifetimeSeconds: number;
+  idleTimeoutSeconds: number | null;
+  ssoRequired: boolean;
+}
+
+export const DEFAULT_ORGANIZATION_SECURITY_POLICY: OrganizationSecurityPolicy = {
+  version: 1, maxSessionLifetimeSeconds: 604800, idleTimeoutSeconds: null, ssoRequired: false,
+};
+
+export function validateOrganizationSecurityPolicy(value: unknown): OrganizationSecurityPolicy {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new WebInputError("invalid organization security policy");
+  const policy = value as OrganizationSecurityPolicy;
+  if (Object.keys(policy).some((key) => !["version", "maxSessionLifetimeSeconds", "idleTimeoutSeconds", "ssoRequired"].includes(key)) || policy.version !== 1 ||
+    !Number.isInteger(policy.maxSessionLifetimeSeconds) || policy.maxSessionLifetimeSeconds < 1 || policy.maxSessionLifetimeSeconds > 2592000 ||
+    policy.idleTimeoutSeconds !== null && (!Number.isInteger(policy.idleTimeoutSeconds) || policy.idleTimeoutSeconds < 1 || policy.idleTimeoutSeconds > 604800) ||
+    typeof policy.ssoRequired !== "boolean") throw new WebInputError("invalid organization security policy");
+  return { ...policy };
 }
 
 export interface PublicOrganizationMembership {
@@ -95,6 +119,10 @@ function parseOrganizationsFile(value: unknown): OrganizationsFile {
       throw new Error("invalid organizations.json: organization must be an object");
     }
     const org = organization as Record<string, unknown>;
+    if (org.securityPolicy !== undefined) validateOrganizationSecurityPolicy(org.securityPolicy);
+    if (org.sessionRevocationVersion !== undefined && (!Number.isSafeInteger(org.sessionRevocationVersion) || (org.sessionRevocationVersion as number) < 0)) throw new Error("invalid organization session revocation version");
+    if (org.userSessionRevocationVersions !== undefined && (!org.userSessionRevocationVersions || typeof org.userSessionRevocationVersions !== "object" || Array.isArray(org.userSessionRevocationVersions) ||
+      Object.values(org.userSessionRevocationVersions).some((version) => !Number.isSafeInteger(version) || (version as number) < 0))) throw new Error("invalid user session revocation versions");
     if (
       typeof org.members !== "object" ||
       org.members === null ||
@@ -344,7 +372,11 @@ export async function changeOrganizationMember(repoPath: string, id: string, act
   return await mutateOrganizations(repoPath, (file) => {
     const org = organizationForActor(file, id, actor, true);
     if (!Object.hasOwn(org.members, userId)) throw new WebNotFoundError("member not found");
-    if (role === undefined) delete org.members[userId];
+    if (role === undefined) {
+      delete org.members[userId];
+      const versions = org.userSessionRevocationVersions ??= {};
+      versions[userId] = (versions[userId] ?? 0) + 1;
+    }
     else org.members[userId] = { ...org.members[userId], role: validateOrganizationRole(role), updatedAt: new Date().toISOString() };
     org.updatedAt = new Date().toISOString();
     return { ok: true };
@@ -389,4 +421,52 @@ export async function resolveOrganizationInvitation(repoPath: string, id: string
     invitation.status = action === "accept" ? "accepted" : action === "decline" ? "declined" : "revoked";
     return { invitation: publicInvitation(invitation, now) };
   });
+}
+
+export type OrganizationPolicyActor = OrganizationActor & { role?: "admin" | "user"; breakGlassOrganizationId?: string };
+
+function policyOrganization(file: OrganizationsFile, id: string, actor: OrganizationPolicyActor) {
+  if (actor.role === "admin" && actor.breakGlassOrganizationId === id) {
+    if (!Object.hasOwn(file.organizations, id)) throw new WebNotFoundError("organization not found");
+    return file.organizations[id];
+  }
+  return organizationForActor(file, id, actor, true);
+}
+
+export async function getOrganizationSecurityPolicy(repoPath: string, id: string, actor: OrganizationPolicyActor) {
+  const org = policyOrganization(await readOrganizations(repoPath), id, actor);
+  return { ...(org.securityPolicy ?? DEFAULT_ORGANIZATION_SECURITY_POLICY) };
+}
+
+export async function updateOrganizationSecurityPolicy(repoPath: string, id: string, actor: OrganizationPolicyActor, value: unknown) {
+  const policy = validateOrganizationSecurityPolicy(value);
+  return await mutateOrganizations(repoPath, (file) => {
+    const org = policyOrganization(file, id, actor);
+    org.securityPolicy = policy;
+    org.updatedAt = new Date().toISOString();
+    return policy;
+  });
+}
+
+export async function revokeOrganizationSessions(repoPath: string, id: string, actor: OrganizationPolicyActor, userId?: string) {
+  return await mutateOrganizations(repoPath, (file) => {
+    const org = policyOrganization(file, id, actor);
+    if (userId !== undefined) {
+      if (!Object.hasOwn(org.members, userId)) throw new WebNotFoundError("member not found");
+      const versions = org.userSessionRevocationVersions ??= {};
+      versions[userId] = (versions[userId] ?? 0) + 1;
+    } else org.sessionRevocationVersion = (org.sessionRevocationVersion ?? 0) + 1;
+    org.updatedAt = new Date().toISOString();
+    return { ok: true };
+  });
+}
+
+export async function organizationSessionScopes(repoPath: string, userId: string, globalAdmin = false) {
+  const file = await readOrganizations(repoPath);
+  return Object.values(file.organizations).filter((org) => globalAdmin || Object.hasOwn(org.members, userId)).map((org) => ({
+    organizationId: org.id,
+    policy: org.securityPolicy ?? DEFAULT_ORGANIZATION_SECURITY_POLICY,
+    organizationVersion: org.sessionRevocationVersion ?? 0,
+    userVersion: org.userSessionRevocationVersions?.[userId] ?? 0,
+  }));
 }

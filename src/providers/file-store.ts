@@ -70,6 +70,8 @@ export interface ProviderOAuthOptions {
 
 export interface FileProviderConnectionStoreOptions {
   path: string;
+  /** Scope every read/use/mutation before resolving secret material. */
+  connectionAllowed?: (record: ProviderConnectionRecord) => boolean;
   /**
    * Additional stores read, in order, for providers `path` does not hold.
    * Reads merge; new connections never leave `path`. Refresh rotation and
@@ -459,6 +461,7 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
   private readonly inner: EnvProviderConnectionStore;
   private readonly oauth: ProviderOAuthOptions;
   private readonly now: () => Date;
+  private readonly connectionAllowed: (record: ProviderConnectionRecord) => boolean;
 
   constructor(options: FileProviderConnectionStoreOptions) {
     const secretStore = options.secretStore ??
@@ -469,6 +472,7 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
       secrets: secretStore(path),
     }));
     this.auditPath = options.auditPath ?? `${options.path}.audit.jsonl`;
+    this.connectionAllowed = options.connectionAllowed ?? (() => true);
     this.env = options.env;
     this.oauth = options.oauth ?? {};
     this.now = options.now ?? (() => new Date());
@@ -488,8 +492,9 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
     const held = new Set<string>();
     for (const source of [this.primary, ...this.fallbacks]) {
       const loaded = await readConnections(source.path);
-      const providers = new Set(loaded.file.connections.map((c) => c.providerId));
-      for (const record of loaded.file.connections) {
+      const permitted = loaded.file.connections.filter(this.connectionAllowed);
+      const providers = new Set(permitted.map((c) => c.providerId));
+      for (const record of permitted) {
         if (held.has(record.providerId)) continue;
         merged.push({
           record,
@@ -502,6 +507,10 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
       for (const providerId of providers) held.add(providerId);
     }
     return merged;
+  }
+
+  private normalizePermittedDefaults(records: ProviderConnectionRecord[]): ProviderConnectionRecord[] {
+    return [...records.filter((record) => !this.connectionAllowed(record)), ...normalizeDefaults(records.filter(this.connectionAllowed))];
   }
 
   private select(
@@ -800,14 +809,14 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
     }
     const file = await this.loadForWrite(this.primary);
     const siblings = file.connections.filter(
-      (record) => record.providerId === input.providerId && record.authMethod === authMethod,
+      (record) => this.connectionAllowed(record) && record.providerId === input.providerId && record.authMethod === authMethod,
     );
     let existing: ProviderConnectionRecord | undefined;
     if (input.connectionId) {
       existing = file.connections.find(
         (record) => record.id === input.connectionId && record.providerId === input.providerId,
       );
-      if (!existing) {
+      if (!existing || !this.connectionAllowed(existing)) {
         throw new Error(
           `provider ${input.providerId} has no connection ${input.connectionId}`,
         );
@@ -842,6 +851,7 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
       updatedAt: now,
       lastValidatedAt: now,
     };
+    if (!this.connectionAllowed(record)) throw new MissingConnectionError(input.providerId, "connection is unavailable in this scope");
     await this.primary.secrets.put(record.credentialRef, {
       accessToken: input.value,
       ...(input.refreshToken ? { refreshToken: input.refreshToken } : {}),
@@ -850,13 +860,13 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
     const others = file.connections
       .filter((candidate) => candidate.id !== record.id)
       .map((candidate) =>
-        record.isDefault &&
+        record.isDefault && this.connectionAllowed(candidate) &&
           candidate.providerId === record.providerId &&
           candidate.authMethod === record.authMethod
           ? { ...candidate, isDefault: false }
           : candidate,
       );
-    file.connections = normalizeDefaults([...others, record]);
+    file.connections = this.normalizePermittedDefaults([...others, record]);
     await writeConnections(this.primary.path, file);
     const written = file.connections.find((candidate) => candidate.id === record.id) ?? record;
     await this.appendAuditEvent({
@@ -883,11 +893,11 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
     const file = await this.loadForWrite(this.primary);
     const removed = file.connections.filter(
       (record) =>
-        record.providerId === providerId &&
+        this.connectionAllowed(record) && record.providerId === providerId &&
         (selector?.connectionId === undefined || record.id === selector.connectionId) &&
         (selector?.authMethod === undefined || record.authMethod === selector.authMethod),
     );
-    file.connections = normalizeDefaults(
+    file.connections = this.normalizePermittedDefaults(
       file.connections.filter((record) => !removed.includes(record)),
     );
     for (const record of removed) {
@@ -954,15 +964,15 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
     const target = file.connections.find(
       (record) => record.id === connectionId && record.providerId === providerId,
     );
-    if (!target) {
+    if (!target || !this.connectionAllowed(target)) {
       throw new MissingConnectionError(
         providerId,
         `provider ${providerId} has no connection ${connectionId}`,
       );
     }
-    file.connections = normalizeDefaults(
+    file.connections = this.normalizePermittedDefaults(
       file.connections.map((record) =>
-        record.providerId === providerId && record.authMethod === target.authMethod
+        this.connectionAllowed(record) && record.providerId === providerId && record.authMethod === target.authMethod
           ? { ...record, isDefault: record.id === connectionId }
           : record,
       ),

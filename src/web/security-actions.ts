@@ -36,6 +36,8 @@ export function webSecurityActionForRequest(
   method: string | undefined,
   pathname: string,
 ): WebSecurityAction | null {
+  const policy = /^\/api\/organizations\/([^/]+)\/security-policy(?:\/(revoke-sessions))?$/.exec(pathname);
+  if (policy && ["GET", "PUT", "POST"].includes(method ?? "")) return action(`organizations.policy.${policy[2] ?? (method === "GET" ? "view" : "update")}`, "organizations:manage", decodedTarget(pathname, /^\/api\/organizations\/([^/]+)/, "organization"));
   const oidc = /^\/api\/organizations\/([^/]+)\/sso\/oidc(?:\/(login|link|callback))?$/.exec(pathname);
   if (oidc && ["GET", "POST", "PUT"].includes(method ?? "")) {
     const target = decodedTarget(pathname, /^\/api\/organizations\/([^/]+)/, "organization");

@@ -17,9 +17,11 @@ import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { withKnowledgeLease } from "../knowledge-repositories/lock.js";
+import { evaluateOrganizationSession, type OrganizationSessionAccess } from "./session-policy.js";
 import { WebForbiddenError } from "./errors.js";
 
 import {
+  organizationSessionScopes,
   ensureDefaultOrganizationForUser,
   listPublicMemberships,
   type PublicOrganizationMembership,
@@ -64,7 +66,12 @@ export interface SessionRecord {
   expiresAt: string;
   authenticationMethod?: "password" | "oidc";
   organizationId?: string;
+  organizationVersions?: Record<string, { organization: number; user: number }>;
+  lastActivityAt?: string;
+  organizationActivity?: Record<string, string>;
 }
+
+export type SessionUser = PublicUser & OrganizationSessionAccess;
 
 export interface CreateUserInput {
   email: string;
@@ -923,6 +930,9 @@ export async function createSession(
   userId: string,
   options: SessionOptions = {},
 ): Promise<SessionRecord> {
+  const user = await getPublicUser(repoPath, userId);
+  if (!user) throw new Error("session user not found");
+  const scopes = await organizationSessionScopes(repoPath, userId, user.role === "admin");
   const now = options.now?.() ?? new Date();
   const session: SessionRecord = {
     version: 1,
@@ -931,6 +941,7 @@ export async function createSession(
     createdAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + sessionTtlMs).toISOString(),
     authenticationMethod: options.authenticationMethod ?? "password",
+    organizationVersions: Object.fromEntries(scopes.map((scope) => [scope.organizationId, { organization: scope.organizationVersion, user: scope.userVersion }])),
     ...(options.organizationId ? { organizationId: options.organizationId } : {}),
   };
   await writeJsonAtomic(sessionPath(repoPath, session.id), session);
@@ -957,37 +968,55 @@ async function readSession(
 export async function readSessionUser(
   repoPath: string,
   sessionId: string,
-  options: Pick<SessionOptions, "now"> = {},
-): Promise<PublicUser | null> {
-  const session = await readSession(repoPath, sessionId);
-  if (!session) {
-    return null;
-  }
-  const now = options.now?.() ?? new Date();
-  if (new Date(session.expiresAt).getTime() <= now.getTime()) {
-    await deleteSession(repoPath, sessionId).catch(() => {});
-    return null;
-  }
-  const user = await getPublicUser(repoPath, session.userId);
-  if (session.authenticationMethod === "oidc") {
-    const membership = user?.memberships?.find((member) => member.organizationId === session.organizationId);
-    if (!membership) return null;
-    return { ...user!, currentOrganizationId: membership.organizationId, currentOrganizationRole: membership.role };
-  }
-  return user;
+  options: Pick<SessionOptions, "now" | "organizationId"> & { touch?: boolean; breakGlass?: boolean; auditBreakGlass?: boolean } = {},
+): Promise<SessionUser | null> {
+  let path: string;
+  try { path = sessionPath(repoPath, sessionId); } catch { return null; }
+  if (!(await readSession(repoPath, sessionId))) return null;
+  // Touches and logout share this lease so an in-flight idle refresh cannot resurrect a revoked session.
+  return await withKnowledgeLease({ path: path + ".lock", waitMs: 10_000 }, async () => {
+    const session = await readSession(repoPath, sessionId);
+    if (!session) return null;
+    const now = options.now?.() ?? new Date();
+    if (!Number.isFinite(Date.parse(session.expiresAt)) || Date.parse(session.expiresAt) <= now.getTime()) {
+      await unlink(path);
+      return null;
+    }
+    const user = await getPublicUser(repoPath, session.userId);
+    if (!user) return null;
+    if (session.authenticationMethod === "oidc" && !user.memberships?.some((member) => member.organizationId === session.organizationId)) return null;
+    const scopes = await organizationSessionScopes(repoPath, user.id, user.role === "admin");
+    const requested = options.organizationId ?? session.organizationId ?? user.currentOrganizationId;
+    const decisions = scopes.map((scope) => ({ ...scope, decision: evaluateOrganizationSession({ ...scope, session, now,
+      breakGlass: options.breakGlass === true && user.role === "admin" && scope.organizationId === requested }) }));
+    const selected = decisions.find((scope) => scope.organizationId === requested);
+    if (options.organizationId && selected && !selected.decision.allowed) return null;
+    const current = selected?.decision.allowed ? selected : decisions.find((scope) => scope.decision.allowed && user.memberships?.some((member) => member.organizationId === scope.organizationId));
+    if (!current && user.memberships?.length) return null;
+    if (current?.decision.breakGlass && options.auditBreakGlass !== false) {
+      await appendSecurityAuditEvent(repoPath, { action: "auth.break-glass", decision: "allow", outcome: "success", httpStatus: 200,
+        reasonCode: "sso_policy_recovery", actor: { type: "user", id: user.id, globalRole: "admin", organizationId: current.organizationId }, target: { type: "organization", id: current.organizationId } });
+    }
+    if (decisions.some((scope) => scope.decision.allowed && scope.policy.idleTimeoutSeconds !== null) && options.touch !== false) {
+      const activity = session.organizationActivity ??= {};
+      for (const scope of decisions) {
+        if (scope.decision.allowed && scope.policy.idleTimeoutSeconds !== null) activity[scope.organizationId] = now.toISOString();
+      }
+      await writeJsonAtomic(path, session);
+    }
+    const role = user.memberships?.find((member) => member.organizationId === current?.organizationId)?.role;
+    return { ...user, memberships: user.memberships?.filter((member) => decisions.find((scope) => scope.organizationId === member.organizationId)?.decision.allowed), sessionDeniedOrganizationIds: decisions.filter((scope) => !scope.decision.allowed).map((scope) => scope.organizationId),
+      ...(current ? { currentOrganizationId: current.organizationId, currentOrganizationRole: role } : {}),
+      ...(current?.decision.breakGlass ? { breakGlassOrganizationId: current.organizationId } : {}) };
+  });
 }
 
-export async function deleteSession(
-  repoPath: string,
-  sessionId: string,
-): Promise<void> {
-  try {
-    await unlink(sessionPath(repoPath, sessionId));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw error;
-    }
-  }
+export async function deleteSession(repoPath: string, sessionId: string): Promise<void> {
+  const path = sessionPath(repoPath, sessionId);
+  if (!(await readSession(repoPath, sessionId))) return;
+  await withKnowledgeLease({ path: path + ".lock", waitMs: 10_000 }, async () => {
+    try { await unlink(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  });
 }
 
 export async function invalidateUserSessions(
@@ -1010,7 +1039,7 @@ export async function invalidateUserSessions(
     const session = JSON.parse(await readFile(path, "utf8")) as SessionRecord;
     if (session.userId !== userId) continue;
     try {
-      await unlink(path);
+      await deleteSession(repoPath, session.id);
       invalidated += 1;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {

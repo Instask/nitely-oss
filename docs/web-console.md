@@ -344,3 +344,36 @@ membership; JIT never restores a removed member. Local password sign-in remains
 available. Configuration changes invalidate pending sign-ins. Login, failure,
 linking and configuration actions use the existing metadata-only local audit;
 ID/access tokens, authorization codes and client secrets are not recorded.
+
+Organization session policy is read with
+`GET /api/organizations/:id/security-policy` and replaced by an organization
+owner with `PUT` on that path. The complete version 1 record contains
+`maxSessionLifetimeSeconds` (1–2592000), `idleTimeoutSeconds` (1–604800 or
+`null`), and `ssoRequired` (boolean). Defaults are seven days, no idle timeout,
+and optional SSO. The existing seven-day cookie lifetime remains an upper bound.
+Unknown fields and invalid limits are rejected.
+
+Policy is checked server-side on every authenticated request. Idle activity is
+refreshed across the browser session’s currently permitted organizations; an
+idle-expired organization cannot be revived by activity in another. Inspecting a
+session for audit does not refresh it. An SSO-required organization accepts only
+an OIDC session issued for that organization. Switching the current workspace
+cannot reveal its tasks, runs, flows, repositories, notifications, or shared
+credentials through another organization. Required-auth policy endpoints enforce
+current owner membership; local mode keeps its existing defaults.
+
+Owners can `POST /api/organizations/:id/security-policy/revoke-sessions` with
+`{}` to revoke every existing session for that organization, or `{"userId":"…"}`
+to revoke one current member's sessions there. Other organizations remain usable.
+A fresh sign-in is required; removing and re-adding a member cannot restore an
+old session. These browser controls do not revoke separately issued machine API
+tokens. A browser session denied in any organization cannot approve a new
+instance-wide device token.
+
+For SSO policy recovery, the operator can enable `NITELY_WEB_BREAK_GLASS=true`.
+A global administrator must also send `x-nitely-break-glass: true` to the policy
+endpoint. This exception applies only to the requested organization's policy
+endpoint and requires a successful audit write before access. It cannot bypass
+expiry, idle timeout, or revocation. Policy reads, changes, revocations, and
+recovery access produce security audit events. Disable the operator switch after
+recovery.

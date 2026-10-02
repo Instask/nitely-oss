@@ -435,6 +435,7 @@ import {
   canonicalChangeRequestTarget,
   changeRequestIdentity,
 } from "./change-requests.js";
+import { organizationSessionAccessAllowed, type OrganizationSessionAccess } from "./session-policy.js";
 import { configureOrganizationOidc, getOrganizationOidc, startOrganizationOidc, finishOrganizationOidc } from "./oidc.js";
 import {
   bootstrapInitialAdmin,
@@ -450,6 +451,7 @@ import {
 } from "./users.js";
 import {
   type PublicOrganizationMembership,
+  getOrganizationSecurityPolicy, updateOrganizationSecurityPolicy, revokeOrganizationSessions,
   listOrganizationMembers, changeOrganizationMember,
   listOrganizationInvitations, createOrganizationInvitation, resolveOrganizationInvitation,
 } from "./organizations.js";
@@ -593,7 +595,7 @@ function providerStoreOAuthOptions(
 
 export type WebAuthMode = "local" | "required";
 
-export interface WebUserContext {
+export interface WebUserContext extends OrganizationSessionAccess {
   id: string;
   email: string;
   role: "admin" | "user";
@@ -1640,6 +1642,7 @@ function selectOrganizationContext(
   const membership = (user.memberships ?? []).find(
     (candidate) => candidate.organizationId === requestedOrganizationId,
   );
+  if (!membership && (user as OrganizationSessionAccess).breakGlassOrganizationId === requestedOrganizationId) return { ...user, currentOrganizationId: requestedOrganizationId };
   if (!membership) {
     throw new WebForbiddenError("organization access required");
   }
@@ -1700,6 +1703,17 @@ function clearSessionCookie(secure: boolean): string {
   }`;
 }
 
+function sessionRequestPolicyOptions(request: IncomingMessage, input: { authEnv?: Record<string, string | undefined> }) {
+  const url = new URL(request.url ?? "/", "http://localhost");
+  const route = /^\/api\/organizations\/([^/]+)/.exec(url.pathname);
+  const header = request.headers["x-nitely-organization-id"];
+  let organizationId: string | undefined;
+  try { organizationId = route ? decodeURIComponent(route[1]) : typeof header === "string" ? header : undefined; } catch { throw new WebInputError("invalid organization id"); }
+  const breakGlass = (input.authEnv ?? process.env).NITELY_WEB_BREAK_GLASS === "true" && requestHeader(request, "x-nitely-break-glass") === "true" &&
+    /^\/api\/organizations\/[^/]+\/security-policy(?:\/revoke-sessions)?$/.test(url.pathname);
+  return { organizationId, breakGlass };
+}
+
 async function resolveUserContext(
   request: IncomingMessage,
   input: Required<Pick<StartWebServerInput, "host" | "port">> &
@@ -1718,7 +1732,7 @@ async function resolveUserContext(
   if (!sessionId) {
     return null;
   }
-  const user = await readSessionUser(repoPath, sessionId);
+  const user = await readSessionUser(repoPath, sessionId, sessionRequestPolicyOptions(request, input));
   const requestedOrganizationId = request.headers["x-nitely-organization-id"];
   return user
     ? publicContext(
@@ -1763,7 +1777,7 @@ async function securityAuditActorForRequest(
   }
   const sessionId = parseCookies(request.headers.cookie).nitely_session;
   if (!sessionId) return { type: "anonymous" };
-  const user = await readSessionUser(repoPath, sessionId);
+  const user = await readSessionUser(repoPath, sessionId, { ...sessionRequestPolicyOptions(request, input), touch: false, auditBreakGlass: false });
   if (!user) return { type: "anonymous" };
   const requestedOrganizationId = request.headers["x-nitely-organization-id"];
   const selected =
@@ -1793,6 +1807,7 @@ function recordVisibleToUser(
   record: { ownerId?: string; organizationId?: string },
   user: WebUserContext,
 ): boolean {
+  if (!organizationSessionAccessAllowed(user, record.organizationId)) return false;
   if (user.authMode === "local" || user.role === "admin") {
     return true;
   }
@@ -1808,6 +1823,7 @@ function repositoryVisibleToUser(
   repository: WebRepository,
   user: WebUserContext,
 ): boolean {
+  if (!organizationSessionAccessAllowed(user, repository.organizationId)) return false;
   if (user.authMode === "local" || user.role === "admin") {
     return true;
   }
@@ -2092,6 +2108,7 @@ function requireWriteAccessToOrganization(
   organizationId: string | undefined,
   permission: WebPermission = "tasks:write",
 ): void {
+  if (!organizationSessionAccessAllowed(user, organizationId)) throw new WebForbiddenError("organization session policy denied access");
   const role = (user.memberships ?? []).find(
     (membership) => membership.organizationId === organizationId,
   )?.role;
@@ -2115,6 +2132,7 @@ function requireWriteAccessToRecord(
   record: { ownerId?: string; organizationId?: string },
   permission: WebPermission = "tasks:write",
 ): void {
+  if (!organizationSessionAccessAllowed(user, record.organizationId)) throw new WebForbiddenError("organization session policy denied access");
   if (user.authMode === "local" || user.role === "admin") {
     return;
   }
@@ -2132,6 +2150,7 @@ function currentWritableOrganizationId(
   user: WebUserContext,
   permission: WebPermission = "tasks:write",
 ): string | undefined {
+  if (!organizationSessionAccessAllowed(user, user.currentOrganizationId)) throw new WebForbiddenError("organization session policy denied access");
   if (user.authMode === "local" || user.role === "admin") {
     return user.currentOrganizationId;
   }
@@ -2143,6 +2162,7 @@ function requireCurrentOrganizationPermission(
   user: WebUserContext,
   permission: WebPermission,
 ): void {
+  if (!organizationSessionAccessAllowed(user, user.currentOrganizationId)) throw new WebForbiddenError("organization session policy denied access");
   if (user.authMode === "local" || user.role === "admin") return;
   const role = user.currentOrganizationId
     ? (user.memberships ?? []).find(
@@ -3497,6 +3517,7 @@ function providerStoreForUser(
   return new FileProviderConnectionStore({
     path: join(repoPath, ".nitely", "users", user.id, "connections.json"),
     fallbackPaths: [join(repoPath, ".nitely", "connections.json")],
+    connectionAllowed: (record) => organizationSessionAccessAllowed(user, record.credential.organizationId),
     env: input.providerEnv ?? process.env,
     commandStatus: input.providerCommandStatus,
     ...providerStoreOAuthOptions(input),
@@ -4672,6 +4693,7 @@ function notificationVisibleToUser(
   notification: NotificationRecord,
   user: WebUserContext,
 ): boolean {
+  if (!organizationSessionAccessAllowed(user, notification.organizationId ?? notification.teamId)) return false;
   if (user.authMode === "local" || user.role === "admin") {
     return true;
   }
@@ -4704,6 +4726,7 @@ function requireNotificationManageAccess(
   notification: NotificationRecord,
   user: WebUserContext,
 ): void {
+  if (!organizationSessionAccessAllowed(user, notification.organizationId ?? notification.teamId)) throw new WebForbiddenError("organization session policy denied access");
   if (user.authMode === "local" || user.role === "admin") {
     return;
   }
@@ -4723,6 +4746,7 @@ function notificationManageableByUser(
   notification: NotificationRecord,
   user: WebUserContext,
 ): boolean {
+  if (!organizationSessionAccessAllowed(user, notification.organizationId ?? notification.teamId)) return false;
   if (user.authMode === "local" || user.role === "admin") {
     return true;
   }
@@ -4752,7 +4776,7 @@ function userBelongsToOrganization(user: PublicUser, organizationId: string): bo
 function manageableNotificationOrganizationIds(user: WebUserContext): string[] {
   return (user.memberships ?? [])
     .filter((membership) =>
-      membership.role === "owner" || membership.role === "maintainer",
+      organizationSessionAccessAllowed(user, membership.organizationId) && (membership.role === "owner" || membership.role === "maintainer"),
     )
     .map((membership) => membership.organizationId);
 }
@@ -4771,7 +4795,13 @@ function assignmentDirectoryUsers(
     ];
   }
   if (currentUser.role === "admin") {
-    return users;
+    if (!currentUser.sessionDeniedOrganizationIds?.length) return users;
+    return users.flatMap((user) => {
+      const memberships = user.memberships?.filter((member) => organizationSessionAccessAllowed(currentUser, member.organizationId));
+      if (user.memberships?.length && !memberships?.length) return [];
+      const current = memberships?.[0];
+      return [{ ...user, memberships, currentOrganizationId: current?.organizationId, currentOrganizationRole: current?.role }];
+    });
   }
   const manageableIds = new Set(manageableNotificationOrganizationIds(currentUser));
   if (manageableIds.size > 0) {
@@ -6759,6 +6789,7 @@ function requireSharedProviderCredentialAccess(
   user: WebUserContext,
   organizationId: string | undefined,
 ): void {
+  if (!organizationSessionAccessAllowed(user, organizationId)) throw new WebForbiddenError();
   requireCurrentOrganizationPermission(user, "providers:write:shared");
   if (
     user.authMode === "required" &&
@@ -7440,6 +7471,8 @@ async function handleApiRequest(
       );
     }
     const decision = body.decision;
+    // Device grants carry instance-wide authority, so a scoped browser session cannot mint one.
+    if (decision === "approve" && actor.sessionDeniedOrganizationIds?.length) throw new WebForbiddenError("organization session policy denies instance-wide token issuance");
     const userCode = normalizeUserCode(
       typeof body.userCode === "string" ? body.userCode : "",
     );
@@ -7934,6 +7967,27 @@ async function handleApiRequest(
     }
   }
 
+  const policyRoute = /^\/api\/organizations\/([^/]+)\/security-policy(?:\/(revoke-sessions))?$/.exec(url.pathname);
+  if (policyRoute) {
+    if (authMode !== "required") throw new WebNotFoundError("organization policy requires authenticated mode");
+    const user = await requireUserContext(request, input, homeRepoPath);
+    let org: string;
+    try { org = decodeURIComponent(policyRoute[1]); } catch { throw new WebInputError("invalid organization id"); }
+    if (!policyRoute[2] && (request.method === "GET" || request.method === "PUT")) {
+      const policy = request.method === "GET" ? await getOrganizationSecurityPolicy(homeRepoPath, org, user)
+        : await updateOrganizationSecurityPolicy(homeRepoPath, org, user, await readRequestJson(request));
+      sendJson(response, 200, { policy });
+      return true;
+    }
+    if (policyRoute[2] && request.method === "POST") {
+      const body = requireObject(await readRequestJson(request));
+      if (body.userId !== undefined && (typeof body.userId !== "string" || !body.userId)) throw new WebInputError("invalid user id");
+      sendJson(response, 200, await revokeOrganizationSessions(homeRepoPath, org, user, body.userId as string | undefined));
+      return true;
+    }
+    throw new WebNotFoundError("organization policy endpoint not found");
+  }
+
   const oidcRoute = /^\/api\/organizations\/([^/]+)\/sso\/oidc(?:\/(login|link|callback))?$/.exec(url.pathname);
   if (oidcRoute) {
     if (authMode !== "required") throw new WebNotFoundError("OIDC requires authenticated mode");
@@ -7975,7 +8029,8 @@ async function handleApiRequest(
         decision: "allow", outcome: "success", httpStatus: 200, reasonCode: result.created ? "jit_provisioned" : "ok",
         actor: { type: "user", id: result.userId, organizationId: org }, target: { type: "organization", id: org } });
       const browser = requestHeader(request, "accept").includes("text/html");
-      sendJsonWithHeaders(response, browser ? 303 : 200, { authRequired: true, user: await readSessionUser(homeRepoPath, session.id) },
+      const authenticatedUser = await readSessionUser(homeRepoPath, session.id, { organizationId: org });
+      sendJsonWithHeaders(response, browser ? 303 : 200, { authRequired: true, user: authenticatedUser && { id: authenticatedUser.id, email: authenticatedUser.email, role: authenticatedUser.role, memberships: authenticatedUser.memberships, currentOrganizationId: org, currentOrganizationRole: authenticatedUser.currentOrganizationRole } },
         { "set-cookie": sessionCookie(session.id, true), ...(browser ? { location: "/" } : {}) });
       return true;
     }
