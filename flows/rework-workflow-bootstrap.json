@@ -2,6 +2,14 @@
   "apiVersion": "nitely.dev/v1alpha1",
   "kind": "Flow",
   "metadata": {
+    "configurables": [
+      {
+        "key": "verifyCommand",
+        "label": "Repository verification command",
+        "type": "text",
+        "required": true
+      }
+    ],
     "name": "rework-workflow-bootstrap",
     "inputs": [{ "id": "spec" }, { "id": "tech-design" }]
   },
@@ -19,7 +27,7 @@
       {
         "id": "verify",
         "type": "command",
-        "command": "git diff --check && pnpm exec vitest run test/flow/load.test.ts test/pr-comments/loop.test.ts && pnpm run check && pnpm run build",
+        "command": "git diff --check && {{config.verifyCommand}}",
         "timeoutMs": 600000,
         "inputs": ["implementation"],
         "outputs": ["test-report"]

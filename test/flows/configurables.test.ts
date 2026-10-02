@@ -67,3 +67,10 @@ describe("flow configurables", () => {
     ).toThrow(new FlowConfigurationError("unknown configurable: other"));
   });
 });
+
+it("uses repository defaults only for declared keys and lets task values override them", () => {
+  const flow = flowWithConfigurables([{ key: "verifyCommand", label: "Verify", type: "text", required: true }]);
+  expect(normalizeFlowConfiguration(flow, {}, { verifyCommand: "pytest -q", setupCommand: "uv sync" })).toEqual({ verifyCommand: "pytest -q" });
+  expect(normalizeFlowConfiguration(flow, { verifyCommand: "go test ./..." }, { verifyCommand: "pytest -q" })).toEqual({ verifyCommand: "go test ./..." });
+  expect(() => normalizeFlowConfiguration(flow, {}, {})).toThrow("missing required configurable: verifyCommand");
+});

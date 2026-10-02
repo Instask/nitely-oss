@@ -1932,7 +1932,7 @@ it("provisions bootstrap dependencies explicitly before the test gate", async ()
   for (const suffix of ["", "-claude", "-grok", "-pi"]) {
     const { flow, graph } = await loadFlow(`flows/implement-spec-bootstrap${suffix}.json`, { externalInputs: ["spec", "tech-design"] });
     expect(flow.spec.stages.find((stage) => stage.id === "setup")).toMatchObject({
-      type: "command", command: "pnpm install --frozen-lockfile", networkDomains: ["registry.npmjs.org"],
+      type: "command", command: "{{config.setupCommand}}", networkDomains: ["registry.npmjs.org"],
       inputs: ["implementation"], outputs: ["dependencies"],
     });
     expect(flow.spec.stages.find((stage) => stage.id === "test")?.inputs).toContain("dependencies");

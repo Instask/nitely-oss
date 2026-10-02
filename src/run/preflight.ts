@@ -22,6 +22,8 @@ import type {
   ProviderConnectionStore,
   ProviderId,
 } from "../providers/types.js";
+import { normalizeFlowConfiguration } from "../flows/configurables.js";
+import { loadProjectInstructions } from "./project-instructions.js";
 import type { WorkItemRecord } from "../work-items/types.js";
 
 export type RunPreflightStatus = "PASS" | "WARN" | "BLOCK";
@@ -76,6 +78,7 @@ export interface EvaluateRunPreflightInput {
   flowDocument?: string;
   inputs?: Record<string, ResourceReference>;
   providerStore?: ProviderConnectionStore;
+  configuration?: Record<string, unknown>;
 }
 
 export interface EvaluateWorkItemRunPreflightInput {
@@ -524,7 +527,17 @@ export async function evaluateRunPreflight(
   const statuses = configuredProviderMap(
     await providerStatuses(repoPath, input.providerStore),
   );
+  const configurationIssues: RunPreflightIssue[] = [];
+  try {
+    const instructions = await loadProjectInstructions(repoPath);
+    normalizeFlowConfiguration(flow, input.configuration,
+      instructions.loaded ? instructions.configuration : undefined);
+  } catch (error) {
+    configurationIssues.push(issue("blocking", "flow-invalid", error instanceof Error ? error.message : String(error),
+      "Set the required flow configuration in .nitely/instructions.json configuration or on the task."));
+  }
   const issues = [
+    ...configurationIssues,
     ...(await checkOutputDirectory(repoPath, outputDirectory)),
     ...(await checkInputFiles({
       repoPath,
@@ -565,6 +578,7 @@ export async function evaluateWorkItemRunPreflight(
         flowPath: input.workItem.flowId,
         flowDocument: flow.document,
         inputs: input.workItem.inputs,
+        configuration: input.workItem.configuration,
         providerStore: input.providerStore,
       });
     } finally {
@@ -579,6 +593,7 @@ export async function evaluateWorkItemRunPreflight(
         flowPath: input.workItem.flowPath,
         flowDocument: template.document,
         inputs: input.workItem.inputs,
+        configuration: input.workItem.configuration,
         providerStore: input.providerStore,
       });
     }
@@ -591,6 +606,7 @@ export async function evaluateWorkItemRunPreflight(
     repoPath: input.repoPath,
     flowPath: resolvedFlowPath.absolutePath,
     inputs: input.workItem.inputs,
+    configuration: input.workItem.configuration,
     providerStore: input.providerStore,
   });
 }

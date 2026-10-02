@@ -17701,3 +17701,20 @@ it("runs explicit worktree setup before verification and records command evidenc
   expect(evidence).toContain("Exit code: 0");
   expect(await readFile(join(repo, ".nitely/runs", result.runId, "stages/test/1/stdout.log"), "utf8")).toBe("installed");
 });
+
+it("executes a repository verification command and records its resolved value", async () => {
+  const repo = await createRepo();
+  await mkdir(join(repo, ".nitely"), { recursive: true });
+  await writeJson(join(repo, ".nitely/instructions.json"), { configuration: { verifyCommand: "printf repository-check" } });
+  const flowPath = join(repo, "flows", "repo-verify.json");
+  await writeJson(flowPath, { apiVersion: "nitely.dev/v1alpha1", kind: "Flow", metadata: {
+    name: "repo-verify", configurables: [{ key: "verifyCommand", label: "Verify", type: "text", required: true }],
+  }, spec: { stages: [{ id: "test", type: "command", command: "{{config.verifyCommand}}", inputs: [], outputs: ["report"] }] } });
+  const run = await runFlow({ repoPath: repo, flowPath, inputs: {} }, { backend: new LocalExecutionBackend(), createRunId: () => "repo-verify" });
+  const evidence = await readFile(join(repo, ".nitely/runs", run.runId, "evidence.md"), "utf8");
+  expect(evidence).toContain("Command: printf repository-check");
+  expect(await readFile(join(repo, ".nitely/runs", run.runId, "stages/test/1/stdout.log"), "utf8")).toBe("repository-check");
+  const override = await runFlow({ repoPath: repo, flowPath, inputs: {}, configuration: { verifyCommand: "printf task-check" } },
+    { backend: new LocalExecutionBackend(), createRunId: () => "repo-verify-override" });
+  expect(await readFile(join(repo, ".nitely/runs", override.runId, "stages/test/1/stdout.log"), "utf8")).toBe("task-check");
+});

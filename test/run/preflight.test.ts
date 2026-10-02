@@ -406,3 +406,16 @@ describe("run preflight doctor", () => {
     expect(report.status).toBe("PASS");
   });
 });
+
+it("checks repository command configuration before task admission", async () => {
+  const repoPath = await mkdtemp(join(tmpdir(), "nitely-preflight-command-"));
+  const document = flow({ runtime: "mock" });
+  const flowDocument = JSON.stringify({ ...document, metadata: { ...document.metadata,
+    configurables: [{ key: "verifyCommand", label: "Verify", type: "text", required: true }] } });
+  const input = { repoPath, flowPath: "fixture.json", flowDocument, inputs: { spec: { connector: "local-file" as const, uri: "spec.md" } } };
+  await writeFile(join(repoPath, "spec.md"), "Spec");
+  expect((await evaluateRunPreflight(input)).issues).toContainEqual(expect.objectContaining({ code: "flow-invalid", message: "missing required configurable: verifyCommand" }));
+  await mkdir(join(repoPath, ".nitely"), { recursive: true });
+  await writeFile(join(repoPath, ".nitely/instructions.json"), JSON.stringify({ configuration: { verifyCommand: "go test ./..." } }));
+  expect((await evaluateRunPreflight(input)).issues.filter((issue) => issue.code === "flow-invalid")).toEqual([]);
+});

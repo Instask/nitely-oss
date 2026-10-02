@@ -60,6 +60,7 @@ function normalizeValue(
 export function normalizeFlowConfiguration(
   flow: Flow,
   input: Record<string, unknown> = {},
+  repositoryDefaults: Record<string, unknown> = {},
 ): FlowConfiguration {
   const output: FlowConfiguration = {};
   const configurables = flowConfigurables(flow);
@@ -80,7 +81,9 @@ export function normalizeFlowConfiguration(
 
     const rawValue = hasConfigurationValue(input[configurable.key])
       ? input[configurable.key]
-      : configurable.default;
+      : hasConfigurationValue(repositoryDefaults[configurable.key])
+        ? repositoryDefaults[configurable.key]
+        : configurable.default;
     if (!hasConfigurationValue(rawValue)) {
       if (configurable.required) {
         throw new FlowConfigurationError(

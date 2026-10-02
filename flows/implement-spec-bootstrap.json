@@ -2,6 +2,20 @@
   "apiVersion": "nitely.dev/v1alpha1",
   "kind": "Flow",
   "metadata": {
+    "configurables": [
+      {
+        "key": "setupCommand",
+        "label": "Dependency setup command",
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "verifyCommand",
+        "label": "Repository verification command",
+        "type": "text",
+        "required": true
+      }
+    ],
     "name": "implement-spec-bootstrap"
   },
   "spec": {
@@ -38,7 +52,7 @@
       {
         "id": "setup",
         "type": "command",
-        "command": "pnpm install --frozen-lockfile",
+        "command": "{{config.setupCommand}}",
         "networkDomains": ["registry.npmjs.org"],
         "timeoutMs": 600000,
         "inputs": ["implementation"],
@@ -47,7 +61,7 @@
       {
         "id": "test",
         "type": "command",
-        "command": "pnpm exec vitest run && pnpm run check && pnpm run build",
+        "command": "{{config.verifyCommand}}",
         "timeoutMs": 600000,
         "inputs": ["implementation", "dependencies"],
         "outputs": ["test-report"]

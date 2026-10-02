@@ -84,10 +84,11 @@ unsupported.
 
 **Worktree dependencies:** the `implement-spec-bootstrap*` flows run an explicit
 `setup` command after implementation and before verification. It runs
-`pnpm install --frozen-lockfile` in that run's worktree, on local and OCI
+the repository's configured `setupCommand` in that run's worktree, on local and OCI
 backends, and produces the `dependencies` artifact. Verification depends on
 that artifact, so it cannot accidentally rely on parent-checkout dependencies.
-For a different package manager, set the setup command in your flow.
+Set `setupCommand` and `verifyCommand` in `.nitely/instructions.json`
+`configuration`, or supply the flow configurables on the task.
 
 A command stage may declare `networkDomains: ["registry.npmjs.org"]`. OCI
 uses the same internal-only network and allowlist gateway as agent stages,

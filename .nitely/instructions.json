@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "configuration": {
+    "setupCommand": "pnpm install --frozen-lockfile",
+    "verifyCommand": "pnpm exec vitest run && pnpm run check && pnpm run build"
+  },
+  "instructions": []
+}

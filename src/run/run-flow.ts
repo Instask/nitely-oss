@@ -4962,6 +4962,7 @@ async function runAlwaysRunFinalizers(input: {
 
 async function executeCommandStage(input: {
   runId: string;
+  configuration: FlowConfiguration;
   stage: Extract<Stage, { type: "command" }>;
   attempt: number;
   attemptDirectory: string;
@@ -4978,6 +4979,9 @@ async function executeCommandStage(input: {
   completedStages: string[];
   cancellation?: RunCancellationControl;
 }): Promise<{ failureError?: string }> {
+  input = { ...input, stage: { ...input.stage,
+    command: applyFlowConfigurationTemplate(input.stage.command, input.configuration),
+  } };
   assertHardBudgetAdmission({
     eventStore: input.eventStore,
     runId: input.runId,
@@ -12676,7 +12680,8 @@ export async function runFlow(
   });
   let configuration: FlowConfiguration;
   try {
-    configuration = normalizeFlowConfiguration(loaded.flow, input.configuration ?? {});
+    configuration = normalizeFlowConfiguration(loaded.flow, input.configuration ?? {},
+      projectInstructions.loaded ? projectInstructions.configuration : undefined);
   } catch (error) {
     if (error instanceof FlowConfigurationError) {
       throw new Error(error.message);
@@ -13544,6 +13549,7 @@ export async function runFlow(
 
             await injectedAgentMemory.cleanup();
             const commandResult = await executeCommandStage({
+              configuration,
               runId,
               stage,
               attempt,
@@ -15717,6 +15723,7 @@ export async function resumeRun(
               } else {
                 await injectedAgentMemory.cleanup();
                 const commandResult = await executeCommandStage({
+                  configuration,
                   runId: input.runId,
                   stage,
                   attempt,

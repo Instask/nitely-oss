@@ -478,6 +478,7 @@ export async function evaluateWorkItemRunStarts(
           flowPath: resolvedFlow.flowPath,
           flowDocument: resolvedFlow.flowDocument,
           inputs: workItem.inputs,
+          configuration: workItem.configuration,
           ...(input.providerStore ? { providerStore: input.providerStore } : {}),
         }),
       ]);

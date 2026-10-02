@@ -2,6 +2,14 @@
   "apiVersion": "nitely.dev/v1alpha1",
   "kind": "Flow",
   "metadata": {
+    "configurables": [
+      {
+        "key": "verifyCommand",
+        "label": "Repository verification command",
+        "type": "text",
+        "required": true
+      }
+    ],
     "name": "pilot-approved-spec-pr",
     "workItemType": "dev.pr",
     "inputs": [{ "id": "spec" }, { "id": "tech-design" }]
@@ -76,7 +84,7 @@
       {
         "id": "verify",
         "type": "command",
-        "command": "pnpm exec vitest run && pnpm run check",
+        "command": "{{config.verifyCommand}}",
         "timeoutMs": 600000,
         "maxAttempts": 12,
         "inputs": ["task-plan", "implementation"],

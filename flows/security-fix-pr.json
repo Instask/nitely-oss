@@ -2,6 +2,14 @@
   "apiVersion": "nitely.dev/v1alpha1",
   "kind": "Flow",
   "metadata": {
+    "configurables": [
+      {
+        "key": "verifyCommand",
+        "label": "Repository verification command",
+        "type": "text",
+        "required": true
+      }
+    ],
     "name": "security-fix-pr",
     "workItemType": "dev.pr",
     "inputs": [{ "id": "finding" }, { "id": "repo-notes" }]
@@ -33,7 +41,7 @@
       {
         "id": "verify",
         "type": "command",
-        "command": "pnpm exec vitest run && pnpm run check",
+        "command": "{{config.verifyCommand}}",
         "timeoutMs": 600000,
         "inputs": ["security-assessment", "implementation"],
         "outputs": ["verification-report"]

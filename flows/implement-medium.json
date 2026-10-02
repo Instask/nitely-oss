@@ -2,6 +2,14 @@
   "apiVersion": "nitely.dev/v1alpha1",
   "kind": "Flow",
   "metadata": {
+    "configurables": [
+      {
+        "key": "verifyCommand",
+        "label": "Repository verification command",
+        "type": "text",
+        "required": true
+      }
+    ],
     "name": "implement-medium"
   },
   "spec": {
@@ -18,7 +26,7 @@
       {
         "id": "test",
         "type": "command",
-        "command": "pnpm exec vitest run && pnpm run check && pnpm run build",
+        "command": "{{config.verifyCommand}}",
         "timeoutMs": 600000,
         "inputs": ["implementation"],
         "outputs": ["test-report"]
