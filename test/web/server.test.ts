@@ -11803,7 +11803,7 @@ None.
 
   it("returns provider credential metadata without exposing secrets and gates org scope writes", async () => {
     const repoPath = await createRepo();
-    await createUser(repoPath, {
+    const adminUser = await createUser(repoPath, {
       email: "admin@example.test",
       password: "admin password passphrase",
       role: "admin",
@@ -11917,6 +11917,7 @@ None.
       organizationId: ownerTeam.organizationId,
     });
 
+    await addOrganizationMember(repoPath, ownerTeam.organizationId, { userId: adminUser.id, role: "owner" });
     await addOrganizationMember(repoPath, ownerTeam.organizationId, {
       userId: organizationOwner.id,
       role: "member",
