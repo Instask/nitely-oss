@@ -7,7 +7,7 @@ import { findAuthMethod, findDescriptor } from "./descriptors.js";
 import { EnvProviderConnectionStore } from "./env-store.js";
 import { FileProviderSecretStore } from "./secret-store.js";
 import type { ProviderSecretMaterial, ProviderSecretStore } from "./secret-store.js";
-import { MissingConnectionError, ReconnectRequiredError } from "./types.js";
+import { ConnectionManagementDeniedError, MissingConnectionError, ReconnectRequiredError } from "./types.js";
 import type {
   ProviderAccountIdentity,
   ProviderAuthMethod,
@@ -942,7 +942,7 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
       if (file.connections.some((record) => record.providerId === providerId &&
         (selector?.connectionId === undefined || record.id === selector.connectionId) &&
         (selector?.authMethod === undefined || record.authMethod === selector.authMethod) &&
-        this.connectionAllowed(record) && !this.connectionManageable(record))) throw new MissingConnectionError(providerId, "connection is not manageable in this scope");
+        this.connectionAllowed(record) && !this.connectionManageable(record))) throw new ConnectionManagementDeniedError();
       const removed = file.connections.filter(
         (record) =>
           this.connectionManageable(record) && record.providerId === providerId &&

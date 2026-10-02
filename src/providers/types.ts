@@ -25,6 +25,10 @@ export type ProviderConnectionState = "active" | "expired" | "revoked";
 
 export type ReconnectRequiredReason = "expired" | "revoked";
 
+export class ConnectionManagementDeniedError extends Error {
+  constructor() { super("connection management is not permitted in this scope"); this.name = "ConnectionManagementDeniedError"; }
+}
+
 export class MissingConnectionError extends Error {
   constructor(
     public readonly providerId: ProviderId,

@@ -47,7 +47,7 @@ export type {
   SetConnectionInput,
 } from "./types.js";
 
-export { MissingConnectionError, ReconnectRequiredError } from "./types.js";
+export { ConnectionManagementDeniedError, MissingConnectionError, ReconnectRequiredError } from "./types.js";
 
 export function resolveProviderStore(
   nitelyDir: string,
