@@ -17698,7 +17698,6 @@ it("runs explicit worktree setup before verification and records command evidenc
   expect(commands[0].options).toMatchObject({ networkDomains: ["registry.npmjs.org"] });
   const evidence = await readFile(join(repo, ".nitely/runs", result.runId, "evidence.md"), "utf8");
   expect(evidence).toContain("setup");
-  const artifacts = await readFile(join(repo, ".nitely/runs", result.runId, "artifacts.json"), "utf8");
-  expect(artifacts).toContain("dependencies");
-  expect(artifacts).toContain("test-report");
+  expect(evidence).toContain("Exit code: 0");
+  expect(await readFile(join(repo, ".nitely/runs", result.runId, "stages/test/1/stdout.log"), "utf8")).toBe("installed");
 });
