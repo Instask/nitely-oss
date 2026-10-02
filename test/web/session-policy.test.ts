@@ -142,6 +142,11 @@ it("fails recovery closed when audit cannot be persisted and hides blocked conne
   const storePath = join(f.repo, ".nitely", "connections.json");
   const store = new FileProviderConnectionStore({ path: storePath, env: {} });
   const connection = await store.setConnection({ providerId: "github", value: "protected-secret", metadata: { scope: "org", organizationId: f.org } });
+  let allowed = true;
+  const changing = new FileProviderConnectionStore({ path: storePath, env: {}, connectionAllowed: () => allowed });
+  const handle = await changing.getConnection("github", { connectionId: connection.id });
+  allowed = false;
+  await expect(handle.getAccessToken()).rejects.toThrow();
   const scoped = new FileProviderConnectionStore({ path: storePath, env: {}, connectionAllowed: (record) => record.credential.organizationId !== f.org });
   expect(await scoped.listConnections()).toEqual([]);
   await expect(scoped.getConnection("github", { connectionId: connection.id })).rejects.toThrow();

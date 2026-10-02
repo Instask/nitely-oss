@@ -569,7 +569,8 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
     // Re-read so a refresh performed through another store instance is seen.
     const current = (await this.loadMerged()).find(
       (c) => c.record.id === loaded.record.id && c.source.path === loaded.source.path,
-    ) ?? loaded;
+    );
+    if (!current) throw new MissingConnectionError(loaded.record.providerId, "connection is unavailable in this scope");
     const { record, source } = current;
     if (record.state === "revoked") {
       throw this.reconnectRequired(record, "revoked");
