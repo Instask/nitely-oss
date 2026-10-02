@@ -131,7 +131,7 @@ describe("Web startup security boundary", () => {
     });
 
     expect(server.readiness).toMatchObject({
-      ready: true,
+      ready: false,
       auth: { mode: "required", adminConfigured: true },
       bind: { host: "0.0.0.0", scope: "non-loopback" },
       transport: {
@@ -155,7 +155,7 @@ describe("Web startup security boundary", () => {
     });
 
     expect(server.readiness).toMatchObject({
-      ready: true,
+      ready: false,
       auth: { mode: "required", adminConfigured: true },
       bind: { host: "0.0.0.0", scope: "non-loopback" },
       transport: {
@@ -188,7 +188,7 @@ describe("Web startup security boundary", () => {
       },
     });
     expect(server.readiness).toMatchObject({
-      ready: true,
+      ready: false,
       production: true,
       auth: { mode: "required", adminConfigured: true },
     });

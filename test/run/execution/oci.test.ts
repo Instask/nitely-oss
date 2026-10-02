@@ -23,7 +23,7 @@ import {
   type SandboxProcessResult,
 } from "../../../src/run/execution/oci.js";
 import type { Stage } from "../../../src/flow/schema.js";
-import { createExecutionBackend } from "../../../src/run/execution/backend.js";
+import { createExecutionBackend, checkOciReadiness } from "../../../src/run/execution/backend.js";
 import type {
   AgentRuntimeLauncher,
   AgentRuntimeRegistry,
@@ -2640,4 +2640,44 @@ it("scopes setup command egress to its explicit domains and disposes the gateway
   await backend.runCommand({ runId: "setup", path: fixture.worktree }, "pnpm test", { outputDirectory: fixture.attempt });
   expect(calls.find((call) => call.args[0] === "run")!.args).toContain("--network=none");
   expect(disposed).toBe(1);
+});
+
+describe("OCI readiness probes", () => {
+  it("names an unset image without contacting an engine", async () => {
+    expect(await checkOciReadiness({ env: {} })).toMatchObject([{ code: "oci.image.missing" }]);
+  });
+
+  it.each([
+    ["image", "oci.image.not-local"],
+    ["rootless", "oci.engine.not-rootless"],
+    ["network", "oci.network.no-allowlist"],
+    ["runtime", "oci.runtime.unavailable"],
+    ["ready", undefined],
+  ])("checks %s against the launch engine and image", async (failure, expected) => {
+    const calls: SandboxProcessInput[] = [];
+    const backend = new OciExecutionBackend({
+      image: "runner:local", env: { NITELY_CLAUDE_COMMAND: "/host-only/claude" },
+      networkAllowlist: failure === "network" ? [] : ["api.anthropic.com"],
+      processRunner: async (input) => {
+        calls.push(input);
+        if (input.args[0] === "info") return {
+          exitCode: 0, stderr: "", stdout: `${JSON.stringify(failure === "rootless" ? [] : ["name=rootless"])}\t"2"\tnull`,
+        };
+        if (input.args[0] === "image") return {
+          exitCode: failure === "image" ? 1 : 0, stderr: "", stdout: `"sha256:${"a".repeat(64)}"\t[]`,
+        };
+        return { exitCode: failure === "runtime" ? 1 : 0, stderr: "", stdout: "" };
+      },
+    });
+    const issues = await backend.checkReadiness({ type: "agent", id: "implement", runtime: "claude", inputs: [], outputs: [], prompt: "test", skills: [], required_mcp_servers: [], required_connectors: [] });
+    expect(issues.map((item) => item.code)).toEqual(expected ? [expected] : []);
+    expect(calls.every((call) => call.timeoutMs === 3_000)).toBe(true);
+    const probe = calls.find((call) => call.args[0] === "run");
+    if (probe) {
+      expect(probe.args).toContain("--pull=never");
+      expect(probe.args).toContain("--network=none");
+      expect(probe.args.at(-1)).toBe("/host-only/claude");
+      expect(probe.args).not.toContain("--volume");
+    }
+  });
 });

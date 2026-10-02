@@ -22,13 +22,15 @@ import type {
   ProviderConnectionStore,
   ProviderId,
 } from "../providers/types.js";
+import { checkOciReadiness, normalizeExecutionBackendName } from "./execution/backend.js";
+import type { OciReadinessIssue } from "./execution/oci.js";
 import type { WorkItemRecord } from "../work-items/types.js";
 
 export type RunPreflightStatus = "PASS" | "WARN" | "BLOCK";
 
 export interface RunPreflightIssue {
   severity: "warning" | "blocking";
-  code:
+  code: OciReadinessIssue["code"]
     | "repo-unavailable"
     | "flow-unreadable"
     | "flow-invalid"
@@ -76,12 +78,16 @@ export interface EvaluateRunPreflightInput {
   flowDocument?: string;
   inputs?: Record<string, ResourceReference>;
   providerStore?: ProviderConnectionStore;
+  executionBackend?: string;
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface EvaluateWorkItemRunPreflightInput {
   repoPath: string;
   workItem: WorkItemRecord;
   providerStore?: ProviderConnectionStore;
+  executionBackend?: string;
+  env?: NodeJS.ProcessEnv;
 }
 
 function issue(
@@ -524,7 +530,17 @@ export async function evaluateRunPreflight(
   const statuses = configuredProviderMap(
     await providerStatuses(repoPath, input.providerStore),
   );
+  const executionEnv = input.env ?? (input.providerStore
+    ? await input.providerStore.resolveEnv() : process.env);
+  const backend = normalizeExecutionBackendName(input.executionBackend ?? executionEnv.NITELY_EXECUTION_BACKEND);
+  const ociIssues = backend === "oci" ? await checkOciReadiness({
+    env: executionEnv,
+    stages: flow.spec.stages.filter(hasRuntimeCandidates).flatMap((stage) =>
+      stageRuntimeCandidates(stage).map((candidate) => ({ ...stage, runtime: candidate.runtime }))),
+  }) : [];
   const issues = [
+    ...ociIssues.map((item) => issue("blocking", item.code, item.message,
+      "Configure the rootless OCI engine, local runner image, network allowlist and in-image runtime command.")),
     ...(await checkOutputDirectory(repoPath, outputDirectory)),
     ...(await checkInputFiles({
       repoPath,
@@ -566,6 +582,8 @@ export async function evaluateWorkItemRunPreflight(
         flowDocument: flow.document,
         inputs: input.workItem.inputs,
         providerStore: input.providerStore,
+        executionBackend: input.executionBackend,
+        env: input.env,
       });
     } finally {
       flowStore.close();
@@ -580,6 +598,8 @@ export async function evaluateWorkItemRunPreflight(
         flowDocument: template.document,
         inputs: input.workItem.inputs,
         providerStore: input.providerStore,
+        executionBackend: input.executionBackend,
+        env: input.env,
       });
     }
   }
@@ -592,6 +612,8 @@ export async function evaluateWorkItemRunPreflight(
     flowPath: resolvedFlowPath.absolutePath,
     inputs: input.workItem.inputs,
     providerStore: input.providerStore,
+    executionBackend: input.executionBackend,
+    env: input.env,
   });
 }
 

@@ -1053,7 +1053,7 @@ describe("web server API and HTML", () => {
       {
         authMode: "required",
         authEnv: {},
-        providerEnv: {},
+        providerEnv: { NITELY_EXECUTION_BACKEND: "local", NITELY_ALLOW_UNSAFE_LOCAL_EXECUTION: "true" },
       },
     );
     const authorization = `Bearer ${token.token}`;
@@ -3202,7 +3202,7 @@ describe("web server API and HTML", () => {
         };
       },
       undefined,
-      { authMode: "required", providerEnv: {} },
+      { authMode: "required", providerEnv: { NITELY_EXECUTION_BACKEND: "local", NITELY_ALLOW_UNSAFE_LOCAL_EXECUTION: "true" } },
     );
     const a = await login(server, "a@example.test", "password a long passphrase");
     const b = await login(server, "b@example.test", "password b long passphrase");
@@ -3621,7 +3621,7 @@ describe("web server API and HTML", () => {
         };
       },
       undefined,
-      { authMode: "required", providerEnv: {} },
+      { authMode: "required", providerEnv: { NITELY_EXECUTION_BACKEND: "local", NITELY_ALLOW_UNSAFE_LOCAL_EXECUTION: "true" } },
     );
     const ownerLogin = await login(server, "owner@example.test", "owner password passphrase");
     const memberLogin = await login(server, "member@example.test", "member password passphrase");
@@ -3798,7 +3798,7 @@ describe("web server API and HTML", () => {
         };
       },
       undefined,
-      { authMode: "required", providerEnv: {} },
+      { authMode: "required", providerEnv: { NITELY_EXECUTION_BACKEND: "local", NITELY_ALLOW_UNSAFE_LOCAL_EXECUTION: "true" } },
     );
     const signedIn = await login(server, "owner@example.test", "owner password passphrase");
 
@@ -3852,7 +3852,7 @@ describe("web server API and HTML", () => {
         };
       },
       undefined,
-      { authMode: "required", providerEnv: {} },
+      { authMode: "required", providerEnv: { NITELY_EXECUTION_BACKEND: "local", NITELY_ALLOW_UNSAFE_LOCAL_EXECUTION: "true" } },
     );
     const signedIn = await login(
       server,
@@ -12594,4 +12594,29 @@ None.
     });
     expect(JSON.stringify(retryBody)).not.toContain(secret);
   });
+});
+
+it("refuses Web task admission when the selected OCI backend cannot launch", async () => {
+  const repoPath = await createRepo();
+  let called = false;
+  const server = await startTestServer(repoPath, async () => {
+    called = true;
+    throw new Error("runner must not be called");
+  }, undefined, { providerEnv: { NITELY_EXECUTION_BACKEND: "oci" } });
+  const created = await fetch(`${server.url}/api/tasks`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "Unavailable image", spec: "Spec body", techDesign: "Design body" }),
+  });
+  const { task } = await created.json() as { task: { id: string } };
+  const preflight = await fetch(`${server.url}/api/tasks/${task.id}/preflight`);
+  expect(await preflight.json()).toMatchObject({ preflight: { status: "BLOCK", issues: [expect.objectContaining({ code: "oci.image.missing" })] } });
+  const response = await fetch(`${server.url}/api/tasks/${task.id}/runs?override=true`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ reason: "try anyway" }),
+  });
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({ error: { message: expect.stringContaining("NITELY_OCI_IMAGE") } });
+  expect(called).toBe(false);
+  const persisted = JSON.parse(await readFile(join(repoPath, ".nitely/tasks", task.id, "task.json"), "utf8"));
+  expect(persisted.latestRunId).toBeUndefined();
 });
