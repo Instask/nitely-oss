@@ -28,6 +28,7 @@ import {
 } from "../run/run-flow.js";
 import {
   normalizeExecutionBackendName,
+  checkOciReadiness,
   type ExecutionBackendName,
 } from "../run/execution/backend.js";
 import { reapExpiredOciContainers } from "../run/execution/oci.js";
@@ -685,6 +686,7 @@ export interface WebSecurityReadiness {
       | "configured"
       | "unsafe-override";
     readonly unsafeOverride: boolean;
+    readonly issues?: readonly import("../run/execution/oci.js").OciReadinessIssue[];
   };
 }
 
@@ -4110,6 +4112,7 @@ async function runStoredWorkItem(
     dependencyGuards: workItemDependencyGuards(candidateSnapshot, workItems),
   };
   const starts = await evaluateWorkItemRunStarts({
+    executionBackend: webExecutionBackendPolicyForInput(serverInput, user.authMode).backend,
     repoPath,
     repoId: repository.id,
     repoName: repository.name,
@@ -4288,6 +4291,7 @@ async function buildAllSchedulerView(
           )
         ).map((view) => withRepository(view, repository));
         const starts = await evaluateWorkItemRunStarts({
+          executionBackend: webExecutionBackendPolicyForInput(input, user.authMode).backend,
           repoPath: repository.path,
           repoId: repository.id,
           repoName: repository.name,
@@ -9279,6 +9283,7 @@ async function handleApiRequest(
     );
     requireRecordAccess(snapshot.detail, user, "task not found");
     const preflight = await evaluateWebWorkItemRunPreflight({
+      executionBackend: execution.backend,
       repoPath: repository.path,
       workItem: snapshot.persisted ?? snapshot.detail,
       providerStore,
@@ -9305,6 +9310,7 @@ async function handleApiRequest(
     const persisted = snapshot.persisted;
     const starts = persisted
       ? await evaluateWorkItemRunStarts({
+            executionBackend: webExecutionBackendPolicyForInput(input, user.authMode).backend,
             repoPath: repository.path,
             repoId: repository.id,
             repoName: repository.name,
@@ -9323,6 +9329,7 @@ async function handleApiRequest(
     const preflight =
       eligibility?.checks.preflight ??
       (await evaluateWebWorkItemRunPreflight({
+      executionBackend: execution.backend,
         repoPath: repository.path,
         workItem: snapshot.detail,
         providerStore,
@@ -9926,6 +9933,7 @@ async function handleApiRequest(
       ),
     };
     const starts = await evaluateWorkItemRunStarts({
+      executionBackend: webExecutionBackendPolicyForInput(input, user.authMode).backend,
       repoPath: repository.path,
       repoId: repository.id,
       repoName: repository.name,
@@ -10398,6 +10406,7 @@ async function handleApiRequest(
     const persisted = snapshot.persisted;
     const starts = persisted
       ? await evaluateWorkItemRunStarts({
+          executionBackend: webExecutionBackendPolicyForInput(input, user.authMode).backend,
           repoPath: repository.path,
           repoId: repository.id,
           repoName: repository.name,
@@ -11348,9 +11357,13 @@ export async function startWebServer(
       );
     }
   }
+  const executionEnv = runtimeInput.providerEnv || runtimeInput.authEnv
+    ? { ...runtimeInput.providerEnv, ...runtimeInput.authEnv } : process.env;
+  const executionIssues = securityPolicy.execution.backend === "oci"
+    ? await checkOciReadiness({ env: executionEnv }) : [];
   const readiness: WebSecurityReadiness = Object.freeze({
     schemaVersion: "nitely.web-security-readiness.v1",
-    ready: securityPolicy.authMode === "local" || adminConfigured,
+    ready: (securityPolicy.authMode === "local" || adminConfigured) && executionIssues.length === 0,
     production: securityPolicy.production,
     auth: {
       mode: securityPolicy.authMode,
@@ -11367,7 +11380,9 @@ export async function startWebServer(
       trustedProxy: securityPolicy.trustedProxy,
       secureCookie: securityPolicy.secureCookie,
     } as const,
-    execution: securityPolicy.execution,
+    execution: securityPolicy.execution.backend === "oci"
+      ? { ...securityPolicy.execution, issues: Object.freeze(executionIssues) }
+      : securityPolicy.execution,
   });
   Object.freeze(readiness.auth);
   Object.freeze(readiness.bind);

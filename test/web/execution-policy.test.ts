@@ -89,6 +89,10 @@ describe("Web execution backend policy", () => {
       backend: "oci",
       reason: "required-auth-default",
       unsafeOverride: false,
+      issues: [{ code: "oci.image.missing", message: "NITELY_OCI_IMAGE is required for the OCI execution backend" }],
     });
+    const response = await fetch(`${server.url}/api/readiness`);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ ready: false, execution: { issues: [{ code: "oci.image.missing" }] } });
   });
 });

@@ -166,6 +166,13 @@ export interface OciExecutionBackendOptions {
   ) => NetworkAllowlistGateway;
 }
 
+export interface OciReadinessIssue {
+  code: "oci.image.missing" | "oci.image.not-local" | "oci.engine.not-rootless" |
+    "oci.engine.unavailable" | "oci.network.no-allowlist" | "oci.runtime.unavailable" |
+    "oci.configuration.invalid";
+  message: string;
+}
+
 export interface OciContainerReapReport {
   observedAt: string;
   scanned: number;
@@ -757,9 +764,9 @@ export class OciExecutionBackend implements ExecutionBackend {
     };
   }
 
-  async prepareForRun(): Promise<void> {
+  async prepareForRun(timeoutMs = 10_000): Promise<void> {
     if (this.imagePrepared) return;
-    await this.verifyRootlessEngine();
+    await this.verifyRootlessEngine(timeoutMs);
     const inspectImage = this.resolvedImage ?? this.image;
     const result = await this.processRunner({
       command: this.engineCommand,
@@ -771,7 +778,7 @@ export class OciExecutionBackend implements ExecutionBackend {
         inspectImage,
       ],
       env: this.engineEnv,
-      timeoutMs: 10_000,
+      timeoutMs,
       maxOutputBytes: 1024 * 1024,
     });
     if (result.exitCode !== 0) {
@@ -805,6 +812,62 @@ export class OciExecutionBackend implements ExecutionBackend {
     this.resolvedImage = repoDigest ?? immutableImageId ?? identity;
     this.resolvedImageIdentity = identity;
     this.imagePrepared = true;
+  }
+
+  async checkReadiness(stage?: AgentRunnableStage): Promise<OciReadinessIssue[]> {
+    const issues: OciReadinessIssue[] = [];
+    try {
+      await this.prepareForRun(3_000);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      issues.push({
+        code: message.includes("resolve OCI image") ? "oci.image.not-local"
+          : message.includes("requires a rootless") ? "oci.engine.not-rootless"
+          : "oci.engine.unavailable",
+        message,
+      });
+    }
+    try {
+      if (stage?.runtime) {
+        this.resolveAgentNetworkDecision({
+          stage, runtime: this.runtimeRegistry.resolve(stage.runtime),
+        });
+      } else if (!stage && this.networkPolicy.mode !== "allowlist") {
+        throw new Error("OCI agent execution needs NITELY_OCI_NETWORK_ALLOWLIST");
+      }
+    } catch (error) {
+      issues.push({ code: "oci.network.no-allowlist", message: error instanceof Error ? error.message : String(error) });
+    }
+    if (stage?.runtime && this.imagePrepared) {
+      const probeName = this.containerName();
+      try {
+        const runtime = this.runtimeRegistry.resolve(stage.runtime);
+        const command = runtime.build({ worktreePath: "/worktree", prompt: "", env: this.env }).command;
+        const result = await this.processRunner({
+          command: this.engineCommand,
+          args: [
+            "run", "--rm", "--name", probeName,
+            ...labelArgs(lifecycleLabels({ runId: "readiness", stageId: stage.id, timeoutMs: 3_000, cleanupGraceMs: this.cleanupGraceMs, now: this.now })), "--pull=never", "--network=none", "--read-only",
+            "--cap-drop=ALL", "--security-opt=no-new-privileges:true",
+            "--pids-limit=32", "--memory=128m", "--cpus=1", "--user", `${this.uid}:${this.gid}`,
+            "--entrypoint", "sh", this.resolvedImage ?? this.image,
+            "-c", 'command -v "$1" >/dev/null && { case "$1" in */*) test -f "$1" && test -x "$1";; *) true;; esac; }',
+            "nitely-runtime-probe", command,
+          ],
+          env: this.engineEnv, timeoutMs: 3_000, maxOutputBytes: 4096,
+        });
+        if (result.exitCode !== 0) {
+          issues.push({ code: "oci.runtime.unavailable", message: `OCI image does not provide runtime ${stage.runtime} command ${command}` });
+        }
+      } catch (error) {
+        issues.push({ code: "oci.runtime.unavailable", message: error instanceof Error ? error.message : String(error) });
+      } finally {
+        await this.processRunner({ command: this.engineCommand,
+          args: ["rm", "--force", probeName], env: this.engineEnv,
+          timeoutMs: 3_000, maxOutputBytes: 4096 }).catch(() => undefined);
+      }
+    }
+    return issues;
   }
 
   async createWorkspace(input: {
@@ -1064,7 +1127,7 @@ export class OciExecutionBackend implements ExecutionBackend {
     ];
   }
 
-  private async verifyRootlessEngine(): Promise<void> {
+  private async verifyRootlessEngine(timeoutMs = 10_000): Promise<void> {
     if (this.rootlessVerified) return;
     await this.engineSocketVerifier?.(this.engineSocketPath);
     const result = await this.processRunner({
@@ -1075,7 +1138,7 @@ export class OciExecutionBackend implements ExecutionBackend {
         "{{json .SecurityOptions}}\t{{json .CgroupVersion}}\t{{json .Warnings}}",
       ],
       env: this.engineEnv,
-      timeoutMs: 10_000,
+      timeoutMs,
       maxOutputBytes: 1024 * 1024,
     });
     if (result.exitCode !== 0) {
