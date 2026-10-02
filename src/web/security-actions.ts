@@ -36,6 +36,12 @@ export function webSecurityActionForRequest(
   method: string | undefined,
   pathname: string,
 ): WebSecurityAction | null {
+  const oidc = /^\/api\/organizations\/([^/]+)\/sso\/oidc(?:\/(login|link|callback))?$/.exec(pathname);
+  if (oidc && ["GET", "POST", "PUT"].includes(method ?? "")) {
+    const target = decodedTarget(pathname, /^\/api\/organizations\/([^/]+)/, "organization");
+    return { action: `auth.oidc.${oidc[2] ?? (method === "GET" ? "configuration.view" : "configuration.update")}`,
+      ...(target ? { target } : {}), ...(!oidc[2] ? { permission: "organizations:manage" } : {}) };
+  }
   const organization = /^\/api\/organizations\/([^/]+)\/(members|invitations)(?:\/[^/]+)?(?:\/(accept|decline|revoke))?$/.exec(pathname);
   if (organization && ["GET", "POST", "PATCH", "DELETE"].includes(method ?? "")) {
     const target = decodedTarget(pathname, /^\/api\/organizations\/([^/]+)/, "organization");

@@ -309,3 +309,38 @@ expired, revoked, wrong-recipient, and wrong-organization invitations return the
 same not-found response. The existing metadata-only security audit records API
 actions without invitation tokens or email addresses; it remains a local audit,
 not a compliance delivery guarantee.
+
+OIDC sign-in is available in required authentication mode. An organization owner
+can `PUT /api/organizations/:id/sso/oidc` with `issuer`, `clientId`,
+`redirectUri`, optional `clientSecretRef`, and optional
+`jit: { enabled: false, domains: [] }`. The same endpoint supports owner-only
+`GET`. JIT provisioning defaults to disabled; enabling it requires explicit
+email domains and a verified IdP email. Existing email matches always require
+explicit linking, and new users receive the member role.
+
+The operator must set `NITELY_OIDC_ALLOWED_HOSTS` (comma-separated HTTPS IdP
+hosts, including token/JWKS hosts) and `NITELY_OIDC_REDIRECT_ORIGINS`
+(comma-separated HTTPS console origins). Discovery and token/JWKS requests
+cannot follow redirects or leave those approved hosts. The redirect URI must
+point to `/api/organizations/:id/sso/oidc/callback`. A secret reference resolves
+only to `NITELY_OIDC_SECRET_<sha256-of-organization-id>_<reference>` in the
+server's authentication environment; configuration and API responses contain
+the reference, never the secret. References use uppercase letters, digits and
+underscores. Public clients can omit the reference.
+
+Open `/api/organizations/:id/sso/oidc/login` in a browser to start sign-in.
+Linking a local account requires a browser session and
+`POST /api/organizations/:id/sso/oidc/link` with the account's password for
+reauthentication. The browser follows the returned authorization redirect;
+the callback establishes a new secure session and returns browsers to the Console. PKCE S256, a browser-bound
+single-use state, nonce, issuer, audience, expiry and ID-token signatures are
+validated using [openid-client](https://github.com/panva/openid-client).
+Pending attempts expire after ten minutes and are bounded to 256 per organization.
+
+Issuer/subject identities are persisted separately from email. Email changes
+at the IdP do not change account identity, and an existing identity cannot be
+rebound to another local user. Sign-in still requires current organization
+membership; JIT never restores a removed member. Local password sign-in remains
+available. Configuration changes invalidate pending sign-ins. Login, failure,
+linking and configuration actions use the existing metadata-only local audit;
+ID/access tokens, authorization codes and client secrets are not recorded.

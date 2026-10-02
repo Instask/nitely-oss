@@ -139,7 +139,7 @@ async function readOrganizations(repoPath: string): Promise<OrganizationsFile> {
   }
 }
 
-async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
+export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
   const parent = dirname(path);
   await mkdir(parent, { recursive: true, mode: 0o700 });
   const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;

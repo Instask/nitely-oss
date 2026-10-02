@@ -16,6 +16,9 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
+import { withKnowledgeLease } from "../knowledge-repositories/lock.js";
+import { WebForbiddenError } from "./errors.js";
+
 import {
   ensureDefaultOrganizationForUser,
   listPublicMemberships,
@@ -33,6 +36,7 @@ export interface UserRecord {
   email: string;
   role: UserRole;
   createdAt: string;
+  externalIdentities?: Array<{ issuer: string; subject: string }>;
   passwordHash: string;
   passwordSalt: string;
   passwordParams: { algorithm: "scrypt"; keyLength: number };
@@ -58,6 +62,8 @@ export interface SessionRecord {
   userId: string;
   createdAt: string;
   expiresAt: string;
+  authenticationMethod?: "password" | "oidc";
+  organizationId?: string;
 }
 
 export interface CreateUserInput {
@@ -67,6 +73,8 @@ export interface CreateUserInput {
 }
 
 export interface SessionOptions {
+  authenticationMethod?: "password" | "oidc";
+  organizationId?: string;
   now?: () => Date;
   createId?: () => string;
 }
@@ -268,6 +276,8 @@ function parseUserRecord(
   ) {
     return invalid("user email must be non-empty and normalized");
   }
+  if (user.externalIdentities !== undefined && (!Array.isArray(user.externalIdentities) || user.externalIdentities.some((identity) =>
+    !identity || typeof identity !== "object" || typeof identity.issuer !== "string" || !identity.issuer || typeof identity.subject !== "string" || !identity.subject))) return invalid("external identities must contain issuer and subject");
   if (user.role !== "admin" && user.role !== "user") {
     return invalid("user role must be admin or user");
   }
@@ -763,20 +773,23 @@ export async function createUser(
     throw new Error("password is required");
   }
   await validateLocalPasswordForRepo(repoPath, input.password);
-  const users = await readUsers(repoPath);
-  if (Object.values(users.users).some((user) => user.email === email)) {
-    throw new Error("user already exists");
-  }
-  const verifier = await hashPassword(input.password);
-  const user: UserRecord = {
-    id: createUserId(),
-    email,
-    role: input.role,
-    createdAt: new Date().toISOString(),
-    ...verifier,
-  };
-  users.users[user.id] = user;
-  await writeJsonAtomic(usersPath(repoPath), users);
+  const user = await withKnowledgeLease({ path: join(usersRoot(repoPath), "users.lock"), waitMs: 10_000 }, async () => {
+    const users = await readUsers(repoPath);
+    if (Object.values(users.users).some((user) => user.email === email)) {
+      throw new Error("user already exists");
+    }
+    const verifier = await hashPassword(input.password);
+    const created: UserRecord = {
+      id: createUserId(),
+      email,
+      role: input.role,
+      createdAt: new Date().toISOString(),
+      ...verifier,
+    };
+    users.users[created.id] = created;
+    await writeJsonAtomic(usersPath(repoPath), users);
+    return created;
+  });
   await ensureDefaultOrganizationForUser(repoPath, {
     userId: user.id,
     role: user.role === "admin" ? "owner" : "member",
@@ -917,6 +930,8 @@ export async function createSession(
     userId,
     createdAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + sessionTtlMs).toISOString(),
+    authenticationMethod: options.authenticationMethod ?? "password",
+    ...(options.organizationId ? { organizationId: options.organizationId } : {}),
   };
   await writeJsonAtomic(sessionPath(repoPath, session.id), session);
   return session;
@@ -953,7 +968,13 @@ export async function readSessionUser(
     await deleteSession(repoPath, sessionId).catch(() => {});
     return null;
   }
-  return await getPublicUser(repoPath, session.userId);
+  const user = await getPublicUser(repoPath, session.userId);
+  if (session.authenticationMethod === "oidc") {
+    const membership = user?.memberships?.find((member) => member.organizationId === session.organizationId);
+    if (!membership) return null;
+    return { ...user!, currentOrganizationId: membership.organizationId, currentOrganizationRole: membership.role };
+  }
+  return user;
 }
 
 export async function deleteSession(
@@ -998,4 +1019,35 @@ export async function invalidateUserSessions(
     }
   }
   return invalidated;
+}
+
+
+/** Immutable issuer/subject matching never falls back to matching an email. */
+export async function resolveOidcUser(repoPath: string, input: {
+  issuer: string; subject: string; email?: string; allowCreate: boolean; linkUserId?: string;
+}): Promise<{ user: UserRecord; created: boolean }> {
+  return await withKnowledgeLease({ path: join(usersRoot(repoPath), "users.lock"), waitMs: 10_000 }, async () => {
+    const file = await readUsers(repoPath);
+    const identity = { issuer: input.issuer, subject: input.subject };
+    const matched = Object.values(file.users).find((user) => user.externalIdentities?.some((id) => id.issuer === identity.issuer && id.subject === identity.subject));
+    if (matched) {
+      if (input.linkUserId && input.linkUserId !== matched.id) throw new WebForbiddenError("OIDC identity is already linked");
+      return { user: matched, created: false };
+    }
+    let user: UserRecord;
+    let created = false;
+    if (input.linkUserId) {
+      if (!Object.hasOwn(file.users, input.linkUserId)) throw new WebForbiddenError();
+      user = file.users[input.linkUserId];
+    } else {
+      const email = input.email && normalizeEmail(input.email);
+      if (!input.allowCreate || !email || Object.values(file.users).some((user) => user.email === email)) throw new WebForbiddenError("OIDC identity requires explicit account linking");
+      user = { id: createUserId(), email, role: "user", createdAt: new Date().toISOString(), ...(await hashPassword(randomBytes(48).toString("base64url"))) };
+      created = true;
+    }
+    (user.externalIdentities ??= []).push(identity);
+    file.users[user.id] = user;
+    await writeJsonAtomic(usersPath(repoPath), file);
+    return { user, created };
+  });
 }

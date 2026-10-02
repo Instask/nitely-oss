@@ -435,6 +435,7 @@ import {
   canonicalChangeRequestTarget,
   changeRequestIdentity,
 } from "./change-requests.js";
+import { configureOrganizationOidc, getOrganizationOidc, startOrganizationOidc, finishOrganizationOidc } from "./oidc.js";
 import {
   bootstrapInitialAdmin,
   createSession,
@@ -7931,6 +7932,54 @@ async function handleApiRequest(
       sendJson(response, 200, { session });
       return true;
     }
+  }
+
+  const oidcRoute = /^\/api\/organizations\/([^/]+)\/sso\/oidc(?:\/(login|link|callback))?$/.exec(url.pathname);
+  if (oidcRoute) {
+    if (authMode !== "required") throw new WebNotFoundError("OIDC requires authenticated mode");
+    let org: string;
+    try { org = decodeURIComponent(oidcRoute[1]); } catch { throw new WebInputError("invalid organization id"); }
+    const action = oidcRoute[2];
+    const env = input.authEnv ?? process.env;
+    const cookies = parseCookies(request.headers.cookie);
+    const cookieName = "nitely_oidc_" + createHash("sha256").update(org).digest("hex").slice(0, 16);
+    const cookiePath = `/api/organizations/${encodeURIComponent(org)}/sso/oidc`;
+    if (!action && (request.method === "GET" || request.method === "PUT")) {
+      const user = await requireUserContext(request, input, homeRepoPath);
+      const configuration = request.method === "GET"
+        ? await getOrganizationOidc(homeRepoPath, org, user)
+        : await configureOrganizationOidc(homeRepoPath, org, user, requireObject(await readRequestJson(request)), env);
+      sendJson(response, 200, { configuration });
+      return true;
+    }
+    if (request.method === "GET" && action === "login" || request.method === "POST" && action === "link") {
+      let link: { userId: string; sessionId: string } | undefined;
+      if (action === "link") {
+        const user = await requireUserContext(request, input, homeRepoPath);
+        const body = requireObject(await readRequestJson(request));
+        const verified = typeof body.password === "string" ? await verifyUserPassword(homeRepoPath, user.email, body.password) : null;
+        if (!verified || verified.id !== user.id || !cookies.nitely_session) throw new WebForbiddenError("password reauthentication is required for linking");
+        link = { userId: user.id, sessionId: cookies.nitely_session };
+      }
+      const started = await startOrganizationOidc(homeRepoPath, org, env, link);
+      sendJsonWithHeaders(response, 302, { redirect: started.url }, { location: started.url,
+        "set-cookie": `${cookieName}=${started.browserToken}; Path=${cookiePath}; HttpOnly; SameSite=Lax; Secure; Max-Age=600` });
+      return true;
+    }
+    if (request.method === "GET" && action === "callback") {
+      const sessionUser = cookies.nitely_session ? await readSessionUser(homeRepoPath, cookies.nitely_session) : null;
+      const result = await finishOrganizationOidc(homeRepoPath, org, env, url.searchParams, cookies[cookieName],
+        sessionUser && cookies.nitely_session ? { userId: sessionUser.id, sessionId: cookies.nitely_session } : undefined);
+      const session = await createSession(homeRepoPath, result.userId, { authenticationMethod: "oidc", organizationId: org });
+      await appendSecurityAuditBestEffort(homeRepoPath, { action: result.linked ? "auth.oidc.link" : "auth.oidc.login",
+        decision: "allow", outcome: "success", httpStatus: 200, reasonCode: result.created ? "jit_provisioned" : "ok",
+        actor: { type: "user", id: result.userId, organizationId: org }, target: { type: "organization", id: org } });
+      const browser = requestHeader(request, "accept").includes("text/html");
+      sendJsonWithHeaders(response, browser ? 303 : 200, { authRequired: true, user: await readSessionUser(homeRepoPath, session.id) },
+        { "set-cookie": sessionCookie(session.id, true), ...(browser ? { location: "/" } : {}) });
+      return true;
+    }
+    throw new WebNotFoundError("OIDC endpoint not found");
   }
 
   const organizationRoute = /^\/api\/organizations\/([^/]+)\/(members|invitations)(?:\/([^/]+))?(?:\/(accept|decline|revoke))?$/.exec(url.pathname);
