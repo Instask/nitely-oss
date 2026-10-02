@@ -413,6 +413,7 @@ describe("knowledge repository Web API", () => {
     const server = await startTestServer(repoPath, {
       authMode: "required",
       authEnv: {},
+      providerEnv: { NITELY_EXECUTION_BACKEND: "local", NITELY_ALLOW_UNSAFE_LOCAL_EXECUTION: "true" },
       knowledgeRepositoryService: service,
     });
 
