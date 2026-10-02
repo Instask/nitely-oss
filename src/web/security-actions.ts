@@ -42,11 +42,11 @@ export function webSecurityActionForRequest(
   if (organizationProvider) return action(`providers.organization.${method === "GET" ? "view" : "manage"}`, method === "GET" ? "providers:use:shared" : "providers:write:shared", decodedTarget(pathname, /^\/api\/organizations\/([^/]+)/, "organization"));
   const policy = /^\/api\/organizations\/([^/]+)\/security-policy(?:\/(revoke-sessions))?$/.exec(pathname);
   if (policy && ["GET", "PUT", "POST"].includes(method ?? "")) return action(`organizations.policy.${policy[2] ?? (method === "GET" ? "view" : "update")}`, "organizations:manage", decodedTarget(pathname, /^\/api\/organizations\/([^/]+)/, "organization"));
-  const oidc = /^\/api\/organizations\/([^/]+)\/sso\/oidc(?:\/(login|link|callback))?$/.exec(pathname);
-  if (oidc && ["GET", "POST", "PUT"].includes(method ?? "")) {
+  const sso = /^\/api\/organizations\/([^/]+)\/sso\/(oidc|saml)(?:\/(login|link|callback|acs|metadata))?$/.exec(pathname);
+  if (sso && ["GET", "POST", "PUT"].includes(method ?? "")) {
     const target = decodedTarget(pathname, /^\/api\/organizations\/([^/]+)/, "organization");
-    return { action: `auth.oidc.${oidc[2] ?? (method === "GET" ? "configuration.view" : "configuration.update")}`,
-      ...(target ? { target } : {}), ...(!oidc[2] ? { permission: "organizations:manage" } : {}) };
+    return { action: `auth.${sso[2]}.${sso[3] ?? (method === "GET" ? "configuration.view" : "configuration.update")}`,
+      ...(target ? { target } : {}), ...(!sso[3] ? { permission: "organizations:manage" } : {}) };
   }
   const organization = /^\/api\/organizations\/([^/]+)\/(members|invitations)(?:\/[^/]+)?(?:\/(accept|decline|revoke))?$/.exec(pathname);
   if (organization && ["GET", "POST", "PATCH", "DELETE"].includes(method ?? "")) {
