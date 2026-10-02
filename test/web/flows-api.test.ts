@@ -738,6 +738,10 @@ describe("flows API", () => {
 
   it("creates and runs a work item from a named flow template", async () => {
     const repo = await createRepo();
+    await mkdir(join(repo, ".nitely"), { recursive: true });
+    await writeFile(join(repo, ".nitely/instructions.json"), JSON.stringify({
+      version: 1, instructions: [], configuration: { verifyCommand: "true" },
+    }));
     let runInput: RunFlowInput | undefined;
     const server = await start(
       repo,
@@ -803,6 +807,7 @@ describe("flows API", () => {
     );
     expect(runResponse.status).toBe(200);
     expect(runInput?.flowPath).toBe("template:pilot-bug-ticket-fix-pr");
+    expect(runInput?.configuration).toMatchObject({ verifyCommand: "true" });
     expect(runInput?.flowDocument).toContain("pilot-bug-ticket-fix-pr");
   });
 
