@@ -12602,10 +12602,73 @@ it("does not start a host OCI reaper inside an OCI workload", async () => {
   const reap = vi.spyOn(ociExecution, "reapExpiredOciContainers");
   vi.stubEnv("NITELY_SANDBOX", "1");
   try {
-    await startTestServer(repo);
-    expect(reap).not.toHaveBeenCalled();
+    const server = await startTestServer(repo);
+    try { expect(reap).not.toHaveBeenCalled(); } finally {
+      await server.close();
+      servers.splice(servers.indexOf(server), 1);
+    }
   } finally {
     vi.unstubAllEnvs();
     reap.mockRestore();
   }
+});
+
+
+describe("Web usage-limit recovery", () => {
+  afterEach(async () => { await Promise.all(servers.splice(0).map((server) => server.close())); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+
+  it("resumes due runs with each owner's credentials and leaves future resets alone", async () => {
+    const repo = await createRepo();
+    const owner = await createUser(repo, { email: "resume-owner@example.test", password: "resume-owner-password", role: "user" });
+    const providerStore = new FileProviderConnectionStore({ path: join(repo, ".nitely", "users", owner.id, "connections.json"), env: {} });
+    await providerStore.setConnection({ providerId: "github", authMethod: "pat", value: "owner-resume-token" });
+    for (const [id, retryAfter] of [["due", "2020-01-01T00:00:00Z"], ["future", "2099-01-01T00:00:00Z"]]) {
+      await createTask(repo, { title: id!, spec: "spec", techDesign: "td" }, { createId: () => id!, ownerId: owner.id });
+      await updateTaskRunState(repo, id!, { status: "failed", latestRunId: `run-${id}` });
+      const events = new EventStore(join(repo, ".nitely", "events.db"));
+      try {
+        events.append({ runId: `run-${id}`, type: "run.created", payload: { ownerId: owner.id, taskId: id, flowName: "test", flowPath: "flows/implement-spec-bootstrap.json", inputs: {} } });
+        events.append({ runId: `run-${id}`, type: "run.blocked", payload: { reason: "agent_usage_limit", stageId: "implement", message: "quota", retryAfter, runtime: id === "due" ? "claude" : "codex" } });
+      } finally { events.close(); }
+    }
+    const resumed: string[] = [];
+    vi.stubEnv("NITELY_SANDBOX", "0");
+    vi.spyOn(ociExecution, "reapExpiredOciContainers").mockResolvedValue({ scanned: 0, removed: [], skipped: 0, errors: [], observedAt: new Date().toISOString() });
+    await startTestServer(repo, undefined, undefined, {
+      authMode: "required", authEnv: { NITELY_WEB_SCHEDULER_INTERVAL_MS: "1000" }, providerEnv: {}, providerCommandStatus: async () => false,
+      resumeRun: async (input, dependencies) => {
+        expect(input.executionBackend).toBe("oci");
+        expect(await (await dependencies!.providerStore!.getConnection("github")).getAccessToken()).toBe("owner-resume-token");
+        resumed.push(input.runId);
+        return { runId: input.runId, branchName: "test", worktreePath: repo };
+      },
+    });
+    await waitFor(() => getTask(repo, "due"), (task) => task.status === "completed");
+    expect(resumed).toEqual(["run-due"]);
+    expect((await getTask(repo, "due")).status).toBe("completed");
+    expect((await getTask(repo, "future")).status).toBe("failed");
+  });
+
+  it("resumes an interrupted run through the Console API and rejects completed runs", async () => {
+    const repo = await createRepo();
+    await mkdir(join(repo, ".nitely"), { recursive: true });
+    const events = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      for (const runId of ["interrupted", "completed"]) {
+        events.append({ runId, type: "run.created", payload: { ownerId: "local", flowName: "test", flowPath: "flows/implement-spec-bootstrap.json", inputs: {} } });
+        if (runId === "completed") events.append({ runId, type: "run.completed", payload: {} });
+        else events.append({ runId, stageId: "implement", attempt: 1, createdAt: "2020-01-01T00:00:00Z", type: "stage.started", payload: { runtime: "mock" } });
+      }
+    } finally { events.close(); }
+    const resumed: string[] = [];
+    const server = await startTestServer(repo, undefined, undefined, {
+      resumeRun: async (input) => { resumed.push(input.runId); return { runId: input.runId, branchName: "test", worktreePath: repo }; },
+    });
+    expect(await json(await fetch(`${server.url}/api/runs/interrupted`))).toMatchObject({ run: { canResume: true } });
+    expect((await fetch(`${server.url}/api/runs/interrupted/resume`, { method: "POST" })).status).toBe(202);
+    await waitFor(async () => resumed, (ids) => ids.length === 1);
+    expect(resumed).toEqual(["interrupted"]);
+    expect((await fetch(`${server.url}/api/runs/completed/resume`, { method: "POST" })).status).toBe(400);
+    expect(resumed).toHaveLength(1);
+  });
 });

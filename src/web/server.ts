@@ -24,6 +24,7 @@ import {
   type RunFlowDependencies,
   type RunFlowInput,
   type RunFlowResult,
+  type ResumeRunInput,
 } from "../run/run-flow.js";
 import {
   normalizeExecutionBackendName,
@@ -265,6 +266,8 @@ import {
   MAX_SCHEDULER_CONCURRENCY,
   resolveMaxConcurrentTasks,
   runSchedulerOnce,
+  usageLimitBlockedRun,
+  parseRetryAfter,
   type SchedulerRunSummary,
 } from "../scheduler/run.js";
 import {
@@ -275,6 +278,7 @@ import {
 import {
   projectSchedulerCooldowns,
   readSchedulerCooldowns,
+  runtimeKey,
 } from "../scheduler/cooldown.js";
 import {
   dispatchFactoryQueue,
@@ -496,6 +500,7 @@ export interface StartWebServerInput {
     input: RunFlowInput,
     dependencies?: RunFlowDependencies,
   ) => Promise<RunFlowResult>;
+  resumeRun?: (input: ResumeRunInput, dependencies?: RunFlowDependencies) => Promise<RunFlowResult>;
   createRunId?: () => string;
   runGoldenPathDemo?: (input: { outputDir: string }) => Promise<GoldenPathDemoResult>;
   providerCommandStatus?: (command: string, args: string[]) => Promise<boolean>;
@@ -6007,6 +6012,74 @@ async function runStoredWorkItemAcrossRepositories(
   throw new WebNotFoundError(notFoundMessage);
 }
 
+async function prepareWebRunResume(
+  input: RuntimeStartWebServerInput,
+  repository: WebRepository,
+  runId: string,
+  requestingUser?: WebUserContext,
+) {
+  const events = new EventStore(eventStorePath(repository.path));
+  const run = (() => { try { return projectRun(events.list(runId), { openAttemptStatus: "interrupted" }); } finally { events.close(); } })();
+  if (run.status !== "blocked" && run.status !== "interrupted") {
+    throw new WebInputError("only blocked or interrupted runs can be resumed");
+  }
+  const authMode = webStartupSecurityPolicy(input).authMode;
+  const owner = run.ownerId ? await getPublicUser(resolve(input.repoPath), run.ownerId) : null;
+  const user: WebUserContext = authMode === "local"
+    ? { id: "local", email: "local", role: "admin", authMode }
+    : owner ? publicContext(owner, authMode, run.organizationId)
+    : (() => { throw new WebInputError("run owner no longer exists"); })();
+  if (!repositoryVisibleToUser(repository, user)) throw new WebNotFoundError("repository not found");
+  requireWriteAccessToRecord(user, run, "runs:start");
+  if (requestingUser) requireWriteAccessToRecord(requestingUser, run, "runs:start");
+  const homeRepoPath = resolve(input.repoPath);
+  const providerStore = providerStoreForUser(input, repository.path, user);
+  const knowledgeProviderStore = runHasPinnedExternalKnowledge(repository.path, runId)
+    ? await requireWebKnowledgeRunAccess({ serverInput: input, homeRepoPath, repository, user, pinnedRun: true })
+    : providerStoreForUser(input, homeRepoPath, user);
+  return {
+    resumeInput: { repoPath: repository.path, runId, executionBackend: webExecutionBackendPolicyForInput(input, authMode).backend },
+    dependencies: { providerStore, knowledgeProviderStore },
+  };
+}
+
+async function resumeWebRun(input: RuntimeStartWebServerInput, repository: WebRepository, runId: string): Promise<RunFlowResult> {
+  const prepared = await prepareWebRunResume(input, repository, runId);
+  return await (input.resumeRun ?? resumeRun)(prepared.resumeInput, prepared.dependencies);
+}
+
+// Recovery dispatches existing blocked runs only; intake remains operator-driven.
+export async function runWebUsageLimitRecovery(input: StartWebServerInput): Promise<void> {
+  const repositories = await loadWebRepositories(input.repoPath, input.repositories);
+  for (const repository of repositories.filter((repo) => !repo.synthetic)) {
+    const tasks = await listUnifiedWorkItems(repository.path);
+    if (!tasks.some((task) => task.latestRunId)) continue;
+    const persisted = new Map(readSchedulerCooldowns(repository.path).map((entry) => [entry.runtime, new Date(entry.until)]));
+    const now = new Date();
+    const events = new EventStore(eventStorePath(repository.path));
+    const candidates = (() => {
+      try {
+        return tasks.filter((task) => {
+          if (!task.latestRunId) return false;
+          const run = projectRun(events.list(task.latestRunId));
+          if (run.status !== "blocked" || run.blocker?.reason !== "agent_usage_limit") return false;
+          return Boolean(usageLimitBlockedRun({ task, eventStore: events, now, persisted })) ||
+            (!parseRetryAfter(run.blocker.retryAfter, now) && !persisted.has(runtimeKey(run.blocker.runtime ?? "")));
+        });
+      } finally { events.close(); }
+    })();
+    if (!candidates.length) continue;
+    await runSchedulerOnce({
+      repoPath: repository.path,
+      repoId: repository.id,
+      candidateIds: candidates.slice(0, 20).map((task) => task.id),
+      maxConcurrentTasks: 1,
+      executionBackend: webExecutionBackendPolicyForInput(input, webStartupSecurityPolicy(input).authMode).backend,
+      resumeRun: (resumeInput) => resumeWebRun(input, repository, resumeInput.runId),
+    });
+  }
+}
+
 async function updateUnifiedRunState(
   repoPath: string,
   id: string,
@@ -6463,8 +6536,14 @@ async function getScopedRunDetail(
       });
       const decorated = withRepository(run, repository);
       requireRecordAccess(decorated, user, "run not found");
+      let canResume = false;
+      try {
+        requireWriteAccessToRecord(user, decorated, "runs:start");
+        canResume = decorated.status === "blocked" || decorated.status === "interrupted";
+      } catch { /* Read-only viewers keep evidence access. */ }
       return {
         ...decorated,
+        canResume,
         parentRun:
           decorated.parentRun && recordVisibleToUser(decorated.parentRun, user)
             ? withRepository(decorated.parentRun, repository)
@@ -10429,6 +10508,28 @@ async function handleApiRequest(
     }
   }
 
+  const resumeRunMatch = /^\/api\/runs\/([^/]+)\/resume$/.exec(url.pathname);
+  if (request.method === "POST" && resumeRunMatch) {
+    const user = await requireUserContext(request, input, homeRepoPath);
+    const runId = decodeURIComponent(resumeRunMatch[1]!);
+    const run = await getScopedRunDetail(repositories, homeRepoPath, input, runId, user);
+    requireWriteAccessToRecord(user, run, "runs:start");
+    if (run.status !== "blocked" && run.status !== "interrupted") {
+      throw new WebInputError("only blocked or interrupted runs can be resumed");
+    }
+    const repository = repositories.find((repo) => repo.path === run.repoPath)!;
+    const prepared = await prepareWebRunResume(input, repository, runId, user);
+    void (input.resumeRun ?? resumeRun)(prepared.resumeInput, prepared.dependencies).then(async () => {
+      const tasks = await listUnifiedWorkItems(repository.path);
+      const task = tasks.find((item) => item.latestRunId === runId);
+      if (task) await reconcileTerminalWorkItemRun({ repoPath: repository.path, workItemId: task.id, runId });
+    }).catch((error: unknown) => {
+      console.error(`Nitely Web resume failed for ${runId}: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    sendJson(response, 202, { runId });
+    return true;
+  }
+
   const runQuestionAnswer = apiRunQuestionAnswerId(url.pathname);
   if (request.method === "POST" && runQuestionAnswer) {
     const user = await requireUserContext(request, input, homeRepoPath);
@@ -11123,6 +11224,11 @@ export async function startWebServer(
   input: StartWebServerInput,
 ): Promise<WebServer> {
   const OCI_REAPER_INTERVAL_MS = 60_000;
+  const recoveryIntervalValue = (input.authEnv ?? process.env).NITELY_WEB_SCHEDULER_INTERVAL_MS;
+  const recoveryInterval = recoveryIntervalValue === undefined ? undefined : Number(recoveryIntervalValue);
+  if (recoveryInterval !== undefined && (!Number.isInteger(recoveryInterval) || recoveryInterval < 1000 || recoveryInterval > 86400000)) {
+    throw new Error("NITELY_WEB_SCHEDULER_INTERVAL_MS must be an integer between 1000 and 86400000");
+  }
   const runtimeInput: RuntimeStartWebServerInput = {
     ...input,
     host: unbracketHost(input.host),
@@ -11412,6 +11518,8 @@ export async function startWebServer(
     server.once("close", resolvePromise);
   });
   let ociReaperTimer: ReturnType<typeof setInterval> | undefined;
+  let recoveryTimer: ReturnType<typeof setInterval> | undefined;
+  let recoveryRunning = false;
 
   await new Promise<void>((resolvePromise, reject) => {
     server.once("error", reject);
@@ -11456,6 +11564,19 @@ export async function startWebServer(
     ociReaperTimer.unref?.();
   }
 
+  if (recoveryInterval !== undefined && process.env.NITELY_SANDBOX !== "1") {
+    const recover = () => {
+      if (recoveryRunning) return;
+      recoveryRunning = true;
+      void runWebUsageLimitRecovery(runtimeInput).catch((error: unknown) => {
+        console.error(`Nitely Web usage-limit recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+      }).finally(() => { recoveryRunning = false; });
+    };
+    recoveryTimer = setInterval(recover, recoveryInterval);
+    recoveryTimer.unref?.();
+    recover();
+  }
+
   const address = server.address();
   const port =
     typeof address === "object" && address !== null
@@ -11467,6 +11588,7 @@ export async function startWebServer(
     closed,
     close: async () => {
       if (ociReaperTimer) clearInterval(ociReaperTimer);
+      if (recoveryTimer) clearInterval(recoveryTimer);
       await runtimeInput.previewManager?.stopAll();
       await new Promise<void>((resolvePromise, reject) => {
         server.close((error) => (error ? reject(error) : resolvePromise()));

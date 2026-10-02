@@ -2109,8 +2109,8 @@
             <sc-if value="{{ selectedRun.hasChange }}" hint-placeholder-val="{{ false }}">
               <a href="{{ selectedRun.changeUrl }}" target="_blank" rel="noopener noreferrer" onClick="{{ stop }}" style="display:inline-flex;align-items:center;gap:7px;border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:8px;padding:9px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;text-decoration:none;">View {{ selectedRun.cr }}</a>
             </sc-if>
-            <sc-if value="{{ selectedRun.isFailed }}" hint-placeholder-val="{{ false }}">
-              <button onClick="{{ noop }}" style="display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:9px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;" style-hover="border-color:var(--accent);color:var(--accent);">
+            <sc-if value="{{ selectedRun.canResume }}" hint-placeholder-val="{{ false }}">
+              <button onClick="{{ resumeRun }}" style="display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:9px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;" style-hover="border-color:var(--accent);color:var(--accent);">
                 <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5V5h-2.5"/></svg>Resume run
               </button>
             </sc-if>
@@ -4520,6 +4520,13 @@ class Component extends DCLogic {
     if (!stage || stage.hasDetails === false) return;
     const cur = this.isStageOpen(k, stage.status);
     this.setState((s) => ({ openStages: Object.assign({}, s.openStages, { [k]: !cur }) }));
+  };
+
+  resumeRun = async () => {
+    const runId = this.state.selectedRunId;
+    if (!runId) return;
+    const res = await this.api("/api/runs/" + encodeURIComponent(runId) + "/resume", { method: "POST" });
+    if (res) await this.fetchRunDetail(runId, { force: true });
   };
 
   startRun = async (e) => {
@@ -7006,6 +7013,7 @@ class Component extends DCLogic {
           : "";
         selectedRun = Object.assign({}, rd, {
           badge: this.badge(rd.status),
+          canResume: rd.canResume === true,
           stages: stages.map((s, i) => this.decorateStage(rd, s, i, stages.length)),
           stagesLabel: done.length + " of " + stages.length + " stages",
           progressLabel: done.length + " / " + stages.length + " complete",

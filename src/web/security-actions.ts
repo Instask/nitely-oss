@@ -36,6 +36,8 @@ export function webSecurityActionForRequest(
   method: string | undefined,
   pathname: string,
 ): WebSecurityAction | null {
+  const resume = decodedTarget(pathname, /^\/api\/runs\/([^/]+)\/resume$/, "run");
+  if (method === "POST" && resume) return action("runs.resume", "runs:start", resume);
   if (method === "POST" && pathname === "/api/demo/golden-path") {
     return action("demo.run", "demo:run");
   }

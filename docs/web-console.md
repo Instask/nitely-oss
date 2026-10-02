@@ -244,6 +244,7 @@ The local JSON API exposes:
 - `POST /api/scheduler/run`
 - `GET /api/runs`
 - `GET /api/runs/:runId`
+- `POST /api/runs/:runId/resume` for blocked or interrupted runs
 - `GET /api/providers`
 - `GET /api/session`
 - `POST /api/session`
@@ -255,3 +256,19 @@ The local JSON API exposes:
 `ready` is the compatibility default; `draft` marks both supplied planning
 artifacts as drafts so an external approval client can approve them before a
 run.
+
+### Web-only usage-limit recovery
+
+Set `NITELY_WEB_SCHEDULER_INTERVAL_MS=60000` in the Web service environment to
+opt into automatic recovery. The interval must be between 1 second and 24 hours;
+absence disables the timer. Each cycle selects at most 20 due usage-limit runs
+per repository, resumes them serially through the existing scheduler claims and
+cooldown policy, and finishes before another cycle begins. It does not intake
+new work. Servers running inside an OCI workload do not start this host timer.
+
+Automatic recovery and the Console's **Resume run** button use the persisted
+run owner's current provider and knowledge credentials and the server's selected
+execution backend. Deleted owners and revoked organization permissions fail
+closed. The button is available for writable blocked/interrupted runs; live or
+completed runs cannot be resumed through this endpoint. The API accepts browser
+sessions; the existing scheduler endpoint remains admin-session scoped.
