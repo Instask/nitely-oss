@@ -16,7 +16,7 @@ import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   LocalExecutionBackend,
@@ -1017,11 +1017,14 @@ describe("LocalExecutionBackend", () => {
           final(callback) {
             queueMicrotask(async () => {
               child.stdout.write("line-1\n");
-              await new Promise((resolve) => setTimeout(resolve, 20));
+              await vi.waitFor(async () => expect(await readFile(join(attemptDirectory, "stdout.log"), "utf8")).toBe("line-1\n"), { timeout: 5000 });
               seen.push(await readFile(join(attemptDirectory, "stdout.log"), "utf8"));
               child.stdout.write("line-2\n");
               child.stderr.write("warn\n");
-              await new Promise((resolve) => setTimeout(resolve, 20));
+              await vi.waitFor(async () => {
+                expect(await readFile(join(attemptDirectory, "stdout.log"), "utf8")).toBe("line-1\nline-2\n");
+                expect(await readFile(join(attemptDirectory, "stderr.log"), "utf8")).toBe("warn\n");
+              }, { timeout: 5000 });
               seen.push(await readFile(join(attemptDirectory, "stdout.log"), "utf8"));
               seen.push(await readFile(join(attemptDirectory, "stderr.log"), "utf8"));
               child.stdout.end();
