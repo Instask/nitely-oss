@@ -568,6 +568,37 @@ describe("FileProviderConnectionStore", () => {
     });
   });
 
+  it("selects one scoped auth method across fallback stores, pins explicit ids, and serializes shared writes", async () => {
+    const sharedPath = join(tmpDir, "organization.json");
+    const shared = new FileProviderConnectionStore({ path: sharedPath, env: {}, actorId: "owner" });
+    const personal = new FileProviderConnectionStore({ path: storePath, env: {} });
+    const own = await personal.setConnection({ providerId: "github", value: "personal-pat", authMethod: "pat", metadata: { scope: "user", ownerId: "member" } });
+    const org = await shared.setConnection({ providerId: "github", value: "org-oauth", authMethod: "oauth", metadata: { scope: "org", organizationId: "org-a" } });
+    const runtime = new FileProviderConnectionStore({ path: storePath, fallbackPaths: [sharedPath], env: { GITHUB_TOKEN: "env-pat" }, actorId: "member",
+      connectionAllowed: (record) => !record.credential.organizationId || record.credential.organizationId === "org-a",
+      connectionPriority: (record) => record.credential.scope === "org" ? 0 : 1 });
+    expect((await runtime.getConnection("github")).connectionId).toBe(org.id);
+    expect((await runtime.resolveEnv()).NITELY_GITHUB_TOKEN).toBe("org-oauth");
+    expect((await runtime.resolveEnv()).GITHUB_TOKEN).toBeUndefined();
+    expect((await runtime.listStatuses()).find((status) => status.id === "github")).toMatchObject({ connectionId: org.id, authMethod: "oauth" });
+    await expect(runtime.getConnection("github", { authMethod: "pat" })).rejects.toThrow();
+    const pinned = runtime.withConnectionBindings({ github: own.id });
+    expect((await pinned.resolveEnv()).NITELY_GITHUB_TOKEN).toBe("personal-pat");
+    await expect(pinned.getConnection("github", { connectionId: org.id })).rejects.toThrow();
+    await shared.revokeConnection("github", { connectionId: org.id });
+    await expect((await runtime.getConnection("github")).getAccessToken()).rejects.toThrow("revoked");
+    expect((await runtime.resolveEnv()).GITHUB_TOKEN).toBeUndefined();
+    expect((await pinned.resolveEnv()).NITELY_GITHUB_TOKEN).toBe("personal-pat");
+    await personal.clearConnection("github", { connectionId: own.id });
+    await expect(pinned.resolveEnv()).rejects.toThrow();
+    await shared.clearConnection("github", { connectionId: org.id });
+    expect((await runtime.resolveEnv()).GITHUB_TOKEN).toBe("env-pat");
+    const writes = await Promise.all(["one", "two", "three"].map((value) => shared.setConnection({ providerId: "github", value, authMethod: "pat", metadata: { scope: "org", organizationId: "org-a" } })));
+    expect(new Set((await shared.listConnections()).map((record) => record.id))).toEqual(new Set(writes.map((record) => record.id)));
+    const audit = await readFile(sharedPath + ".audit.jsonl", "utf8");
+    expect(audit).toContain('"actorId":"owner"'); expect(audit).not.toContain("org-oauth");
+  });
+
   describe("invalid file", () => {
     it("rejects malformed connections.json with a clear error", async () => {
       await writeFile(

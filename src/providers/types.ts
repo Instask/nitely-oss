@@ -162,6 +162,8 @@ export interface ProviderConnectionStatus {
   readonly authMethods: ProviderAuthMethodStatus[];
   /** Metadata of the connection the runtime would select, for policy checks. */
   readonly credential?: ProviderCredentialMetadata;
+  readonly connectionId?: string;
+  readonly authMethod?: ProviderAuthMethod;
 }
 
 export interface SetConnectionInput {
@@ -189,6 +191,7 @@ export interface ProviderConnectionStore {
     providerId: ProviderId,
     selector?: ProviderConnectionSelector,
   ): Promise<ProviderConnection>;
+  withConnectionBindings?(bindings: Partial<Record<ProviderId, string>>): ProviderConnectionStore;
   resolveEnv(): Promise<Record<string, string | undefined>>;
   listStatuses(): Promise<ProviderConnectionStatus[]>;
   listConnections?(providerId?: ProviderId): Promise<ProviderConnectionRecord[]>;
@@ -201,6 +204,7 @@ export interface ProviderConnectionStore {
     providerId: ProviderId,
     selector: ProviderConnectionSelector,
   ): Promise<void>;
+  updateConnectionMetadata?(providerId: ProviderId, connectionId: string, metadata: { repositoryId?: string | null; label?: string | null }): Promise<ProviderConnectionRecord>;
   /** Makes one connection the runtime default for its (provider, method). */
   setDefaultConnection?(providerId: ProviderId, connectionId: string): Promise<void>;
   /** Files consulted for credentials, primary first, for operator-facing messages. */

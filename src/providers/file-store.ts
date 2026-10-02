@@ -1,3 +1,4 @@
+import { withKnowledgeLease } from "../knowledge-repositories/lock.js";
 import { randomBytes } from "node:crypto";
 import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -72,6 +73,12 @@ export interface FileProviderConnectionStoreOptions {
   path: string;
   /** Scope every read/use/mutation before resolving secret material. */
   connectionAllowed?: (record: ProviderConnectionRecord) => boolean;
+  connectionManageable?: (record: ProviderConnectionRecord) => boolean;
+  /** Read all sources and prefer lower ranks; explicit bindings still select by id. */
+  connectionPriority?: (record: ProviderConnectionRecord) => number;
+  connectionBindings?: Partial<Record<ProviderId, string>>;
+  actorId?: string;
+  onAudit?: (event: ProviderCredentialAuditEvent) => Promise<void>;
   /**
    * Additional stores read, in order, for providers `path` does not hold.
    * Reads merge; new connections never leave `path`. Refresh rotation and
@@ -93,9 +100,13 @@ type ProviderCredentialAuditAction =
   | "status-check"
   | "refresh"
   | "revoke"
-  | "expired";
+  | "expired"
+  | "use"
+  | "metadata-update"
+  | "default";
 
-interface ProviderCredentialAuditEvent {
+export interface ProviderCredentialAuditEvent {
+  actorId?: string;
   version: 1;
   action: ProviderCredentialAuditAction;
   providerId: ProviderId;
@@ -462,8 +473,9 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
   private readonly oauth: ProviderOAuthOptions;
   private readonly now: () => Date;
   private readonly connectionAllowed: (record: ProviderConnectionRecord) => boolean;
+  private readonly connectionManageable: (record: ProviderConnectionRecord) => boolean;
 
-  constructor(options: FileProviderConnectionStoreOptions) {
+  constructor(private readonly options: FileProviderConnectionStoreOptions) {
     const secretStore = options.secretStore ??
       ((path: string) => new FileProviderSecretStore(FileProviderSecretStore.pathFor(path)));
     this.primary = { path: options.path, secrets: secretStore(options.path) };
@@ -473,6 +485,7 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
     }));
     this.auditPath = options.auditPath ?? `${options.path}.audit.jsonl`;
     this.connectionAllowed = options.connectionAllowed ?? (() => true);
+    this.connectionManageable = (record) => this.connectionAllowed(record) && (options.connectionManageable?.(record) ?? true);
     this.env = options.env;
     this.oauth = options.oauth ?? {};
     this.now = options.now ?? (() => new Date());
@@ -495,7 +508,7 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
       const permitted = loaded.file.connections.filter(this.connectionAllowed);
       const providers = new Set(permitted.map((c) => c.providerId));
       for (const record of permitted) {
-        if (held.has(record.providerId)) continue;
+        if (!this.options.connectionPriority && held.has(record.providerId)) continue;
         merged.push({
           record,
           source,
@@ -506,11 +519,15 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
       }
       for (const providerId of providers) held.add(providerId);
     }
-    return merged;
+    return this.options.connectionPriority ? merged.sort((a, b) => this.options.connectionPriority!(a.record) - this.options.connectionPriority!(b.record)) : merged;
+  }
+
+  withConnectionBindings(bindings: Partial<Record<ProviderId, string>>): ProviderConnectionStore {
+    return new FileProviderConnectionStore({ ...this.options, connectionBindings: bindings });
   }
 
   private normalizePermittedDefaults(records: ProviderConnectionRecord[]): ProviderConnectionRecord[] {
-    return [...records.filter((record) => !this.connectionAllowed(record)), ...normalizeDefaults(records.filter(this.connectionAllowed))];
+    return [...records.filter((record) => !this.connectionManageable(record)), ...normalizeDefaults(records.filter(this.connectionManageable))];
   }
 
   private select(
@@ -518,18 +535,23 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
     providerId: ProviderId,
     selector: ProviderConnectionSelector | undefined,
   ): LoadedConnection | undefined {
+    const binding = this.options.connectionBindings?.[providerId];
+    if (binding && selector?.connectionId && selector.connectionId !== binding) throw new MissingConnectionError(providerId, "connection conflicts with the run binding");
+    if (binding) selector = { ...selector, connectionId: binding };
     const forProvider = loaded.filter((c) => c.record.providerId === providerId);
     if (selector?.connectionId) {
-      return forProvider.find((c) => c.record.id === selector.connectionId);
+      return forProvider.find((c) => c.record.id === selector.connectionId && (!selector.authMethod || c.record.authMethod === selector.authMethod));
     }
+    const preferred = this.options.connectionPriority && forProvider.length
+      ? forProvider.filter((connection) => this.options.connectionPriority!(connection.record) === this.options.connectionPriority!(forProvider[0].record))
+      : forProvider;
     const descriptor = findDescriptor(providerId);
     const methods = selector?.authMethod
       ? [selector.authMethod]
       : descriptor.authMethods.map((m) => m.method);
     for (const method of methods) {
-      const chosen = forProvider.find(
-        (c) => c.record.authMethod === method && c.record.isDefault,
-      );
+      const candidates = preferred.filter((connection) => connection.record.authMethod === method);
+      const chosen = candidates.find((connection) => connection.record.isDefault) ?? (this.options.connectionPriority ? candidates[0] : undefined);
       if (chosen) return chosen;
     }
     return undefined;
@@ -540,6 +562,7 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
     selector?: ProviderConnectionSelector,
   ): Promise<ProviderConnection> {
     const loaded = await this.loadMerged();
+    if (!selector?.connectionId && this.options.connectionBindings?.[providerId]) selector = { ...selector, connectionId: this.options.connectionBindings[providerId] };
     const chosen = this.select(loaded, providerId, selector);
     if (!chosen) {
       if (selector?.connectionId) {
@@ -548,6 +571,7 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
           `provider ${providerId} has no connection ${selector.connectionId}`,
         );
       }
+      if (this.options.connectionPriority && loaded.some((connection) => connection.record.providerId === providerId)) throw new MissingConnectionError(providerId, "requested authentication method is unavailable in this scope");
       return this.inner.getConnection(providerId);
     }
     const { record } = chosen;
@@ -565,41 +589,47 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
    * The runtime boundary: returns a usable token or a structured
    * reconnect-required error, refreshing OAuth material when it can.
    */
+  // ponytail: serialize each connection file, including OAuth refresh; split locks by connection if contention matters.
   private async resolveAccessToken(loaded: LoadedConnection): Promise<string> {
-    // Re-read so a refresh performed through another store instance is seen.
-    const current = (await this.loadMerged()).find(
-      (c) => c.record.id === loaded.record.id && c.source.path === loaded.source.path,
-    );
-    if (!current) throw new MissingConnectionError(loaded.record.providerId, "connection is unavailable in this scope");
-    const { record, source } = current;
-    if (record.state === "revoked") {
-      throw this.reconnectRequired(record, "revoked");
-    }
-    const material = current.legacySecret ?? (await source.secrets.get(record.credentialRef));
-    if (!material) {
-      throw this.reconnectRequired(record, "revoked");
-    }
-    const now = this.now();
-    const expired = record.state === "expired" ||
-      (record.expiresAt !== undefined && isExpired(record.expiresAt, now));
-    if (!expired) return material.accessToken;
-    if (material.refreshToken && this.oauth.refresh) {
-      return await this.refresh(current, material.refreshToken);
-    }
-    if (record.state !== "expired") {
-      await this.updateRecord(source, record.id, { state: "expired" });
-      await this.appendAuditEvent({
-        version: 1,
-        action: "expired",
-        providerId: record.providerId,
-        createdAt: now.toISOString(),
-        result: "failed",
-        connectionId: record.id,
-        authMethod: record.authMethod,
-        ...safeAuditMetadata(record.credential),
-      });
-    }
-    throw this.reconnectRequired(record, "expired");
+    return await withKnowledgeLease({ path: loaded.source.path + ".lock", waitMs: 10_000 }, async () => {
+      // Re-read so a refresh performed through another store instance is seen.
+      const current = (await this.loadMerged()).find(
+        (c) => c.record.id === loaded.record.id && c.source.path === loaded.source.path,
+      );
+      if (!current) throw new MissingConnectionError(loaded.record.providerId, "connection is unavailable in this scope");
+      const { record, source } = current;
+      if (record.state === "revoked") {
+        throw this.reconnectRequired(record, "revoked");
+      }
+      const material = current.legacySecret ?? (await source.secrets.get(record.credentialRef));
+      if (!material) {
+        throw this.reconnectRequired(record, "revoked");
+      }
+      const now = this.now();
+      const expired = record.state === "expired" ||
+        (record.expiresAt !== undefined && isExpired(record.expiresAt, now));
+      if (!expired) {
+        await this.appendAuditEvent({ version: 1, action: "use", providerId: record.providerId, createdAt: now.toISOString(), result: "success", connectionId: record.id, authMethod: record.authMethod, ...safeAuditMetadata(record.credential) });
+        return material.accessToken;
+      }
+      if (material.refreshToken && this.oauth.refresh) {
+        return await this.refresh(current, material.refreshToken);
+      }
+      if (record.state !== "expired") {
+        await this.updateRecord(source, record.id, { state: "expired" });
+        await this.appendAuditEvent({
+          version: 1,
+          action: "expired",
+          providerId: record.providerId,
+          createdAt: now.toISOString(),
+          result: "failed",
+          connectionId: record.id,
+          authMethod: record.authMethod,
+          ...safeAuditMetadata(record.credential),
+        });
+      }
+      throw this.reconnectRequired(record, "expired");
+    });
   }
 
   private async refresh(
@@ -700,14 +730,20 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
   async resolveEnv(): Promise<Record<string, string | undefined>> {
     const base = { ...this.env };
     const loaded = await this.loadMerged();
+    for (const [providerId, connectionId] of Object.entries(this.options.connectionBindings ?? {})) {
+      const bound = loaded.find((connection) => connection.record.id === connectionId && connection.record.providerId === providerId);
+      if (!bound) throw new MissingConnectionError(providerId as ProviderId, "bound connection is unavailable in this scope");
+      if (bound.record.state === "revoked") throw this.reconnectRequired(bound.record, "revoked");
+    }
     const providers = new Set(loaded.map((c) => c.record.providerId));
     for (const providerId of providers) {
       const descriptor = findDescriptor(providerId);
+      const selected = this.options.connectionPriority || this.options.connectionBindings ? this.select(loaded, providerId, undefined) : undefined;
       const projected = new Set<string>();
       for (const method of descriptor.authMethods) {
         if (!method.env) continue;
         const chosen = this.select(loaded, providerId, { authMethod: method.method });
-        if (!chosen) continue;
+        if (!chosen || chosen.record.authMethod !== method.method || selected && selected.record.id !== chosen.record.id) continue;
         let token: string;
         try {
           token = await this.resolveAccessToken(chosen);
@@ -723,7 +759,9 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
       // the environment — would let the runtime authenticate as something the
       // operator did not configure here.
       for (const method of descriptor.authMethods) {
-        if (method.env && !projected.has(method.env)) delete base[method.env];
+        for (const name of [...(method.env ? [method.env] : []), ...method.readAliases]) {
+          if (!projected.has(name)) delete base[name];
+        }
       }
     }
     return base;
@@ -739,6 +777,11 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
   async listStatuses(): Promise<ProviderConnectionStatus[]> {
     const inner = await this.inner.listStatuses();
     const loaded = await this.loadMerged();
+    for (const [providerId, connectionId] of Object.entries(this.options.connectionBindings ?? {})) {
+      const bound = loaded.find((connection) => connection.record.id === connectionId && connection.record.providerId === providerId);
+      if (!bound) throw new MissingConnectionError(providerId as ProviderId, "bound connection is unavailable in this scope");
+      if (bound.record.state === "revoked") throw this.reconnectRequired(bound.record, "revoked");
+    }
     const now = this.now();
     const checkedAt = now.toISOString();
     const statuses = inner.map((status): ProviderConnectionStatus => {
@@ -747,6 +790,9 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
         .filter((c) => c.record.providerId === status.id)
         .map((c) => summarize(c.record, now));
       if (stored.length === 0) return status;
+      const selected = this.select(loaded, status.id, undefined)?.record;
+      const strict = Boolean(this.options.connectionPriority || this.options.connectionBindings);
+      const selectedState = selected ? effectiveState(selected, now) : undefined;
       const authMethods = status.authMethods.map((method) => {
         const connections = [
           ...stored.filter((c) => c.authMethod === method.method),
@@ -754,16 +800,13 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
         ];
         return {
           ...method,
-          configured: connections.some((c) => c.state === "active"),
+          configured: strict ? selected?.authMethod === method.method && selectedState === "active" : connections.some((c) => c.state === "active"),
           connections,
         };
       });
       const configured = authMethods.some((m) => m.configured);
-      const reconnectRequired = stored.some((c) => c.reconnectRequired);
-      const selected = descriptor.authMethods
-        .map((m) => stored.find((c) => c.authMethod === m.method && c.isDefault))
-        .find((c) => c !== undefined);
-      const storedConfigured = stored.some((c) => c.state === "active");
+      const reconnectRequired = strict ? selectedState !== undefined && selectedState !== "active" : stored.some((c) => c.reconnectRequired);
+      const storedConfigured = strict ? selectedState === "active" : stored.some((c) => c.state === "active");
       return {
         ...status,
         configured,
@@ -775,7 +818,7 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
             : status.message,
         authMethods,
         ...(selected
-          ? { credential: { ...selected.credential, lastStatusCheckedAt: checkedAt } }
+          ? { connectionId: selected.id, authMethod: selected.authMethod, credential: { ...selected.credential, lastStatusCheckedAt: checkedAt } }
           : {}),
       };
     });
@@ -787,6 +830,7 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
         providerId: status.id,
         createdAt: checkedAt,
         result: status.configured ? "configured" : "missing",
+        connectionId: status.connectionId, authMethod: status.authMethod,
         ...safeAuditMetadata(status.credential),
       });
     }
@@ -794,140 +838,148 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
   }
 
   async setConnection(input: SetConnectionInput): Promise<ProviderConnectionRecord> {
-    const descriptor = findDescriptor(input.providerId);
-    if (!descriptor.writable) {
-      throw new Error(`provider ${input.providerId} cannot be configured via Web Console`);
-    }
-    if (!input.value.trim()) {
-      throw new Error(`provider ${input.providerId} credential cannot be empty`);
-    }
-    const authMethod = input.authMethod ?? descriptor.legacyAuthMethod(input.value);
-    const method = findAuthMethod(descriptor, authMethod);
-    if (!method.writable) {
-      throw new Error(
-        `provider ${input.providerId} auth method ${authMethod} cannot be stored via Web Console`,
-      );
-    }
-    const file = await this.loadForWrite(this.primary);
-    const siblings = file.connections.filter(
-      (record) => this.connectionAllowed(record) && record.providerId === input.providerId && record.authMethod === authMethod,
-    );
-    let existing: ProviderConnectionRecord | undefined;
-    if (input.connectionId) {
-      existing = file.connections.find(
-        (record) => record.id === input.connectionId && record.providerId === input.providerId,
-      );
-      if (!existing || !this.connectionAllowed(existing)) {
+    return await withKnowledgeLease({ path: this.primary.path + ".lock", waitMs: 10_000 }, async () => {
+      const descriptor = findDescriptor(input.providerId);
+      if (!descriptor.writable) {
+        throw new Error(`provider ${input.providerId} cannot be configured via Web Console`);
+      }
+      if (!input.value.trim()) {
+        throw new Error(`provider ${input.providerId} credential cannot be empty`);
+      }
+      const authMethod = input.authMethod ?? descriptor.legacyAuthMethod(input.value);
+      const method = findAuthMethod(descriptor, authMethod);
+      if (!method.writable) {
         throw new Error(
-          `provider ${input.providerId} has no connection ${input.connectionId}`,
+          `provider ${input.providerId} auth method ${authMethod} cannot be stored via Web Console`,
         );
       }
-      if (existing.authMethod !== authMethod) {
-        throw new Error(
-          `connection ${existing.id} authenticates with ${existing.authMethod}, not ${authMethod}`,
-        );
-      }
-    } else if (input.authMethod === undefined) {
-      // A legacy single-value write replaces the provider's default of the
-      // inferred method, as it did when one provider held one secret.
-      existing = siblings.find((record) => record.isDefault);
-    }
-    const now = this.now().toISOString();
-    const record: ProviderConnectionRecord = {
-      id: existing?.id ?? newId("conn"),
-      providerId: input.providerId,
-      authMethod,
-      ...(input.label ?? existing?.label ? { label: input.label ?? existing?.label } : {}),
-      state: "active",
-      isDefault: input.makeDefault === true ||
-        existing?.isDefault === true ||
-        siblings.length === 0,
-      ...(input.scopes ? { scopes: input.scopes } : existing?.scopes ? { scopes: existing.scopes } : {}),
-      ...(input.account ? { account: input.account } : existing?.account ? { account: existing.account } : {}),
-      credentialRef: existing?.credentialRef ?? newId("sec"),
-      ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
-      refreshable: Boolean(input.refreshToken),
-      credential: connectionMetadataForWrite(existing?.credential, input, now),
-      createdAt: existing?.createdAt ?? now,
-      updatedAt: now,
-      lastValidatedAt: now,
-    };
-    if (!this.connectionAllowed(record)) throw new MissingConnectionError(input.providerId, "connection is unavailable in this scope");
-    await this.primary.secrets.put(record.credentialRef, {
-      accessToken: input.value,
-      ...(input.refreshToken ? { refreshToken: input.refreshToken } : {}),
-      ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
-    });
-    const others = file.connections
-      .filter((candidate) => candidate.id !== record.id)
-      .map((candidate) =>
-        record.isDefault && this.connectionAllowed(candidate) &&
-          candidate.providerId === record.providerId &&
-          candidate.authMethod === record.authMethod
-          ? { ...candidate, isDefault: false }
-          : candidate,
+      const file = await this.loadForWrite(this.primary);
+      const siblings = file.connections.filter(
+        (record) => this.connectionManageable(record) && record.providerId === input.providerId && record.authMethod === authMethod,
       );
-    file.connections = this.normalizePermittedDefaults([...others, record]);
-    await writeConnections(this.primary.path, file);
-    const written = file.connections.find((candidate) => candidate.id === record.id) ?? record;
-    await this.appendAuditEvent({
-      version: 1,
-      action: "set",
-      providerId: input.providerId,
-      createdAt: now,
-      result: "success",
-      connectionId: written.id,
-      authMethod: written.authMethod,
-      ...safeAuditMetadata(written.credential),
+      let existing: ProviderConnectionRecord | undefined;
+      if (input.connectionId) {
+        existing = file.connections.find(
+          (record) => record.id === input.connectionId && record.providerId === input.providerId,
+        );
+        if (!existing || !this.connectionManageable(existing)) {
+          throw new Error(
+            `provider ${input.providerId} has no connection ${input.connectionId}`,
+          );
+        }
+        if (existing.authMethod !== authMethod) {
+          throw new Error(
+            `connection ${existing.id} authenticates with ${existing.authMethod}, not ${authMethod}`,
+          );
+        }
+      } else if (input.authMethod === undefined) {
+        // A legacy single-value write replaces the provider's default of the
+        // inferred method, as it did when one provider held one secret.
+        existing = siblings.find((record) => record.isDefault);
+      }
+      const now = this.now().toISOString();
+      const record: ProviderConnectionRecord = {
+        id: existing?.id ?? newId("conn"),
+        providerId: input.providerId,
+        authMethod,
+        ...(input.label ?? existing?.label ? { label: input.label ?? existing?.label } : {}),
+        state: "active",
+        isDefault: input.makeDefault === true ||
+          existing?.isDefault === true ||
+          siblings.length === 0,
+        ...(input.scopes ? { scopes: input.scopes } : existing?.scopes ? { scopes: existing.scopes } : {}),
+        ...(input.account ? { account: input.account } : existing?.account ? { account: existing.account } : {}),
+        credentialRef: existing?.credentialRef ?? newId("sec"),
+        ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
+        refreshable: Boolean(input.refreshToken),
+        credential: connectionMetadataForWrite(existing?.credential, input, now),
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+        lastValidatedAt: now,
+      };
+      if (!this.connectionManageable(record)) throw new MissingConnectionError(input.providerId, "connection is unavailable in this scope");
+      await this.primary.secrets.put(record.credentialRef, {
+        accessToken: input.value,
+        ...(input.refreshToken ? { refreshToken: input.refreshToken } : {}),
+        ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
+      });
+      const others = file.connections
+        .filter((candidate) => candidate.id !== record.id)
+        .map((candidate) =>
+          record.isDefault && this.connectionManageable(candidate) &&
+            candidate.providerId === record.providerId &&
+            candidate.authMethod === record.authMethod
+            ? { ...candidate, isDefault: false }
+            : candidate,
+        );
+      file.connections = this.normalizePermittedDefaults([...others, record]);
+      await writeConnections(this.primary.path, file);
+      const written = file.connections.find((candidate) => candidate.id === record.id) ?? record;
+      await this.appendAuditEvent({
+        version: 1,
+        action: "set",
+        providerId: input.providerId,
+        createdAt: now,
+        result: "success",
+        connectionId: written.id,
+        authMethod: written.authMethod,
+        ...safeAuditMetadata(written.credential),
+      });
+      return written;
     });
-    return written;
   }
 
   async clearConnection(
     providerId: ProviderId,
     selector?: ProviderConnectionSelector,
   ): Promise<void> {
-    const descriptor = findDescriptor(providerId);
-    if (!descriptor.writable) {
-      throw new Error(`provider ${providerId} cannot be configured via Web Console`);
-    }
-    const file = await this.loadForWrite(this.primary);
-    const removed = file.connections.filter(
-      (record) =>
-        this.connectionAllowed(record) && record.providerId === providerId &&
+    return await withKnowledgeLease({ path: this.primary.path + ".lock", waitMs: 10_000 }, async () => {
+      const descriptor = findDescriptor(providerId);
+      if (!descriptor.writable) {
+        throw new Error(`provider ${providerId} cannot be configured via Web Console`);
+      }
+      const file = await this.loadForWrite(this.primary);
+      if (file.connections.some((record) => record.providerId === providerId &&
         (selector?.connectionId === undefined || record.id === selector.connectionId) &&
-        (selector?.authMethod === undefined || record.authMethod === selector.authMethod),
-    );
-    file.connections = this.normalizePermittedDefaults(
-      file.connections.filter((record) => !removed.includes(record)),
-    );
-    for (const record of removed) {
-      await this.primary.secrets.delete(record.credentialRef);
-    }
-    await writeConnections(this.primary.path, file);
-    const createdAt = this.now().toISOString();
-    if (removed.length === 0) {
-      await this.appendAuditEvent({
-        version: 1,
-        action: "clear",
-        providerId,
-        createdAt,
-        result: "success",
-      });
-      return;
-    }
-    for (const record of removed) {
-      await this.appendAuditEvent({
-        version: 1,
-        action: "clear",
-        providerId,
-        createdAt,
-        result: "success",
-        connectionId: record.id,
-        authMethod: record.authMethod,
-        ...safeAuditMetadata(record.credential),
-      });
-    }
+        (selector?.authMethod === undefined || record.authMethod === selector.authMethod) &&
+        this.connectionAllowed(record) && !this.connectionManageable(record))) throw new MissingConnectionError(providerId, "connection is not manageable in this scope");
+      const removed = file.connections.filter(
+        (record) =>
+          this.connectionManageable(record) && record.providerId === providerId &&
+          (selector?.connectionId === undefined || record.id === selector.connectionId) &&
+          (selector?.authMethod === undefined || record.authMethod === selector.authMethod),
+      );
+      file.connections = this.normalizePermittedDefaults(
+        file.connections.filter((record) => !removed.includes(record)),
+      );
+      for (const record of removed) {
+        await this.primary.secrets.delete(record.credentialRef);
+      }
+      await writeConnections(this.primary.path, file);
+      const createdAt = this.now().toISOString();
+      if (removed.length === 0) {
+        await this.appendAuditEvent({
+          version: 1,
+          action: "clear",
+          providerId,
+          createdAt,
+          result: "success",
+        });
+        return;
+      }
+      for (const record of removed) {
+        await this.appendAuditEvent({
+          version: 1,
+          action: "clear",
+          providerId,
+          createdAt,
+          result: "success",
+          connectionId: record.id,
+          authMethod: record.authMethod,
+          ...safeAuditMetadata(record.credential),
+        });
+      }
+    });
   }
 
   /**
@@ -946,39 +998,65 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
         `provider ${providerId} has no matching connection to revoke`,
       );
     }
-    await chosen.source.secrets.delete(chosen.record.credentialRef);
-    await this.updateRecord(chosen.source, chosen.record.id, { state: "revoked" });
-    await this.appendAuditEvent({
-      version: 1,
-      action: "revoke",
-      providerId,
-      createdAt: this.now().toISOString(),
-      result: "success",
-      connectionId: chosen.record.id,
-      authMethod: chosen.record.authMethod,
-      ...safeAuditMetadata(chosen.record.credential),
+    const selected = chosen;
+    return await withKnowledgeLease({ path: selected.source.path + ".lock", waitMs: 10_000 }, async () => {
+      const chosen = (await this.loadMerged()).find((entry) => entry.record.id === selected.record.id && entry.source.path === selected.source.path);
+      if (!chosen || !this.connectionManageable(chosen.record)) throw new MissingConnectionError(providerId, "connection is unavailable in this scope");
+      await chosen.source.secrets.delete(chosen.record.credentialRef);
+      await this.updateRecord(chosen.source, chosen.record.id, { state: "revoked" });
+      await this.appendAuditEvent({
+        version: 1,
+        action: "revoke",
+        providerId,
+        createdAt: this.now().toISOString(),
+        result: "success",
+        connectionId: chosen.record.id,
+        authMethod: chosen.record.authMethod,
+        ...safeAuditMetadata(chosen.record.credential),
+      });
+    });
+  }
+
+  async updateConnectionMetadata(providerId: ProviderId, connectionId: string, metadata: { repositoryId?: string | null; label?: string | null }): Promise<ProviderConnectionRecord> {
+    return await withKnowledgeLease({ path: this.primary.path + ".lock", waitMs: 10_000 }, async () => {
+      const file = await this.loadForWrite(this.primary);
+      const index = file.connections.findIndex((record) => record.id === connectionId && record.providerId === providerId && this.connectionManageable(record));
+      if (index < 0) throw new MissingConnectionError(providerId, "connection not found");
+      const record = file.connections[index];
+      const credential = { ...record.credential, updatedAt: this.now().toISOString() };
+      if (metadata.repositoryId === null) delete credential.repositoryId;
+      else if (metadata.repositoryId !== undefined) credential.repositoryId = metadata.repositoryId;
+      const updated = { ...record, credential, updatedAt: credential.updatedAt, ...(metadata.label !== undefined ? { label: metadata.label ?? undefined } : {}) };
+      if (!this.connectionManageable(updated)) throw new MissingConnectionError(providerId, "connection is unavailable in this scope");
+      file.connections[index] = updated;
+      await writeConnections(this.primary.path, file);
+      await this.appendAuditEvent({ version: 1, action: "metadata-update", providerId, createdAt: updated.updatedAt, result: "success", connectionId: record.id, authMethod: record.authMethod, ...safeAuditMetadata(credential) });
+      return updated;
     });
   }
 
   async setDefaultConnection(providerId: ProviderId, connectionId: string): Promise<void> {
-    const file = await this.loadForWrite(this.primary);
-    const target = file.connections.find(
-      (record) => record.id === connectionId && record.providerId === providerId,
-    );
-    if (!target || !this.connectionAllowed(target)) {
-      throw new MissingConnectionError(
-        providerId,
-        `provider ${providerId} has no connection ${connectionId}`,
+    return await withKnowledgeLease({ path: this.primary.path + ".lock", waitMs: 10_000 }, async () => {
+      const file = await this.loadForWrite(this.primary);
+      const target = file.connections.find(
+        (record) => record.id === connectionId && record.providerId === providerId,
       );
-    }
-    file.connections = this.normalizePermittedDefaults(
-      file.connections.map((record) =>
-        this.connectionAllowed(record) && record.providerId === providerId && record.authMethod === target.authMethod
-          ? { ...record, isDefault: record.id === connectionId }
-          : record,
-      ),
-    );
-    await writeConnections(this.primary.path, file);
+      if (!target || !this.connectionManageable(target)) {
+        throw new MissingConnectionError(
+          providerId,
+          `provider ${providerId} has no connection ${connectionId}`,
+        );
+      }
+      file.connections = this.normalizePermittedDefaults(
+        file.connections.map((record) =>
+          this.connectionManageable(record) && record.providerId === providerId && record.authMethod === target.authMethod
+            ? { ...record, isDefault: record.id === connectionId }
+            : record,
+        ),
+      );
+      await writeConnections(this.primary.path, file);
+      await this.appendAuditEvent({ version: 1, action: "default", providerId, createdAt: this.now().toISOString(), result: "success", connectionId: target.id, authMethod: target.authMethod, ...safeAuditMetadata(target.credential) });
+    });
   }
 
   describeCredentialSources(): string[] {
@@ -987,10 +1065,11 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
 
   private async appendAuditEvent(event: ProviderCredentialAuditEvent): Promise<void> {
     await mkdir(dirname(this.auditPath), { recursive: true });
-    await appendFile(this.auditPath, `${JSON.stringify(event)}\n`, {
+    await appendFile(this.auditPath, `${JSON.stringify({ ...event, ...(this.options.actorId ? { actorId: this.options.actorId } : {}) })}\n`, {
       encoding: "utf8",
       mode: 0o600,
     });
+    await this.options.onAudit?.({ ...event, ...(this.options.actorId ? { actorId: this.options.actorId } : {}) });
   }
 }
 

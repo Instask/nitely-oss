@@ -377,3 +377,33 @@ endpoint and requires a successful audit write before access. It cannot bypass
 expiry, idle timeout, or revocation. Policy reads, changes, revocations, and
 recovery access produce security audit events. Disable the operator switch after
 recovery.
+
+Organization provider connections use the same connection/auth-method/secret-ref
+model as personal connections. Organization owners create them with
+`POST /api/organizations/:org/providers/:provider/connections` (`value`, optional
+`authMethod`, `label`, `makeDefault`, and `repositoryId`). Owners alone manage
+shared connections; members and maintainers can use them. Instance admin status
+alone does not grant access to another organization's secrets.
+
+Members with shared-use permission can list connection metadata with
+`GET /api/organizations/:org/providers` or append `/:provider/connections`.
+Secret values and secret references are omitted. Owners can `PATCH` a connection
+with `repositoryId` (or `null` to unbind) and `label`; a binding must identify a
+registered repository in that organization. Append `/rotate`, `/revoke`, or
+`/default` to a connection path and `POST` to rotate its value, revoke it, or
+change its default; `DELETE` the connection path to remove it. Rotation keeps the
+connection id. Revocation removes its secret material and leaves metadata.
+
+Task and work-item run requests can supply `providerConnections`, a provider-to-
+connection-id map. Selection order is explicit run binding, repository-bound
+organization connection, organization connection, personal connection, then
+repository-local/environment fallback. Only one selected connection per provider
+is projected in organization contexts; the descriptor's auth-method order breaks
+method ties. Invalid, foreign, conflicting, or revoked explicit bindings fail
+closed. Switching workspaces does not change the task's organization/repository
+context. Saved run bindings also apply when a run resumes.
+
+Connection mutations and use record actor, connection id, scope, and auth method
+without secret material. Reproducibility manifests retain the selected connection
+id and auth method. Later rotation/revocation leaves old run evidence untouched.
+Per-file leases serialize shared mutations and OAuth refreshes.

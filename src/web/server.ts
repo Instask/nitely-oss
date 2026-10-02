@@ -151,7 +151,7 @@ import {
 } from "../providers/descriptors.js";
 import { FileProviderConnectionStore } from "../providers/file-store.js";
 import type { ProviderOAuthOptions } from "../providers/file-store.js";
-import { resolveProviderStore } from "../providers/index.js";
+import { bindProviderConnections, validateProviderConnectionBindings, resolveProviderStore } from "../providers/index.js";
 import { createProviderOAuthAdapters, PROVIDER_OAUTH_CLIENT_ENV } from "../providers/oauth/adapters.js";
 import type { ProviderOAuthAdapter } from "../providers/oauth/adapters.js";
 import { MissingConnectionError, ReconnectRequiredError } from "../providers/types.js";
@@ -502,6 +502,7 @@ export interface StartWebServerInput {
   authMode?: WebAuthMode;
   authEnv?: Record<string, string | undefined>;
   providerEnv?: Record<string, string | undefined>;
+  providerConnectionBindings?: RunFlowInput["providerConnections"];
   runFlow?: (
     input: RunFlowInput,
     dependencies?: RunFlowDependencies,
@@ -3502,10 +3503,27 @@ function getProviderStore(
   );
 }
 
+function organizationProviderPath(homeRepoPath: string, organizationId: string): string {
+  return join(homeRepoPath, ".nitely", "organizations", createHash("sha256").update(organizationId).digest("hex"), "connections.json");
+}
+
+function organizationProviderStore(input: RuntimeStartWebServerInput, homeRepoPath: string, organizationId: string, user: WebUserContext, manage: boolean): FileProviderConnectionStore {
+  const member = user.memberships?.find((membership) => membership.organizationId === organizationId);
+  if (!member || !organizationSessionAccessAllowed(user, organizationId)) throw new WebNotFoundError("organization not found");
+  if (!organizationRoleHasPermission(member.role, manage ? "providers:write:shared" : "providers:use:shared")) throw new WebForbiddenError();
+  return new FileProviderConnectionStore({ path: organizationProviderPath(homeRepoPath, organizationId), env: {}, actorId: user.id,
+    connectionAllowed: (record) => record.credential.organizationId === organizationId && (record.credential.scope === "org" || record.credential.scope === "external-vault-backed"),
+    ...providerStoreOAuthOptions(input),
+    onAudit: async (event) => { await appendSecurityAuditEvent(homeRepoPath, { action: "providers.connection." + event.action, decision: "allow", outcome: event.result === "failed" ? "error" : "success", httpStatus: 200, reasonCode: event.result,
+      actor: { type: "user", id: user.id, organizationId, organizationRole: member.role }, target: { type: "provider", id: event.connectionId ?? event.providerId } }); },
+  });
+}
+
 function providerStoreForUser(
   input: RuntimeStartWebServerInput,
   repoPath: string,
   user: WebUserContext,
+  context: { organizationId?: string; repositoryId?: string | null; repositoryOrganizationId?: string } = {},
 ): ProviderConnectionStore {
   if (user.authMode === "local") {
     return getProviderStore(input, repoPath);
@@ -3514,10 +3532,30 @@ function providerStoreForUser(
   // operator configured for the repository. Without the fallback a shared
   // credential is invisible to every Web Console user, and the run that needs
   // it fails with no indication that the credential exists one directory up.
+  const repository = context.repositoryId === null ? undefined : input.repositories?.find((candidate) => context.repositoryId ? candidate.id === context.repositoryId : resolve(candidate.path) === resolve(repoPath));
+  context = { repositoryId: repository?.id, ...context };
+  const organizationId = context.organizationId ?? context.repositoryOrganizationId ?? repository?.organizationId ?? user.currentOrganizationId;
+  if ((context.repositoryOrganizationId ?? repository?.organizationId) && (context.repositoryOrganizationId ?? repository?.organizationId) !== organizationId) throw new WebNotFoundError("repository not found in organization");
+  const membership = user.memberships?.find((member) => member.organizationId === organizationId);
+  const canUseShared = organizationSessionAccessAllowed(user, organizationId) && organizationRoleHasPermission(membership?.role, "providers:use:shared");
   return new FileProviderConnectionStore({
     path: join(repoPath, ".nitely", "users", user.id, "connections.json"),
-    fallbackPaths: [join(repoPath, ".nitely", "connections.json")],
-    connectionAllowed: (record) => organizationSessionAccessAllowed(user, record.credential.organizationId),
+    fallbackPaths: [...(organizationId && canUseShared ? [organizationProviderPath(resolve(input.repoPath), organizationId)] : []), join(repoPath, ".nitely", "connections.json")],
+    actorId: user.id,
+    connectionManageable: (record) => record.credential.scope !== "org" && record.credential.scope !== "external-vault-backed" || organizationRoleHasPermission(membership?.role, "providers:write:shared"),
+    connectionPriority: (record) => record.credential.scope === "org" || record.credential.scope === "external-vault-backed" ? record.credential.repositoryId ? 0 : 1 : record.credential.scope === "user" ? 2 : 3,
+    connectionAllowed: (record) => {
+      const credential = record.credential;
+      if (!organizationSessionAccessAllowed(user, credential.organizationId)) return false;
+      if (credential.organizationId && credential.organizationId !== organizationId) return false;
+      if (credential.repositoryId && credential.repositoryId !== context.repositoryId) return false;
+      if (credential.scope === "org" || credential.scope === "external-vault-backed") return canUseShared && credential.organizationId === organizationId;
+      return credential.scope !== "user" || !credential.ownerId || credential.ownerId === user.id;
+    },
+    onAudit: async (event) => {
+      if (event.action === "status-check" || !event.organizationId) return;
+      await appendSecurityAuditEvent(resolve(input.repoPath), { action: "providers.connection." + event.action, decision: "allow", outcome: event.result === "failed" ? "error" : "success", httpStatus: 200, reasonCode: event.result, actor: { type: "user", id: user.id, organizationId: event.organizationId, organizationRole: membership?.role }, target: { type: "provider", id: event.connectionId } });
+    },
     env: input.providerEnv ?? process.env,
     commandStatus: input.providerCommandStatus,
     ...providerStoreOAuthOptions(input),
@@ -3670,6 +3708,7 @@ async function selectWebExternalKnowledge(input: {
     input.serverInput,
     input.homeRepoPath,
     input.user,
+    { repositoryId: input.repository.id, organizationId: input.repository.organizationId ?? input.user.currentOrganizationId, repositoryOrganizationId: input.repository.organizationId },
   );
   if (enabled.some((view) => view.attachment.source.type === "remote")) {
     await requireKnowledgeGitHubCredentialScope({
@@ -3731,6 +3770,7 @@ async function requireWebKnowledgeRunAccess(input: {
     input.serverInput,
     input.homeRepoPath,
     input.user,
+    { repositoryId: input.repository.id, organizationId: input.repository.organizationId ?? input.user.currentOrganizationId, repositoryOrganizationId: input.repository.organizationId },
   );
   if (
     !input.pinnedRun &&
@@ -4116,6 +4156,7 @@ async function runStoredWorkItem(
     requireRecordAccess(workItem, user, notFoundMessage);
     requireWriteAccessToRecord(user, workItem, "runs:start");
   }
+  providerStore = bindProviderConnections(user.authMode === "required" ? providerStoreForUser(serverInput, repository.path, user, { organizationId: workItem.organizationId, repositoryId: repository.id, repositoryOrganizationId: repository.organizationId }) : providerStore, serverInput.providerConnectionBindings);
   if (workItem.flowId) {
     const flowStore = openFlowStore(repoPath);
     try {
@@ -4158,6 +4199,7 @@ async function runStoredWorkItem(
   }
   const runnerInput: RunFlowInput = {
     ...evaluatedInput,
+    ...(serverInput.providerConnectionBindings ? { providerConnections: serverInput.providerConnectionBindings } : {}),
     ...(taskScope ? { taskScope } : {}),
   };
   const flowDocument = runnerInput.flowDocument ??
@@ -4322,7 +4364,7 @@ async function buildAllSchedulerView(
           workItems: prepared.workItems,
           candidateIds,
           intent: { kind: "automatic" },
-          providerStore: providerStoreForUser(input, repository.path, user),
+          providerStore: providerStoreForUser(input, repository.path, user, { repositoryId: repository.id, repositoryOrganizationId: repository.organizationId }),
           ...(input.getChangeRequestStatus
             ? { getChangeRequestStatus: input.getChangeRequestStatus }
             : {}),
@@ -5683,6 +5725,7 @@ function appendAcceptedRunCreated(input: {
   repoName?: string;
   inputs: RunFlowInput["inputs"];
   configuration?: RunFlowInput["configuration"];
+  providerConnections?: RunFlowInput["providerConnections"];
   workItemId: string;
   workItemType?: string;
   ownerId?: string;
@@ -5700,6 +5743,7 @@ function appendAcceptedRunCreated(input: {
       repoName: input.repoName,
       inputs: input.inputs,
       configuration: input.configuration,
+      providerConnections: input.providerConnections,
       branchName: input.branchName,
       workItemId: input.workItemId,
       workItemType: input.workItemType,
@@ -5730,6 +5774,7 @@ function ensureRunCompletedEvent(
       repoName: runInput.repoName,
       inputs: runInput.inputs,
       ...(runInput.configuration ? { configuration: runInput.configuration } : {}),
+      ...(runInput.providerConnections ? { providerConnections: runInput.providerConnections } : {}),
       workItemId: runInput.workItemId,
       workItemType: runInput.workItemType,
       ...(runInput.ownerId ? { ownerId: runInput.ownerId } : {}),
@@ -5824,6 +5869,7 @@ async function startConfirmedTaskReworkRun(input: {
   };
   const runnerInput: RunFlowInput = {
     flowPath: input.request.flowPath,
+    ...(input.serverInput.providerConnectionBindings ? { providerConnections: input.serverInput.providerConnectionBindings } : {}),
     repoPath: input.repository.path,
     repoId: input.repository.id,
     repoName: input.repository.name,
@@ -6070,7 +6116,7 @@ async function prepareWebRunResume(
   requireWriteAccessToRecord(user, run, "runs:start");
   if (requestingUser) requireWriteAccessToRecord(requestingUser, run, "runs:start");
   const homeRepoPath = resolve(input.repoPath);
-  const providerStore = providerStoreForUser(input, repository.path, user);
+  const providerStore = bindProviderConnections(providerStoreForUser(input, repository.path, user, { organizationId: run.organizationId, repositoryId: repository.id, repositoryOrganizationId: repository.organizationId }), run.providerConnections);
   const knowledgeProviderStore = runHasPinnedExternalKnowledge(repository.path, runId)
     ? await requireWebKnowledgeRunAccess({ serverInput: input, homeRepoPath, repository, user, pinnedRun: true })
     : providerStoreForUser(input, homeRepoPath, user);
@@ -6790,7 +6836,11 @@ function requireSharedProviderCredentialAccess(
   organizationId: string | undefined,
 ): void {
   if (!organizationSessionAccessAllowed(user, organizationId)) throw new WebForbiddenError();
-  requireCurrentOrganizationPermission(user, "providers:write:shared");
+  if (user.authMode === "required") {
+    const member = user.memberships?.find((membership) => membership.organizationId === (organizationId ?? user.currentOrganizationId));
+    if (!member) throw new WebNotFoundError("organization not found");
+    if (!organizationRoleHasPermission(member.role, "providers:write:shared")) throw new WebForbiddenError();
+  } else requireCurrentOrganizationPermission(user, "providers:write:shared");
   if (
     user.authMode === "required" &&
     user.role !== "admin" &&
@@ -6801,20 +6851,10 @@ function requireSharedProviderCredentialAccess(
   }
 }
 
-async function requireExistingProviderCredentialWriteAccess(
-  store: ProviderConnectionStore,
-  providerId: ProviderId,
-  user: WebUserContext,
-): Promise<void> {
-  const status = (await store.listStatuses()).find(
-    (candidate) => candidate.id === providerId,
-  );
-  if (providerCredentialScopeIsShared(status?.credential?.scope)) {
-    requireSharedProviderCredentialAccess(
-      user,
-      status?.credential?.organizationId,
-    );
-  }
+async function requireExistingProviderCredentialWriteAccess(store: ProviderConnectionStore, providerId: ProviderId, user: WebUserContext, connectionId?: string): Promise<void> {
+  if (!connectionId) return;
+  const record = (await store.listConnections?.(providerId))?.find((connection) => connection.id === connectionId);
+  if (providerCredentialScopeIsShared(record?.credential.scope)) requireSharedProviderCredentialAccess(user, record?.credential.organizationId);
 }
 
 function parseProviderCredentialMetadata(
@@ -6905,10 +6945,7 @@ async function handleApiRequest(
     runInput: RunFlowInput,
     dependencies?: RunFlowDependencies,
   ): Promise<RunFlowResult> =>
-    await baseRunner(
-      { ...runInput, executionBackend: execution.backend },
-      dependencies,
-    );
+    await baseRunner({ ...runInput, executionBackend: execution.backend }, dependencies);
 
   if (
     await dispatchHttpRoutes(
@@ -7967,6 +8004,54 @@ async function handleApiRequest(
     }
   }
 
+  const organizationProviderRoute = /^\/api\/organizations\/([^/]+)\/providers(?:\/([^/]+)\/connections(?:\/([^/]+)(?:\/(rotate|revoke|default))?)?)?$/.exec(url.pathname);
+  if (organizationProviderRoute) {
+    if (authMode !== "required") throw new WebNotFoundError("organization connections require authenticated mode");
+    const user = await requireUserContext(request, input, homeRepoPath);
+    let org: string; let id: string | undefined;
+    try { org = decodeURIComponent(organizationProviderRoute[1]); id = organizationProviderRoute[3] ? decodeURIComponent(organizationProviderRoute[3]) : undefined; } catch { throw new WebInputError("invalid connection resource"); }
+    const store = organizationProviderStore(input, homeRepoPath, org, user, request.method !== "GET");
+    const providerId = organizationProviderRoute[2] ? requireWritableProviderId(organizationProviderRoute[2]) : undefined;
+    const action = organizationProviderRoute[4];
+    const existing = id && providerId ? (await store.listConnections(providerId)).find((record) => record.id === id) : undefined;
+    if (id && !existing) throw new WebNotFoundError("provider connection not found");
+    if (request.method === "GET" && !action) {
+      sendJson(response, 200, { connections: (await store.listConnections(providerId)).filter((record) => !id || record.id === id).map(publicProviderConnection) });
+      return true;
+    }
+    const validateBinding = (repositoryId: unknown): string | null | undefined => {
+      if (repositoryId === undefined || repositoryId === null) return repositoryId;
+      if (typeof repositoryId !== "string") throw new WebInputError("invalid repository binding");
+      if (!repositories.some((repository) => repository.id === repositoryId && repository.organizationId === org)) throw new WebNotFoundError("repository not found in organization");
+      return repositoryId;
+    };
+    if (request.method === "POST" && providerId && (!id || action === "rotate")) {
+      const body = requireObject(await readRequestJson(request));
+      if (typeof body.value !== "string" || !body.value.trim()) throw new WebInputError("value is required");
+      if (body.label !== undefined && (typeof body.label !== "string" || body.label.length > 128)) throw new WebInputError("invalid label");
+      const repositoryId = existing?.credential.repositoryId ?? validateBinding(body.repositoryId);
+      const record = await store.setConnection({ providerId, value: body.value.trim(), authMethod: existing?.authMethod ?? parsePastedProviderAuthMethod(providerId, body.authMethod),
+        ...(id ? { connectionId: id } : {}), ...(typeof body.label === "string" ? { label: body.label } : {}), ...(body.makeDefault === true ? { makeDefault: true } : {}),
+        metadata: { scope: "org", source: "web-console", ownerId: existing?.credential.ownerId ?? user.id, organizationId: org, ...(repositoryId ? { repositoryId } : {}) } });
+      sendJson(response, id ? 200 : 201, { connection: publicProviderConnection(record) });
+      return true;
+    }
+    if (request.method === "PATCH" && providerId && id && !action) {
+      const body = requireObject(await readRequestJson(request));
+      if (Object.keys(body).some((key) => !["repositoryId", "label"].includes(key)) || body.label !== undefined && body.label !== null && (typeof body.label !== "string" || body.label.length > 128)) throw new WebInputError("invalid connection metadata");
+      sendJson(response, 200, { connection: publicProviderConnection(await store.updateConnectionMetadata(providerId, id, { repositoryId: validateBinding(body.repositoryId), label: body.label as string | null | undefined })) });
+      return true;
+    }
+    if (providerId && id && request.method === "DELETE" && !action || providerId && id && request.method === "POST" && ["revoke", "default"].includes(action ?? "")) {
+      if (action === "revoke") await store.revokeConnection(providerId!, { connectionId: id });
+      else if (action === "default") await store.setDefaultConnection(providerId!, id!);
+      else await store.clearConnection(providerId!, { connectionId: id });
+      sendJson(response, 200, { ok: true });
+      return true;
+    }
+    throw new WebNotFoundError("organization provider endpoint not found");
+  }
+
   const policyRoute = /^\/api\/organizations\/([^/]+)\/security-policy(?:\/(revoke-sessions))?$/.exec(url.pathname);
   if (policyRoute) {
     if (authMode !== "required") throw new WebNotFoundError("organization policy requires authenticated mode");
@@ -8582,7 +8667,7 @@ async function handleApiRequest(
     );
     if (requestedRepoId && selected.length === 0) throw new WebNotFoundError("repository not found");
     const dispatched = await Promise.all(selected.map(async (repository) => {
-      const providerStore = providerStoreForUser(input, repository.path, user);
+      const providerStore = providerStoreForUser(input, repository.path, user, { repositoryId: repository.id, repositoryOrganizationId: repository.organizationId });
       const homeKnowledgeProviderStore = providerStoreForUser(input, homeRepoPath, user);
       const result = await dispatchFactoryQueue({
         repoPath: repository.path,
@@ -8650,7 +8735,7 @@ async function handleApiRequest(
     for (const repository of visibleRepositories(repositories, user).filter(
       (candidate) => candidate.synthetic !== true,
     )) {
-      const providerStore = providerStoreForUser(input, repository.path, user);
+      const providerStore = providerStoreForUser(input, repository.path, user, { repositoryId: repository.id, repositoryOrganizationId: repository.organizationId });
       const homeKnowledgeProviderStore = providerStoreForUser(
         input,
         homeRepoPath,
@@ -9339,7 +9424,7 @@ async function handleApiRequest(
       ...(task.ownerId ? { targetUserId: task.ownerId } : {}),
       ...(task.organizationId ? { organizationId: task.organizationId } : {}),
     }, {
-      providerStore: providerStoreForUser(input, repository.path, user),
+      providerStore: providerStoreForUser(input, repository.path, user, { repositoryId: repository.id, repositoryOrganizationId: repository.organizationId }),
     });
     sendJson(response, 200, {
       task: withRepository(updated, repository),
@@ -9463,7 +9548,7 @@ async function handleApiRequest(
       preflightTaskId,
       user,
     );
-    const providerStore = providerStoreForUser(input, repository.path, user);
+    const providerStore = providerStoreForUser(input, repository.path, user, { organizationId: detail.organizationId, repositoryId: repository.id, repositoryOrganizationId: repository.organizationId });
     const snapshot = await prepareManualWorkItemDetailSnapshot(
       repository.path,
       detail.id,
@@ -9488,7 +9573,7 @@ async function handleApiRequest(
       taskId,
       user,
     );
-    const providerStore = providerStoreForUser(input, repository.path, user);
+    const providerStore = providerStoreForUser(input, repository.path, user, { organizationId: detail.organizationId, repositoryId: repository.id, repositoryOrganizationId: repository.organizationId });
     const snapshot = await prepareManualWorkItemDetailSnapshot(
       repository.path,
       detail.id,
@@ -9681,7 +9766,7 @@ async function handleApiRequest(
       });
       return true;
     }
-    const providerStore = providerStoreForUser(input, repository.path, user);
+    const providerStore = providerStoreForUser(input, repository.path, user, { organizationId: task.organizationId, repositoryId: repository.id, repositoryOrganizationId: repository.organizationId });
     const outcome = await startConfirmedTaskReworkRun({
       serverInput: input,
       repository,
@@ -9907,7 +9992,7 @@ async function handleApiRequest(
       ...(task.ownerId ? { targetUserId: task.ownerId } : {}),
       ...(task.organizationId ? { organizationId: task.organizationId } : {}),
     }, {
-      providerStore: providerStoreForUser(input, repository.path, user),
+      providerStore: providerStoreForUser(input, repository.path, user, { organizationId: task.organizationId, repositoryId: repository.id, repositoryOrganizationId: repository.organizationId }),
     });
     sendJson(response, 200, {
       task: withRepository(updated, repository),
@@ -9944,7 +10029,7 @@ async function handleApiRequest(
       const result = await syncJiraTaskStatus({
         repoPath: repository.path,
         task,
-        providerStore: providerStoreForUser(input, repository.path, user),
+        providerStore: providerStoreForUser(input, repository.path, user, { organizationId: task.organizationId, repositoryId: repository.id, repositoryOrganizationId: repository.organizationId }),
         publisher: input.jiraStatusPublisher,
       });
       sendJson(response, 200, {
@@ -10029,7 +10114,7 @@ async function handleApiRequest(
       ...(task.ownerId ? { targetUserId: task.ownerId } : {}),
       ...(task.organizationId ? { organizationId: task.organizationId } : {}),
     }, {
-      providerStore: providerStoreForUser(input, repository.path, user),
+      providerStore: providerStoreForUser(input, repository.path, user, { organizationId: task.organizationId, repositoryId: repository.id, repositoryOrganizationId: repository.organizationId }),
     });
     sendJson(response, 200, {
       task: withRepository(updated, repository),
@@ -10050,6 +10135,7 @@ async function handleApiRequest(
   if (request.method === "POST" && runTaskId) {
     const user = await requireUserContext(request, input, homeRepoPath);
     const body = requireObject(await readRequestJson(request));
+    try { input = { ...input, providerConnectionBindings: validateProviderConnectionBindings(body.providerConnections) ?? input.providerConnectionBindings }; } catch { throw new WebInputError("invalid provider connection bindings"); }
     const runFacts = manualRunRequestFacts(url, body, user);
     const taskScope = taskScopeFromJson(body.taskScope);
     let currentTask: Awaited<ReturnType<typeof getTask>>;
@@ -10095,7 +10181,7 @@ async function handleApiRequest(
       requireRecordAccess(currentTask, user, "task not found");
       requireWriteAccessToRecord(user, currentTask, "runs:start");
     }
-    const taskProviderStore = providerStoreForUser(input, repository.path, user);
+    const taskProviderStore = bindProviderConnections(providerStoreForUser(input, repository.path, user, { organizationId: currentTask.organizationId, repositoryId: repository.id, repositoryOrganizationId: repository.organizationId }), input.providerConnectionBindings);
     const preparedCandidate = await prepareWorkItemRunCandidate(
       repository.path,
       currentTask,
@@ -10182,6 +10268,7 @@ async function handleApiRequest(
     );
     const runnerInput: RunFlowInput = {
       ...evaluatedInput,
+      ...(input.providerConnectionBindings ? { providerConnections: input.providerConnectionBindings } : {}),
       inputs: finalizedCandidate.workItem.inputs,
       ...(taskScope ? { taskScope } : {}),
     };
@@ -10561,6 +10648,7 @@ async function handleApiRequest(
   if (request.method === "POST" && workItemRunId) {
     const user = await requireUserContext(request, input, homeRepoPath);
     const body = requireObject(await readRequestJson(request));
+    try { input = { ...input, providerConnectionBindings: validateProviderConnectionBindings(body.providerConnections) ?? input.providerConnectionBindings }; } catch { throw new WebInputError("invalid provider connection bindings"); }
     const runFacts = manualRunRequestFacts(url, body, user);
     const taskScope = taskScopeFromJson(body.taskScope);
     const result = await runStoredWorkItemAcrossRepositories(
@@ -10601,7 +10689,7 @@ async function handleApiRequest(
           workItems: snapshot.workItems,
           candidateIds: [persisted.id],
           intent: { kind: "manual" },
-          providerStore: providerStoreForUser(input, repository.path, user),
+          providerStore: providerStoreForUser(input, repository.path, user, { repositoryId: repository.id, repositoryOrganizationId: repository.organizationId }),
           ...(input.getChangeRequestStatus
             ? { getChangeRequestStatus: input.getChangeRequestStatus }
             : {}),
@@ -10917,7 +11005,7 @@ async function handleApiRequest(
   }
   if (request.method === "GET" && url.pathname === "/api/providers") {
     const user = await requireUserContext(request, input, homeRepoPath);
-    const providerStore = providerStoreForUser(input, homeRepoPath, user);
+    const providerStore = providerStoreForUser(input, homeRepoPath, user, { repositoryId: null });
     sendJson(response, 200, {
       providers: await providerStore.listStatuses(),
     });
@@ -10930,13 +11018,8 @@ async function handleApiRequest(
   if (providerConnMatch) {
     const user = await requireUserContext(request, input, homeRepoPath);
     requireCurrentOrganizationPermission(user, "providers:write:personal");
-    const providerStore = providerStoreForUser(input, homeRepoPath, user);
+    const providerStore = providerStoreForUser(input, homeRepoPath, user, { repositoryId: null });
     const providerId = requireWritableProviderId(providerConnMatch[1]);
-    await requireExistingProviderCredentialWriteAccess(
-      providerStore,
-      providerId,
-      user,
-    );
 
     if (request.method === "POST") {
       const setConnection = requireSetConnection(providerStore);
@@ -10948,6 +11031,7 @@ async function handleApiRequest(
       }
       const authMethod = parsePastedProviderAuthMethod(providerId, body.authMethod);
       const connectionId = optionalMetadataString(body, "connectionId");
+      await requireExistingProviderCredentialWriteAccess(providerStore, providerId, user, connectionId);
       const label = optionalMetadataString(body, "label");
       const record = await setConnection({
         providerId,
@@ -10967,6 +11051,7 @@ async function handleApiRequest(
     if (request.method === "DELETE") {
       const clearConnection = requireClearConnection(providerStore);
       const connectionId = url.searchParams.get("connectionId") ?? undefined;
+      await requireExistingProviderCredentialWriteAccess(providerStore, providerId, user, connectionId);
       const authMethod = url.searchParams.get("authMethod") ?? undefined;
       if (connectionId || authMethod) {
         await clearConnection(providerId, {
@@ -10988,9 +11073,9 @@ async function handleApiRequest(
   if (providerDefaultMatch && request.method === "POST") {
     const user = await requireUserContext(request, input, homeRepoPath);
     requireCurrentOrganizationPermission(user, "providers:write:personal");
-    const providerStore = providerStoreForUser(input, homeRepoPath, user);
+    const providerStore = providerStoreForUser(input, homeRepoPath, user, { repositoryId: null });
     const providerId = requireWritableProviderId(providerDefaultMatch[1]);
-    await requireExistingProviderCredentialWriteAccess(providerStore, providerId, user);
+    await requireExistingProviderCredentialWriteAccess(providerStore, providerId, user, decodeURIComponent(providerDefaultMatch[2]));
     if (typeof providerStore.setDefaultConnection !== "function") {
       throw new WebInputError("provider connection store is read-only");
     }
@@ -11015,11 +11100,11 @@ async function handleApiRequest(
     const user = await requireUserContext(request, input, homeRepoPath);
     requireCurrentOrganizationPermission(user, "providers:write:personal");
     const providerId = requireWritableProviderId(providerOAuthStartMatch[1]);
-    const providerStore = providerStoreForUser(input, homeRepoPath, user);
-    await requireExistingProviderCredentialWriteAccess(providerStore, providerId, user);
+    const providerStore = providerStoreForUser(input, homeRepoPath, user, { repositoryId: null });
     const adapter = requireProviderOAuthAdapter(input, providerId);
     const body = requireObject(await readRequestJson(request));
     const connectionId = optionalMetadataString(body, "connectionId");
+    await requireExistingProviderCredentialWriteAccess(providerStore, providerId, user, connectionId);
     if (connectionId) {
       const existing = (await providerStore.listConnections?.(providerId))?.find(
         (record) => record.id === connectionId,
@@ -11061,8 +11146,8 @@ async function handleApiRequest(
     requireCurrentOrganizationPermission(user, "providers:write:personal");
     const providerId = requireWritableProviderId(providerConnectionActionMatch[1]);
     const connectionId = decodeURIComponent(providerConnectionActionMatch[2]);
-    const providerStore = providerStoreForUser(input, homeRepoPath, user);
-    await requireExistingProviderCredentialWriteAccess(providerStore, providerId, user);
+    const providerStore = providerStoreForUser(input, homeRepoPath, user, { repositoryId: null });
+    await requireExistingProviderCredentialWriteAccess(providerStore, providerId, user, connectionId);
     const record = (await providerStore.listConnections?.(providerId))?.find(
       (candidate) => candidate.id === connectionId,
     );
@@ -11209,7 +11294,7 @@ async function handleProviderOAuthCallback(
       codeVerifier: flow.codeVerifier,
     });
     const account = await adapter.fetchIdentity(tokens.accessToken);
-    const providerStore = providerStoreForUser(input, homeRepoPath, user);
+    const providerStore = providerStoreForUser(input, homeRepoPath, user, { repositoryId: null });
     const setConnection = requireSetConnection(providerStore);
     await setConnection({
       providerId: descriptor.id,
@@ -11693,6 +11778,8 @@ export async function startWebServer(
           "not_found",
         );
       } catch (error) {
+        if (error instanceof MissingConnectionError) error = new WebNotFoundError("provider connection not found");
+        if (error instanceof ReconnectRequiredError) error = new WebInputError("provider connection requires reconnection");
         const details = errorStatusAndCode(error);
         if (preparedApiToken) {
           await auditApiTokenRequest(repoPath, preparedApiToken, {

@@ -44,6 +44,8 @@ export interface ReproducibilitySkillSource {
 export interface ReproducibilityProviderStatus {
   id: string;
   configured: boolean;
+  connectionId?: string;
+  authMethod?: string;
   credential?: {
     scope?: string;
     source?: string;
@@ -135,6 +137,7 @@ function providerStatusForManifest(
   return {
     id: status.id,
     configured: status.configured,
+    ...(status.connectionId ? { connectionId: status.connectionId, authMethod: status.authMethod } : {}),
     ...(status.credential
       ? {
           credential: {

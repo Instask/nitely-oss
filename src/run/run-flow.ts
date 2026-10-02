@@ -146,7 +146,7 @@ import {
   type ReworkRequest,
 } from "../policy/decide.js";
 import { findDescriptor } from "../providers/descriptors.js";
-import { resolveProviderStore } from "../providers/index.js";
+import { bindProviderConnections, validateProviderConnectionBindings, resolveProviderStore } from "../providers/index.js";
 import type {
   ProviderConnectionStatus,
   ProviderConnectionStore,
@@ -493,6 +493,7 @@ export interface RunFlowInput {
   repoName?: string;
   inputs: Record<string, ResourceReference>;
   configuration?: Record<string, unknown>;
+  providerConnections?: Partial<Record<import("../providers/types.js").ProviderId, string>>;
   ownerId?: string;
   organizationId?: string;
   workItemId?: string;
@@ -1548,11 +1549,9 @@ async function resolveFreshRemoteBaseline(input: {
 function providerStoreForRun(
   repoPath: string,
   dependencies: RunFlowDependencies,
+  bindings?: unknown,
 ): ProviderConnectionStore {
-  return (
-    dependencies.providerStore ??
-    resolveProviderStore(join(repoPath, ".nitely"), process.env)
-  );
+  return bindProviderConnections(dependencies.providerStore ?? resolveProviderStore(join(repoPath, ".nitely"), process.env), bindings);
 }
 
 async function collectRuntimeRedactionSecrets(input: {
@@ -12589,7 +12588,7 @@ export async function runFlow(
     throw new Error("invalid eval replay invocation id");
   }
   assertPlanningReadyForExecution(input.planningApproval);
-  const providerStore = providerStoreForRun(repoPath, dependencies);
+  const providerStore = providerStoreForRun(repoPath, dependencies, input.providerConnections);
   const contextPolicy = await loadContextPolicy(repoPath);
   const contextPolicySha256 = sha256Text(JSON.stringify(contextPolicy));
   if (
@@ -12814,6 +12813,7 @@ export async function runFlow(
       executionBackend: effectiveExecutionBackend,
       sandboxPolicy: effectiveSandboxPolicy,
       inputs: runInputReferences,
+      providerConnections: validateProviderConnectionBindings(input.providerConnections),
       configuration,
       configurationSnapshotPath,
       configurationSha256,
@@ -14661,7 +14661,7 @@ export async function resumeRun(
     const flowPath = projection.flowPath;
     const branchName = projection.branchName;
     const worktreePath = projection.worktreePath;
-    const providerStore = providerStoreForRun(repoPath, dependencies);
+    const providerStore = providerStoreForRun(repoPath, dependencies, projection.providerConnections);
     const contextPolicy = await loadContextPolicy(repoPath);
     const contextPolicySha256 = sha256Text(JSON.stringify(contextPolicy));
     if (evalReplay) {
