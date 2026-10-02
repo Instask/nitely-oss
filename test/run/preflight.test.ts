@@ -406,3 +406,13 @@ describe("run preflight doctor", () => {
     expect(report.status).toBe("PASS");
   });
 });
+
+it("blocks OCI doctor preflight on an unset image", async () => {
+  const repoPath = await mkdtemp(join(tmpdir(), "nitely-preflight-oci-"));
+  const report = await evaluateRunPreflight({
+    repoPath, flowPath: "fixture.json", flowDocument: JSON.stringify(flow()),
+    executionBackend: "oci", env: {}, providerStore: providerStore({ codex: true }),
+  });
+  expect(report.status).toBe("BLOCK");
+  expect(report.issues).toContainEqual(expect.objectContaining({ severity: "blocking", code: "oci.image.missing" }));
+});
