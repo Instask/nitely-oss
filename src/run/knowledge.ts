@@ -5,7 +5,6 @@ import {
   mkdir,
   readFile,
   readdir,
-  stat,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -136,6 +135,11 @@ export async function computeStructuralFingerprint(
   repoPath: string,
 ): Promise<string> {
   const hash = createHash("sha256");
+  hash.update("agent-memory-v2\0");
+  const head = await runGit(repoPath, ["rev-parse", "HEAD"]);
+  if (head.exitCode === 0) {
+    return hash.update(head.stdout.trim()).digest("hex");
+  }
   const structure: string[] = [];
   await collectShallowStructure({
     repoPath,
@@ -165,7 +169,12 @@ export async function computeStructuralFingerprint(
 
 async function readPackageJson(repoPath: string): Promise<Record<string, unknown> | undefined> {
   try {
-    return JSON.parse(await readFile(join(repoPath, "package.json"), "utf8")) as Record<string, unknown>;
+    const tracked = await runGit(repoPath, ["show", "HEAD:package.json"]);
+    const head = await runGit(repoPath, ["rev-parse", "HEAD"]);
+    const content = head.exitCode === 0
+      ? tracked.stdout
+      : await readFile(join(repoPath, "package.json"), "utf8");
+    return JSON.parse(content) as Record<string, unknown>;
   } catch {
     return undefined;
   }
@@ -231,26 +240,22 @@ export async function generateAgentMemorySkeleton(
   const commands = Object.entries(scripts)
     .filter(([, value]) => typeof value === "string")
     .map(([name, value]) => `- ${name}: \`${value}\``);
-  const entries = (
-    await readdir(repoPath, { withFileTypes: true })
-  )
+  const tree = await runGit(repoPath, ["ls-tree", "-z", "HEAD"]);
+  const topLevel = tree.exitCode === 0
+    ? tree.stdout.split("\0").filter(Boolean).map((line) => {
+        const [metadata, name] = line.split("\t");
+        return { name, directory: metadata.split(" ")[1] === "tree" };
+      })
+    : (await readdir(repoPath, { withFileTypes: true })).map((entry) => ({
+        name: entry.name, directory: entry.isDirectory(),
+      }));
+  const entries = topLevel
     .filter((entry) => !STRUCTURE_EXCLUDE.has(entry.name))
     .sort((left, right) => left.name.localeCompare(right.name))
-    .map((entry) => `- ${entry.name}${entry.isDirectory() ? "/" : ""}`);
-  const configs = (
-    await Promise.all(
-      [...STRUCTURAL_FILENAMES].map(async (name) => {
-        const path = join(repoPath, name);
-        try {
-          const file = await stat(path);
-          return file.isFile() ? name : undefined;
-        } catch {
-          return undefined;
-        }
-      }),
-    )
-  )
-    .filter((name): name is string => Boolean(name))
+    .map((entry) => `${entry.name}${entry.directory ? "/" : ""}`);
+  const configs = topLevel
+    .filter((entry) => !entry.directory && STRUCTURAL_FILENAMES.has(entry.name))
+    .map((entry) => entry.name)
     .sort();
 
   return [
@@ -303,11 +308,13 @@ async function readCachedMetadata(
 
 export async function prepareAgentMemory(input: {
   repoPath: string;
+  sourceRepoPath?: string;
   runtime: string;
   model?: string;
   now?: () => string;
 }): Promise<PreparedAgentMemory> {
-  const fingerprint = await computeStructuralFingerprint(input.repoPath);
+  const sourceRepoPath = input.sourceRepoPath ?? input.repoPath;
+  const fingerprint = await computeStructuralFingerprint(sourceRepoPath);
   const cacheContentPath = contentPath(input.repoPath);
   const cached = await readCachedMetadata(input.repoPath);
   if (
@@ -322,7 +329,7 @@ export async function prepareAgentMemory(input: {
     };
   }
 
-  const content = await generateAgentMemorySkeleton(input.repoPath);
+  const content = await generateAgentMemorySkeleton(sourceRepoPath);
   await mkdir(knowledgeDirectory(input.repoPath), { recursive: true });
   await writeFile(cacheContentPath, content, "utf8");
   const metadata: AgentMemoryMetadata = {
