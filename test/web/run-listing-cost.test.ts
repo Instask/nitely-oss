@@ -240,8 +240,7 @@ describe("run listing cost", () => {
 
     expect(runs.map((run) => run.runId)).toEqual(["run-3", "run-2", "run-1"]);
     expect(runs[0]?.latestOutputSummary).toBe("run-3 finished");
-    // One open projects every Run, a second reads the events of the Runs on
-    // this page. Per-Run opens are what made a listing pay two SQLite opens
+    // One open lists ids, a second reads and projects the selected page. Per-Run opens are what made a listing pay two SQLite opens
     // and a second projection for every Run in the history.
     expect(counter.storeOpens).toBe(2);
     expect(counter.logReadFiles).toBe(0);
@@ -296,4 +295,21 @@ describe("run listing cost", () => {
     expect(listed?.latestOutputSummary).toBe(detail.latestOutputSummary);
     expect(listed?.latestOutputSummary).toBe("review verdict: pass");
   });
+
+  it("shares bounded log hydration between a page and full-history callers", async () => {
+    const repo = await createRepo();
+    for (const id of ["run-1", "run-2", "run-3"]) {
+      await writeRunJson(repo, id);
+      await writeAttemptLog(repo, id, "implement", "1", { stdout: bulkyLog(`${id} finished`) });
+    }
+    const counter = newCounter();
+    const { listRuns } = await loadRunsModule(counter);
+    const [page, history] = await Promise.all([listRuns(repo, { limit: 2 }), listRuns(repo)]);
+    expect(page.map((run) => run.runId)).toEqual(["run-3", "run-2"]);
+    expect(history).toHaveLength(3);
+    expect(counter.bytesRead).toBeLessThanOrEqual(3 * 65536);
+    const older = await listRuns(repo, { limit: 2, beforeRunId: "run-2" });
+    expect(older.map((run) => run.runId)).toEqual(["run-1"]);
+  });
+
 });

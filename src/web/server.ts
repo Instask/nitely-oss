@@ -6152,6 +6152,49 @@ async function settleOrUpdateUnifiedRun(
   return true;
 }
 
+async function listRunPage(
+  repositories: WebRepository[], user: WebUserContext, url: URL,
+) {
+  const rawLimit = url.searchParams.get("limit");
+  const limit = rawLimit === null ? DEFAULT_RUN_LIST_LIMIT : Number(rawLimit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new WebInputError("run limit must be an integer between 1 and 100");
+  const requestedIds = url.searchParams.getAll("runId");
+  if (requestedIds.length) {
+    if (requestedIds.length > 100 || requestedIds.some((id) => !id || id.length > 512)) throw new WebInputError("at most 100 non-empty run ids are allowed");
+    return { runs: (await listAllRuns(repositories, user, { runIds: requestedIds })).slice(0, 100) };
+  }
+  let cursor: [string, string] | undefined;
+  const encoded = url.searchParams.get("cursor");
+  if (encoded !== null) {
+    try {
+      if (encoded.length > 2048) throw new Error("too long");
+      const value: unknown = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+      if (!Array.isArray(value) || value.length !== 2 || value.some((part) => typeof part !== "string" || !part || part.length > 512)) throw new Error("invalid cursor");
+      cursor = value as [string, string];
+    } catch { throw new WebInputError("invalid run cursor"); }
+  }
+  const grouped = await Promise.all(visibleRepositories(repositories, user).map(async (repository) => {
+    const visible: WebRunSummary[] = [];
+    let beforeRunId = cursor?.[0];
+    let includeBefore = Boolean(cursor && repository.id.localeCompare(cursor[1]) > 0);
+    while (visible.length <= limit) {
+      const batch = await listRuns(repository.path, { limit: limit + 1, beforeRunId, includeBefore });
+      visible.push(...batch.filter((run) => recordVisibleToUser(run, user)).map((run) => withRepository(run, repository)));
+      if (batch.length < limit + 1) break;
+      beforeRunId = batch.at(-1)!.runId;
+      includeBefore = false;
+    }
+    return visible;
+  }));
+  const rows = grouped.flat().sort((left, right) => right.runId.localeCompare(left.runId) || (left.repoId ?? "").localeCompare(right.repoId ?? ""));
+  const runs = rows.slice(0, limit);
+  const last = runs.at(-1);
+  return {
+    runs,
+    ...(rows.length > limit && last ? { nextCursor: Buffer.from(JSON.stringify([last.runId, last.repoId])).toString("base64url") } : {}),
+  };
+}
+
 async function listAllRuns(
   repositories: WebRepository[],
   user: WebUserContext,
@@ -6835,13 +6878,7 @@ async function handleApiRequest(
       consoleListApiRoutes({
         "/api/runs": async () => {
           const user = await requireUserContext(request, input, homeRepoPath);
-          sendJson(response, 200, {
-            runs: await listAllRuns(
-              visibleRepositories(repositories, user),
-              user,
-              { limit: DEFAULT_RUN_LIST_LIMIT },
-            ),
-          });
+          sendJson(response, 200, await listRunPage(repositories, user, url));
           return true;
         },
         "/api/dashboard": async () => {

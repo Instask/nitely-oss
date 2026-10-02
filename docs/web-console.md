@@ -272,3 +272,16 @@ execution backend. Deleted owners and revoked organization permissions fail
 closed. The button is available for writable blocked/interrupted runs; live or
 completed runs cannot be resumed through this endpoint. The API accepts browser
 sessions; the existing scheduler endpoint remains admin-session scoped.
+
+### Run history and live updates
+
+`GET /api/runs` returns the newest 50 visible summaries. Use `limit=1..100`
+and the returned opaque `nextCursor` in `cursor` to page backwards; cursors
+remain stable when newer runs arrive. The Sessions page loads older history
+on demand. Task, flow and dashboard associations still use full history.
+
+Live updates request summaries for the currently active ids with repeated
+`runId` query parameters (up to 100 per request), including their terminal
+transition. They do not reload historical pages or start during the initial
+workspace load. Concurrent page and full-history requests share in-flight
+summary reads; settled results are discarded so external writes remain visible.

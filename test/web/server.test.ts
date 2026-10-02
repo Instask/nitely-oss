@@ -12672,3 +12672,35 @@ describe("Web usage-limit recovery", () => {
     expect(resumed).toHaveLength(1);
   });
 });
+
+
+describe("Run list pagination", () => {
+  afterEach(async () => { await Promise.all(servers.splice(0).map((server) => server.close())); });
+
+  it("pages visible history with a stable cursor and updates only requested runs", async () => {
+    const repo = await createRepo();
+    const owner = await createUser(repo, { email: "page-owner@example.test", password: "page-owner-passphrase", role: "user" });
+    const events = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      for (const runId of ["run-1", "run-2", "run-3", "run-4", "run-hidden"]) {
+        events.append({ runId, type: "run.created", payload: { ownerId: runId === "run-hidden" ? "another-user" : owner.id, flowName: "test", inputs: {} } });
+        events.append({ runId, type: "run.completed", payload: {} });
+      }
+    } finally { events.close(); }
+    const server = await startTestServer(repo, undefined, undefined, { authMode: "required", authEnv: {} });
+    const session = await login(server, "page-owner@example.test", "page-owner-passphrase");
+    const request = async (query: string) => await fetch(`${server.url}/api/runs${query}`, { headers: { cookie: session.cookie } });
+    const first = await json(await request("?limit=2")) as { runs: Array<{ runId: string }>; nextCursor: string };
+    expect(first.runs.map((run) => run.runId)).toEqual(["run-4", "run-3"]);
+    expect(first.nextCursor).toBeTruthy();
+    const inserted = new EventStore(join(repo, ".nitely", "events.db"));
+    try { inserted.append({ runId: "run-new", type: "run.created", payload: { ownerId: owner.id, inputs: {} } }); } finally { inserted.close(); }
+    const second = await json(await request("?limit=2&cursor=" + encodeURIComponent(first.nextCursor))) as { runs: Array<{ runId: string }>; nextCursor?: string };
+    expect(second.runs.map((run) => run.runId)).toEqual(["run-2", "run-1"]);
+    expect(second.nextCursor).toBeUndefined();
+    const watched = await json(await request("?runId=run-1&runId=run-hidden")) as { runs: Array<{ runId: string }> };
+    expect(watched.runs.map((run) => run.runId)).toEqual(["run-1"]);
+    expect((await request("?limit=0")).status).toBe(400);
+    expect((await request("?cursor=garbage")).status).toBe(400);
+  });
+});

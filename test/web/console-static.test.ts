@@ -748,7 +748,7 @@ describe("Design Component console shell", () => {
     const refreshLiveData = extractMethod(html, "refreshLiveData");
     const fetchData = extractMethod(html, "fetchData");
 
-    expect(refreshLiveData).toContain('"/api/runs"');
+    expect(refreshLiveData).toContain('"/api/runs?"');
     expect(refreshLiveData).not.toContain("fetchData()");
     expect(refreshLiveData).not.toContain("/api/tasks");
     expect(refreshLiveData).not.toContain("/api/providers");
@@ -784,3 +784,25 @@ function extractMethod(source: string, name: string): string {
   }
   return source.slice(start);
 }
+
+it("blocks live refresh during initial loading and polls only active ids", async () => {
+  const html = await readFile(consolePath, "utf8");
+  const method = extractMethod(html, "refreshLiveData");
+  const component = new Function(`return ({ ${method} });`)() as {
+    refreshLiveData(): Promise<void>;
+    [key: string]: unknown;
+  };
+  const paths: string[] = [];
+  component.state = { runs: [{ runId: "active", status: "running" }, { runId: "old", status: "completed" }] };
+  component.hasVisibleActiveRuns = () => true;
+  component.isActiveRun = (run: { status: string }) => run.status === "running";
+  component.syncLiveRefresh = () => {};
+  component.mergeRuns = () => {};
+  component.api = async (path: string) => { paths.push(path); return { runs: [] }; };
+  component.fetchDataInFlight = Promise.resolve();
+  await component.refreshLiveData();
+  expect(paths).toEqual([]);
+  component.fetchDataInFlight = null;
+  await component.refreshLiveData();
+  expect(paths).toEqual(["/api/runs?runId=active"]);
+});

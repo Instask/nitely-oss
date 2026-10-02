@@ -2072,6 +2072,9 @@
             </div>
           </sc-for>
         </div>
+        <sc-if value="{{ hasMoreRuns }}" hint-placeholder-val="{{ false }}">
+          <button onClick="{{ loadMoreRuns }}" disabled="{{ loadingMoreRuns }}" style="{{ secondaryButtonStyle }}">Load older sessions</button>
+        </sc-if>
       </section>
       </sc-if>
 
@@ -2952,6 +2955,8 @@ class Component extends DCLogic {
       previewHierarchy: null,
       previewStatus: "",
       runs: [],
+      nextRunCursor: null,
+      loadingMoreRuns: false,
       providers: [],
       providerEdit: null,
       providerFlash: "",
@@ -3101,6 +3106,7 @@ class Component extends DCLogic {
           flows: flowsRes?.flows ?? [],
           flowTemplates: templatesRes?.templates ?? [],
           runs: runsRes?.runs ?? [],
+          nextRunCursor: runsRes?.nextCursor ?? null,
           providers: provRes?.providers ?? [],
           notifications: notificationsRes?.notifications ?? [],
           notificationsSummary: notificationsRes?.summary ?? { total: 0, pending: 0, resolved: 0 },
@@ -5544,13 +5550,35 @@ class Component extends DCLogic {
     }
   }
 
+  mergeRuns(runs) {
+    this.setState((state) => {
+      const byId = new Map(state.runs.map((run) => [(run.repoId || "") + ":" + run.runId, run]));
+      for (const run of runs) byId.set((run.repoId || "") + ":" + run.runId, run);
+      return { runs: [...byId.values()].sort((left, right) => right.runId.localeCompare(left.runId)) };
+    });
+  }
+
+  loadMoreRuns = async () => {
+    if (!this.state.nextRunCursor || this.state.loadingMoreRuns) return;
+    this.setState({ loadingMoreRuns: true });
+    try {
+      const res = await this.api("/api/runs?cursor=" + encodeURIComponent(this.state.nextRunCursor));
+      if (res) {
+        this.mergeRuns(res.runs ?? []);
+        this.setState({ nextRunCursor: res.nextCursor ?? null });
+      }
+    } finally { this.setState({ loadingMoreRuns: false }); }
+  };
+
   async refreshLiveData() {
-    if (this.liveRefreshInFlight || !this.hasVisibleActiveRuns()) return;
+    if (this.fetchDataInFlight || this.liveRefreshInFlight || !this.hasVisibleActiveRuns()) return;
     this.liveRefreshInFlight = true;
     try {
-      const runsRes = await this.api("/api/runs");
-      if (runsRes) {
-        this.setState({ runs: runsRes.runs ?? [] });
+      const ids = [...new Set(this.state.runs.filter((run) => this.isActiveRun(run)).map((run) => run.runId))];
+      for (let offset = 0; offset < ids.length; offset += 100) {
+        const query = ids.slice(offset, offset + 100).map((id) => "runId=" + encodeURIComponent(id)).join("&");
+        const res = await this.api("/api/runs?" + query);
+        if (res) this.mergeRuns(res.runs ?? []);
       }
       if (this.state.selectedRunId) {
         await this.fetchRunDetail(this.state.selectedRunId, { force: true });
@@ -7367,6 +7395,8 @@ class Component extends DCLogic {
       isFlows: canShowMainContent && view === "flows",
       isFlowEditor: canShowMainContent && isFlowEditor,
       isRuns: canShowMainContent && view === "runs",
+      hasMoreRuns: !!this.state.nextRunCursor,
+      loadingMoreRuns: this.state.loadingMoreRuns,
       isSkills: canShowMainContent && view === "skills",
       isProviders: canShowMainContent && view === "providers",
       isTaskDetail: canShowMainContent && view === "task-detail",
