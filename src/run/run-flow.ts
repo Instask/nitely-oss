@@ -2418,6 +2418,7 @@ async function runCommandInWorkspace(input: {
   workspace: WorkspaceHandle;
   command: string;
   timeoutMs?: number;
+  networkDomains?: readonly string[];
   cancellation?: RunCancellationControl;
   maxToolOutputTokens?: number;
   attemptDirectory: string;
@@ -2446,6 +2447,7 @@ async function runCommandInWorkspace(input: {
   );
   const result = await input.backend.runCommand(input.workspace, input.command, {
     timeoutMs: input.timeoutMs,
+    ...(input.networkDomains?.length ? { networkDomains: input.networkDomains } : {}),
     signal: input.cancellation?.signal,
     ...(input.runId ? { runId: input.runId } : {}),
     ...(input.stageId ? { stageId: input.stageId } : {}),
@@ -5005,6 +5007,7 @@ async function executeCommandStage(input: {
         backend: input.backend,
         workspace: input.workspace,
         command: input.stage.command,
+        ...(input.stage.type === "command" && input.stage.networkDomains ? { networkDomains: input.stage.networkDomains } : {}),
         timeoutMs,
         maxToolOutputTokens: resolveMaxToolOutputTokens(
           input.stage,

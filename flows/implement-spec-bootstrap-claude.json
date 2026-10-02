@@ -34,11 +34,20 @@
         "outputs": ["implementation", "pr-title"]
       },
       {
+        "id": "setup",
+        "type": "command",
+        "command": "pnpm install --frozen-lockfile",
+        "networkDomains": ["registry.npmjs.org"],
+        "timeoutMs": 600000,
+        "inputs": ["implementation"],
+        "outputs": ["dependencies"]
+      },
+      {
         "id": "test",
         "type": "command",
         "command": "pnpm exec vitest run && pnpm run check && pnpm run build",
         "timeoutMs": 600000,
-        "inputs": ["implementation"],
+        "inputs": ["implementation", "dependencies"],
         "outputs": ["test-report"]
       },
       {

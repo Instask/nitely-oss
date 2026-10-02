@@ -835,8 +835,29 @@ export class OciExecutionBackend implements ExecutionBackend {
     command: string,
     options?: RunCommandOptions,
   ): Promise<CommandResult> {
-    const plan = await this.commandPlan(ws, command, options);
-    return await this.executePlan(plan);
+    const domains = [...new Set((options?.networkDomains ?? []).map(normalizeAllowlistDomain))];
+    if (domains.length === 0) {
+      const plan = await this.commandPlan(ws, command, options);
+      return await this.executePlan(plan);
+    }
+    let gateway: NetworkAllowlistGateway | undefined;
+    let internalNetwork: InternalNetwork | undefined;
+    try {
+      await this.verifyRootlessEngine();
+      if (!this.networkGatewayFactory) internalNetwork = await this.createInternalNetwork();
+      gateway = this.createGateway(domains, internalNetwork, lifecycleLabels({
+        runId: options?.runId ?? ws.runId, stageId: options?.stageId ?? "command",
+        timeoutMs: options?.timeoutMs ?? this.resources.timeoutMs,
+        cleanupGraceMs: this.cleanupGraceMs, now: this.now,
+      }));
+      await gateway.assertEnforceable();
+      const network = await gateway.prepareContainerNetwork();
+      const plan = await this.commandPlan(ws, command, options, undefined, network);
+      return await this.executePlan(plan);
+    } finally {
+      await gateway?.dispose().catch(() => undefined);
+      if (internalNetwork) await this.removeInternalNetwork(internalNetwork.name);
+    }
   }
 
   private async executePlan(plan: {

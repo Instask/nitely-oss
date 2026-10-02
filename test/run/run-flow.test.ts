@@ -17675,3 +17675,30 @@ describe("agent session reuse", () => {
     expect(prompts.every((prompt) => prompt.includes("## Available Inputs"))).toBe(true);
   });
 });
+
+it("runs explicit worktree setup before verification and records command evidence", async () => {
+  const repo = await createRepo();
+  const flowPath = join(repo, "flows", "explicit-setup.json");
+  await writeJson(flowPath, { apiVersion: "nitely.dev/v1alpha1", kind: "Flow", metadata: { name: "explicit-setup" }, spec: { stages: [
+    { id: "setup", type: "command", command: "mkdir -p node_modules && printf installed > node_modules/setup-proof && printf ready",
+      networkDomains: ["registry.npmjs.org"], inputs: [], outputs: ["dependencies"] },
+    { id: "test", type: "command", command: "cat node_modules/setup-proof", inputs: ["dependencies"], outputs: ["test-report"] },
+  ] } });
+  const backend = new LocalExecutionBackend();
+  const commands: Array<{ command: string; options: unknown }> = [];
+  const original = backend.runCommand.bind(backend);
+  backend.runCommand = async (workspace, command, options) => {
+    commands.push({ command, options });
+    return await original(workspace, command, options);
+  };
+  const result = await runFlow({ repoPath: repo, flowPath, inputs: {} }, { backend, createRunId: () => "explicit-setup" });
+  expect(commands.map((entry) => entry.command)).toEqual([
+    "mkdir -p node_modules && printf installed > node_modules/setup-proof && printf ready", "cat node_modules/setup-proof",
+  ]);
+  expect(commands[0].options).toMatchObject({ networkDomains: ["registry.npmjs.org"] });
+  const evidence = await readFile(join(repo, ".nitely/runs", result.runId, "evidence.md"), "utf8");
+  expect(evidence).toContain("setup");
+  const artifacts = await readFile(join(repo, ".nitely/runs", result.runId, "artifacts.json"), "utf8");
+  expect(artifacts).toContain("dependencies");
+  expect(artifacts).toContain("test-report");
+});

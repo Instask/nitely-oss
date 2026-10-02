@@ -516,6 +516,7 @@ const nonBudgetedMaxInputTokensSchema = z
 const commandStageSchema = stageBase.extend({
   type: z.literal("command"),
   command: z.string().min(1),
+  networkDomains: z.array(z.string().min(1)).optional(),
   timeoutMs: z.number().int().positive().optional(),
   maxToolOutputTokens: z.number().int().positive().optional(),
   skills: nonAgentSkillsSchema,
