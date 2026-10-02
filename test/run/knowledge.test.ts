@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
 
 import { describe, expect, it } from "vitest";
@@ -77,6 +77,43 @@ describe("agent knowledge cache", () => {
     expect(second.generated).toBe(false);
     expect(second.metadata.generatedAt).toBe("2026-06-21T00:00:00.000Z");
     expect(second.contentPath).toBe(first.contentPath);
+  });
+
+  it("uses the run HEAD and excludes untracked operator files", async () => {
+    const repo = await createRepoFixture();
+    await git(repo, ["init"]);
+    await git(repo, ["config", "user.email", "nitely@example.test"]);
+    await git(repo, ["config", "user.name", "Nitely Test"]);
+    await git(repo, ["add", "."]);
+    await git(repo, ["commit", "-m", "base"]);
+    const { stdout: base } = await git(repo, ["rev-parse", "HEAD"]);
+    const old = await prepareAgentMemory({ repoPath: repo, runtime: "claude" });
+    await writeFile(join(repo, "package.json"), JSON.stringify({ scripts: { build: "new-build" } }));
+    await mkdir(join(repo, "specs"));
+    await writeFile(join(repo, "specs", "host.md"), "host-only");
+    await git(repo, ["add", "."]);
+    await git(repo, ["commit", "-m", "host changes"]);
+    const newer = await prepareAgentMemory({ repoPath: repo, runtime: "claude" });
+    expect(newer.generated).toBe(true);
+    expect(newer.metadata.fingerprint).not.toBe(old.metadata.fingerprint);
+    expect(newer.content).toContain("new-build");
+
+    const worktree = join(repo, ".nitely", "runs", "fixture", "worktree");
+    await git(repo, ["worktree", "add", "--detach", worktree, base.trim()]);
+    await writeFile(join(worktree, "server.log"), "operator data");
+    await mkdir(join(worktree, ".gstack"));
+    // An uncommitted manifest must not override the selected commit's commands.
+    await writeFile(join(worktree, "package.json"), JSON.stringify({ scripts: { test: "wrong" } }));
+    const memory = await prepareAgentMemory({ repoPath: repo, sourceRepoPath: worktree, runtime: "claude" });
+    expect(memory.content).toContain(`Repository: ${basename(repo)}`);
+    expect(memory.content).toContain("- src/");
+    expect(memory.content).toContain("- test: `vitest`");
+    expect(memory.content).not.toContain("- - ");
+    for (const hostOnly of ["server.log", ".gstack", "specs/", "new-build", "wrong"]) {
+      expect(memory.content).not.toContain(hostOnly);
+    }
+    expect(memory.metadata.fingerprint).toBe(old.metadata.fingerprint);
+    expect((await prepareAgentMemory({ repoPath: repo, sourceRepoPath: worktree, runtime: "claude" })).generated).toBe(false);
   });
 
   it("injects both memory filenames without overwriting user files", async () => {
