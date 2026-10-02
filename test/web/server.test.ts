@@ -52,6 +52,7 @@ import {
 } from "../../src/web/tasks.js";
 import { createUser } from "../../src/web/users.js";
 import {
+  changeOrganizationMember, listOrganizationMembers, createOrganizationInvitation, resolveOrganizationInvitation,
   addOrganizationMember,
   createOrganization,
   listPublicMemberships,
@@ -12731,4 +12732,86 @@ it("refuses Web task admission when the selected OCI backend cannot launch", asy
   expect(called).toBe(false);
   const persisted = JSON.parse(await readFile(join(repoPath, ".nitely/tasks", task.id, "task.json"), "utf8"));
   expect(persisted.latestRunId).toBeUndefined();
+});
+
+describe("Organization membership administration", () => {
+  afterEach(async () => { await Promise.all(servers.splice(0).map((server) => server.close())); });
+
+  it("persists single-use invitations and enforces recipient, organization, expiry and owner boundaries", async () => {
+    const repo = await createRepo();
+    const owner = await createUser(repo, { email: "org-owner@example.test", password: "organization-password", role: "admin" });
+    const recipient = await createUser(repo, { email: "org-recipient@example.test", password: "organization-password", role: "user" });
+    const outsider = await createUser(repo, { email: "org-outsider@example.test", password: "organization-password", role: "admin" });
+    const org = (await listPublicMemberships(repo, owner.id))[0].organizationId;
+    const other = (await listPublicMemberships(repo, outsider.id))[0].organizationId;
+    const server = await startTestServer(repo, undefined, undefined, { authMode: "required", authEnv: {} });
+    const ownerSession = await login(server, owner.email, "organization-password");
+    const recipientSession = await login(server, recipient.email, "organization-password");
+    const outsiderSession = await login(server, outsider.email, "organization-password");
+    const request = async (path: string, cookie: string, method = "GET", body?: unknown) => fetch(server.url + path, {
+      method, headers: { cookie, "content-type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    const root = `/api/organizations/${org}`;
+    const invite = async () => {
+      const response = await request(root + "/invitations", ownerSession.cookie, "POST", { email: recipient.email, role: "member" });
+      expect(response.status).toBe(201);
+      return await response.json() as { token: string; invitation: { id: string } };
+    };
+    const first = await invite();
+    const invitationPath = root + "/invitations/" + first.invitation.id;
+    const persisted = await readFile(join(repo, ".nitely/users/organizations.json"), "utf8");
+    expect(persisted).not.toContain(first.token);
+    expect((await request(root + "/members", outsiderSession.cookie)).status).toBe(404);
+    expect((await request(root + "/invitations", recipientSession.cookie)).status).toBe(404);
+    expect((await request(invitationPath + "/accept", outsiderSession.cookie, "POST", { token: first.token })).status).toBe(404);
+    expect((await request(`/api/organizations/${other}/invitations/${first.invitation.id}/accept`, recipientSession.cookie, "POST", { token: first.token })).status).toBe(404);
+    expect((await request(invitationPath + "/accept", recipientSession.cookie, "POST", { token: "x".repeat(43) })).status).toBe(404);
+    expect((await request(invitationPath + "/accept", recipientSession.cookie, "POST", { token: first.token })).status).toBe(200);
+    expect((await listPublicMemberships(repo, recipient.id)).find((m) => m.organizationId === org)?.role).toBe("member");
+    expect((await request(invitationPath + "/accept", recipientSession.cookie, "POST", { token: first.token })).status).toBe(404);
+    expect((await request(root + "/invitations", recipientSession.cookie)).status).toBe(403);
+    expect((await request(root + "/invitations", outsiderSession.cookie, "POST", { email: recipient.email, role: "owner" })).status).toBe(404);
+    expect(JSON.stringify(await (await request(root + "/invitations", ownerSession.cookie)).json())).not.toContain("tokenHash");
+    for (const action of ["decline", "revoke"] as const) {
+      const created = await invite();
+      const path = root + "/invitations/" + created.invitation.id;
+      expect((await request(path + "/" + action, action === "revoke" ? ownerSession.cookie : recipientSession.cookie, "POST", { token: created.token })).status).toBe(200);
+      expect((await request(path + "/accept", recipientSession.cookie, "POST", { token: created.token })).status).toBe(404);
+    }
+    const expired = await createOrganizationInvitation(repo, org, owner, { email: recipient.email, role: "member", expiresInSeconds: 1 }, new Date("2020-01-01"));
+    expect((await request(root + "/invitations/" + expired.invitation.id + "/accept", recipientSession.cookie, "POST", { token: expired.token })).status).toBe(404);
+    const membersPath = root + "/members/";
+    expect((await request(membersPath + recipient.id, recipientSession.cookie, "PATCH", { role: "owner" })).status).toBe(403);
+    expect((await request(membersPath + owner.id, ownerSession.cookie, "DELETE")).status).toBe(400);
+    expect((await request(membersPath + owner.id, ownerSession.cookie, "PATCH", { role: "member" })).status).toBe(400);
+    expect((await request(membersPath + recipient.id, ownerSession.cookie, "PATCH", { role: "viewer" })).status).toBe(200);
+    expect((await request(membersPath + recipient.id, ownerSession.cookie, "DELETE")).status).toBe(200);
+    expect((await request(root + "/members", recipientSession.cookie)).status).toBe(404);
+    const audit = await waitFor(async () => await listSecurityAuditEvents(repo, { limit: 100 }), (rows) => rows.some((row) => row.action === "organizations.members.remove" && row.outcome === "success"));
+    expect(audit).toEqual(expect.arrayContaining([expect.objectContaining({ action: "organizations.invitations.accept", outcome: "success", target: { type: "organization", id: org } })]));
+    expect(JSON.stringify(audit)).not.toContain(first.token);
+    expect(JSON.stringify(audit)).not.toContain(recipient.email);
+  });
+
+  it("serializes concurrent owner demotions and invitation consumption", async () => {
+    const repo = await createRepo();
+    const owner = { id: "owner", email: "owner@example.test" };
+    const second = { id: "second", email: "second@example.test" };
+    const org = await createOrganization(repo, { name: "Owners", members: { owner: "owner", second: "owner" } });
+    const result = await Promise.allSettled([
+      changeOrganizationMember(repo, org.id, owner, owner.id, "member"),
+      changeOrganizationMember(repo, org.id, second, second.id, "member"),
+    ]);
+    expect(result.filter((item) => item.status === "fulfilled")).toHaveLength(1);
+    const members = await listOrganizationMembers(repo, org.id, owner);
+    expect(members.filter((member) => member.role === "owner")).toHaveLength(1);
+    const remaining = members.find((member) => member.role === "owner")!;
+    const actor = remaining.userId === owner.id ? owner : second;
+    const recipient = { id: "recipient", email: "recipient@example.test" };
+    const invite = await createOrganizationInvitation(repo, org.id, actor, { email: recipient.email, role: "member" });
+    const acceptance = await Promise.allSettled([1, 2].map(() => resolveOrganizationInvitation(repo, org.id, invite.invitation.id, recipient, "accept", invite.token)));
+    expect(acceptance.filter((item) => item.status === "fulfilled")).toHaveLength(1);
+    expect((await listOrganizationMembers(repo, org.id, actor)).filter((member) => member.userId === recipient.id)).toHaveLength(1);
+    await expect(addOrganizationMember(repo, org.id, { userId: actor.id, role: "member" })).rejects.toThrow("retain an owner");
+  });
 });

@@ -35,6 +35,7 @@ describe("Web access-control policy", () => {
 
   it("gives owners the complete organization-scoped permission set", () => {
     expect(allowedForRole("owner")).toEqual([
+      "organizations:manage",
       "tasks:view",
       "tasks:write",
       "planning:approve",

@@ -6,7 +6,7 @@ import type {
 
 export interface WebSecurityAction {
   action: string;
-  permission: WebPermission;
+  permission?: WebPermission;
   target?: SecurityAuditTarget;
 }
 
@@ -36,6 +36,14 @@ export function webSecurityActionForRequest(
   method: string | undefined,
   pathname: string,
 ): WebSecurityAction | null {
+  const organization = /^\/api\/organizations\/([^/]+)\/(members|invitations)(?:\/[^/]+)?(?:\/(accept|decline|revoke))?$/.exec(pathname);
+  if (organization && ["GET", "POST", "PATCH", "DELETE"].includes(method ?? "")) {
+    const target = decodedTarget(pathname, /^\/api\/organizations\/([^/]+)/, "organization");
+    const name = `organizations.${organization[2]}.${organization[3] ?? (method === "GET" ? "list" : method === "POST" ? "create" : method === "PATCH" ? "update" : "remove")}`;
+    // Joining uses recipient-bound possession of the invitation, not an owner permission.
+    return { action: name, ...(target ? { target } : {}),
+      ...(method === "GET" && organization[2] === "members" || organization[3] === "accept" || organization[3] === "decline" ? {} : { permission: "organizations:manage" }) };
+  }
   const resume = decodedTarget(pathname, /^\/api\/runs\/([^/]+)\/resume$/, "run");
   if (method === "POST" && resume) return action("runs.resume", "runs:start", resume);
   if (method === "POST" && pathname === "/api/demo/golden-path") {

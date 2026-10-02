@@ -285,3 +285,27 @@ Live updates request summaries for the currently active ids with repeated
 transition. They do not reload historical pages or start during the initial
 workspace load. Concurrent page and full-history requests share in-flight
 summary reads; settled results are discarded so external writes remain visible.
+
+Organization membership administration requires a browser session in required
+authentication mode. Members can inspect their own organization's member list;
+only an organization owner can manage members or invitations. Global admin status
+does not grant access to another organization's membership metadata.
+
+- `GET /api/organizations/:id/members` lists member ids and roles.
+- `PATCH /api/organizations/:id/members/:userId` accepts `{ "role": "viewer" }`;
+ `DELETE` removes the member. The last owner cannot be removed or demoted.
+- `POST /api/organizations/:id/invitations` accepts `email`, `role`, and optional
+ `expiresInSeconds` (1 second to 30 days, default 7 days). It returns an opaque
+ token once. The caller delivers it to the recipient; Nitely does not send mail.
+- `GET /api/organizations/:id/invitations` lists metadata without token hashes.
+- `POST /api/organizations/:id/invitations/:invitationId/accept` or `/decline`
+ accepts `{ "token": "..." }` from the authenticated recipient. An invitation
+ cannot change an existing member's role. Owners can `POST .../revoke`.
+
+Membership writes and invitation consumption share the local cross-process
+storage lease and atomic organization-file replacement. Tokens are hashed at
+rest, expire at the saved deadline, and cannot be consumed twice. Invalid,
+expired, revoked, wrong-recipient, and wrong-organization invitations return the
+same not-found response. The existing metadata-only security audit records API
+actions without invitation tokens or email addresses; it remains a local audit,
+not a compliance delivery guarantee.

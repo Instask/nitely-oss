@@ -449,6 +449,8 @@ import {
 } from "./users.js";
 import {
   type PublicOrganizationMembership,
+  listOrganizationMembers, changeOrganizationMember,
+  listOrganizationInvitations, createOrganizationInvitation, resolveOrganizationInvitation,
 } from "./organizations.js";
 import {
   organizationRoleHasPermission,
@@ -7929,6 +7931,51 @@ async function handleApiRequest(
       sendJson(response, 200, { session });
       return true;
     }
+  }
+
+  const organizationRoute = /^\/api\/organizations\/([^/]+)\/(members|invitations)(?:\/([^/]+))?(?:\/(accept|decline|revoke))?$/.exec(url.pathname);
+  if (organizationRoute) {
+    const user = await requireUserContext(request, input, homeRepoPath);
+    if (user.authMode !== "required") throw new WebForbiddenError("organization administration requires an authenticated user");
+    let organizationId: string;
+    let itemId: string | undefined;
+    try {
+      organizationId = decodeURIComponent(organizationRoute[1]);
+      itemId = organizationRoute[3] ? decodeURIComponent(organizationRoute[3]) : undefined;
+    } catch { throw new WebInputError("invalid organization resource id"); }
+    const kind = organizationRoute[2];
+    const action = organizationRoute[4];
+    const actor = { id: user.id, email: user.email };
+    if (kind === "members" && !action) {
+      if (request.method === "GET" && !itemId) {
+        sendJson(response, 200, { members: await listOrganizationMembers(homeRepoPath, organizationId, actor) });
+        return true;
+      }
+      if (itemId && (request.method === "PATCH" || request.method === "DELETE")) {
+        const body = request.method === "PATCH" ? requireObject(await readRequestJson(request)) : undefined;
+        if (body && !Object.hasOwn(body, "role")) throw new WebInputError("member role is required");
+        sendJson(response, 200, await changeOrganizationMember(homeRepoPath, organizationId, actor, itemId, body?.role));
+        return true;
+      }
+    }
+    if (kind === "invitations") {
+      if (request.method === "GET" && !itemId) {
+        sendJson(response, 200, { invitations: await listOrganizationInvitations(homeRepoPath, organizationId, actor) });
+        return true;
+      }
+      if (request.method === "POST" && !itemId) {
+        const body = requireObject(await readRequestJson(request));
+        sendJson(response, 201, await createOrganizationInvitation(homeRepoPath, organizationId, actor,
+          { email: body.email, role: body.role, expiresInSeconds: body.expiresInSeconds }));
+        return true;
+      }
+      if (request.method === "POST" && itemId && action) {
+        const body = action === "revoke" ? {} : requireObject(await readRequestJson(request));
+        sendJson(response, 200, await resolveOrganizationInvitation(homeRepoPath, organizationId, itemId, actor, action as "accept" | "decline" | "revoke", body.token));
+        return true;
+      }
+    }
+    throw new WebNotFoundError("organization endpoint not found");
   }
 
   if (request.method === "GET" && url.pathname === "/api/users") {

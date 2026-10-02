@@ -16,6 +16,7 @@ export type SecurityAuditTargetType =
   | "context"
   | "flow"
   | "knowledge-repository"
+  | "organization"
   | "notification"
   | "provider"
   | "preview-session"
@@ -97,6 +98,7 @@ const targetTypes = new Set<SecurityAuditTargetType>([
   "context",
   "flow",
   "knowledge-repository",
+  "organization",
   "notification",
   "provider",
   "preview-session",

@@ -1,6 +1,9 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+
+import { withKnowledgeLease } from "../knowledge-repositories/lock.js";
+import { WebForbiddenError, WebInputError, WebNotFoundError } from "./errors.js";
 
 import { organizationRoleHasPermission } from "./access-control.js";
 
@@ -30,6 +33,7 @@ export interface PublicOrganizationMembership {
 interface OrganizationsFile {
   version: 1;
   organizations: Record<string, OrganizationRecord>;
+  invitations?: Record<string, OrganizationInvitation>;
 }
 
 export interface CreateOrganizationOptions {
@@ -64,7 +68,7 @@ function validateOrganizationRole(value: unknown): OrganizationRole {
   ) {
     return value;
   }
-  throw new Error("invalid organization role");
+  throw new WebInputError("invalid organization role");
 }
 
 function parseOrganizationsFile(value: unknown): OrganizationsFile {
@@ -103,6 +107,20 @@ function parseOrganizationsFile(value: unknown): OrganizationsFile {
         throw new Error("invalid organizations.json: member must be an object");
       }
       validateOrganizationRole((member as Record<string, unknown>).role);
+    }
+  }
+  if (record.invitations !== undefined) {
+    if (!record.invitations || typeof record.invitations !== "object" || Array.isArray(record.invitations)) throw new Error("invalid organizations.json: invitations must be an object");
+    for (const [id, value] of Object.entries(record.invitations)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid organizations.json: invitation must be an object");
+      const invitation = value as Record<string, unknown>;
+      if (invitation.id !== id || typeof invitation.organizationId !== "string" || !Object.hasOwn(record.organizations, invitation.organizationId) ||
+        typeof invitation.email !== "string" || typeof invitation.createdBy !== "string" ||
+        typeof invitation.createdAt !== "string" || !Number.isFinite(Date.parse(invitation.createdAt)) ||
+        typeof invitation.expiresAt !== "string" || !Number.isFinite(Date.parse(invitation.expiresAt)) ||
+        typeof invitation.tokenHash !== "string" || !/^[a-f0-9]{64}$/.test(invitation.tokenHash) ||
+        !["pending", "accepted", "declined", "revoked"].includes(String(invitation.status))) throw new Error("invalid organizations.json: invalid invitation");
+      validateOrganizationRole(invitation.role);
     }
   }
   return record as unknown as OrganizationsFile;
@@ -175,28 +193,28 @@ export async function createOrganization(
   if (!name) {
     throw new Error("organization name is required");
   }
-  const file = await readOrganizations(repoPath);
-  const now = (options.now?.() ?? new Date()).toISOString();
-  const id = options.createId?.() ?? createOrganizationId();
-  const members: Record<string, OrganizationMemberRecord> = {};
-  for (const [userId, role] of Object.entries(input.members ?? {})) {
-    members[userId] = {
-      userId,
-      role: validateOrganizationRole(role),
+  return await mutateOrganizations(repoPath, (file) => {
+    const now = (options.now?.() ?? new Date()).toISOString();
+    const id = options.createId?.() ?? createOrganizationId();
+    const members: Record<string, OrganizationMemberRecord> = {};
+    for (const [userId, role] of Object.entries(input.members ?? {})) {
+      members[userId] = {
+        userId,
+        role: validateOrganizationRole(role),
+        createdAt: now,
+        updatedAt: now,
+      };
+    }
+    const organization: OrganizationRecord = {
+      id,
+      name,
+      members,
       createdAt: now,
       updatedAt: now,
     };
-  }
-  const organization: OrganizationRecord = {
-    id,
-    name,
-    members,
-    createdAt: now,
-    updatedAt: now,
-  };
-  file.organizations[id] = organization;
-  await writeJsonAtomic(organizationsPath(repoPath), file);
-  return organization;
+    file.organizations[id] = organization;
+    return organization;
+  });
 }
 
 export async function ensureDefaultOrganizationForUser(
@@ -205,41 +223,40 @@ export async function ensureDefaultOrganizationForUser(
   options: EnsureDefaultOrganizationOptions = {},
 ): Promise<OrganizationRecord> {
   const role = validateOrganizationRole(input.role);
-  const file = await readOrganizations(repoPath);
-  const existing = Object.values(file.organizations).find(
-    (organization) => organization.members[input.userId],
-  );
-  if (existing) {
-    if (
-      options.enforceRole &&
-      existing.members[input.userId].role !== role
-    ) {
-      const now = (options.now?.() ?? new Date()).toISOString();
-      existing.members[input.userId].role = role;
-      existing.members[input.userId].updatedAt = now;
-      existing.updatedAt = now;
-      await writeJsonAtomic(organizationsPath(repoPath), file);
+  return await mutateOrganizations(repoPath, (file) => {
+    const existing = Object.values(file.organizations).find(
+      (organization) => organization.members[input.userId],
+    );
+    if (existing) {
+      if (
+        options.enforceRole &&
+        existing.members[input.userId].role !== role
+      ) {
+        const now = (options.now?.() ?? new Date()).toISOString();
+        existing.members[input.userId].role = role;
+        existing.members[input.userId].updatedAt = now;
+        existing.updatedAt = now;
+      }
+      return existing;
     }
-    return existing;
-  }
-  const now = (options.now?.() ?? new Date()).toISOString();
-  const organization: OrganizationRecord = {
-    id: options.createId?.() ?? createOrganizationId(),
-    name: "Default Team",
-    members: {
-      [input.userId]: {
-        userId: input.userId,
-        role,
-        createdAt: now,
-        updatedAt: now,
+    const now = (options.now?.() ?? new Date()).toISOString();
+    const organization: OrganizationRecord = {
+      id: options.createId?.() ?? createOrganizationId(),
+      name: "Default Team",
+      members: {
+        [input.userId]: {
+          userId: input.userId,
+          role,
+          createdAt: now,
+          updatedAt: now,
+        },
       },
-    },
-    createdAt: now,
-    updatedAt: now,
-  };
-  file.organizations[organization.id] = organization;
-  await writeJsonAtomic(organizationsPath(repoPath), file);
-  return organization;
+      createdAt: now,
+      updatedAt: now,
+    };
+    file.organizations[organization.id] = organization;
+    return organization;
+  });
 }
 
 export async function addOrganizationMember(
@@ -247,23 +264,24 @@ export async function addOrganizationMember(
   organizationId: string,
   input: { userId: string; role: OrganizationRole },
 ): Promise<OrganizationRecord> {
-  const file = await readOrganizations(repoPath);
-  const organization = file.organizations[organizationId];
-  if (!organization) {
-    throw new Error("organization not found");
-  }
-  const now = new Date().toISOString();
-  const existing = organization.members[input.userId];
-  organization.members[input.userId] = {
-    userId: input.userId,
-    role: validateOrganizationRole(input.role),
-    createdAt: existing?.createdAt ?? now,
-    updatedAt: now,
-  };
-  organization.updatedAt = now;
-  await writeJsonAtomic(organizationsPath(repoPath), file);
-  return organization;
+  return await mutateOrganizations(repoPath, (file) => {
+    const organization = file.organizations[organizationId];
+    if (!organization) {
+      throw new Error("organization not found");
+    }
+    const now = new Date().toISOString();
+    const existing = organization.members[input.userId];
+    organization.members[input.userId] = {
+      userId: input.userId,
+      role: validateOrganizationRole(input.role),
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    organization.updatedAt = now;
+    return organization;
+  });
 }
+
 
 export async function listPublicMemberships(
   repoPath: string,
@@ -274,4 +292,101 @@ export async function listPublicMemberships(
 
 export function organizationRoleCanWrite(role: OrganizationRole | undefined): boolean {
   return organizationRoleHasPermission(role, "tasks:write");
+}
+
+export interface OrganizationInvitation {
+  id: string;
+  organizationId: string;
+  email: string;
+  role: OrganizationRole;
+  createdBy: string;
+  createdAt: string;
+  expiresAt: string;
+  status: "pending" | "accepted" | "declined" | "revoked";
+  tokenHash: string;
+}
+
+export type OrganizationActor = { id: string; email: string };
+
+async function mutateOrganizations<T>(repoPath: string, operation: (file: OrganizationsFile) => T): Promise<T> {
+  // ponytail: one lease for the organization file; split storage per org if write throughput requires it.
+  return await withKnowledgeLease({ path: join(organizationsRoot(repoPath), "organizations.lock"), waitMs: 10_000 }, async (lease) => {
+    const file = await readOrganizations(repoPath);
+    const owned = Object.values(file.organizations).filter((org) => Object.values(org.members).some((member) => member.role === "owner")).map((org) => org.id);
+    const result = operation(file);
+    for (const id of owned) {
+      if (!Object.values(file.organizations[id].members).some((member) => member.role === "owner")) throw new WebInputError("organization must retain an owner");
+    }
+    await lease.assertOwned();
+    await writeJsonAtomic(organizationsPath(repoPath), file);
+    return result;
+  });
+}
+
+function organizationForActor(file: OrganizationsFile, id: string, actor: OrganizationActor, manage = false): OrganizationRecord {
+  const org = Object.hasOwn(file.organizations, id) ? file.organizations[id] : undefined;
+  const role = org && Object.hasOwn(org.members, actor.id) ? org.members[actor.id].role : undefined;
+  if (!org || !role) throw new WebNotFoundError("organization not found");
+  if (manage && !organizationRoleHasPermission(role, "organizations:manage")) throw new WebForbiddenError();
+  return org;
+}
+
+function publicInvitation(invitation: OrganizationInvitation, now = new Date()) {
+  const { tokenHash: _secret, ...metadata } = invitation;
+  return { ...metadata, status: invitation.status === "pending" && Date.parse(invitation.expiresAt) <= now.getTime() ? "expired" : invitation.status };
+}
+
+export async function listOrganizationMembers(repoPath: string, id: string, actor: OrganizationActor) {
+  return Object.values(organizationForActor(await readOrganizations(repoPath), id, actor).members);
+}
+
+export async function changeOrganizationMember(repoPath: string, id: string, actor: OrganizationActor, userId: string, role?: unknown) {
+  return await mutateOrganizations(repoPath, (file) => {
+    const org = organizationForActor(file, id, actor, true);
+    if (!Object.hasOwn(org.members, userId)) throw new WebNotFoundError("member not found");
+    if (role === undefined) delete org.members[userId];
+    else org.members[userId] = { ...org.members[userId], role: validateOrganizationRole(role), updatedAt: new Date().toISOString() };
+    org.updatedAt = new Date().toISOString();
+    return { ok: true };
+  });
+}
+
+export async function listOrganizationInvitations(repoPath: string, id: string, actor: OrganizationActor) {
+  const file = await readOrganizations(repoPath);
+  organizationForActor(file, id, actor, true);
+  return Object.values(file.invitations ?? {}).filter((invite) => invite.organizationId === id).map((invite) => publicInvitation(invite));
+}
+
+export async function createOrganizationInvitation(repoPath: string, id: string, actor: OrganizationActor, input: { email: unknown; role: unknown; expiresInSeconds?: unknown }, now = new Date()) {
+  if (typeof input.email !== "string" || input.email.length > 254 || !/^[^\s@]+@[^\s@]+$/.test(input.email.trim())) throw new WebInputError("valid invitation email is required");
+  const role = validateOrganizationRole(input.role);
+  const expires = input.expiresInSeconds ?? 7 * 86400;
+  if (typeof expires !== "number" || !Number.isInteger(expires) || expires < 1 || expires > 30 * 86400) throw new WebInputError("invitation expiry must be between 1 and 2592000 seconds");
+  const email = input.email.trim().toLocaleLowerCase("en-US");
+  const token = randomBytes(32).toString("base64url");
+  return await mutateOrganizations(repoPath, (file) => {
+    organizationForActor(file, id, actor, true);
+    const invitation: OrganizationInvitation = { id: `inv_${randomBytes(18).toString("base64url")}`, organizationId: id,
+      email, role, createdBy: actor.id, createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + expires * 1000).toISOString(), status: "pending", tokenHash: createHash("sha256").update(token).digest("hex") };
+    (file.invitations ??= {})[invitation.id] = invitation;
+    return { invitation: publicInvitation(invitation, now), token };
+  });
+}
+
+export async function resolveOrganizationInvitation(repoPath: string, id: string, invitationId: string, actor: OrganizationActor, action: "accept" | "decline" | "revoke", token?: unknown, now = new Date()) {
+  return await mutateOrganizations(repoPath, (file) => {
+    if (action === "revoke") organizationForActor(file, id, actor, true);
+    const invitation = file.invitations && Object.hasOwn(file.invitations, invitationId) ? file.invitations[invitationId] : undefined;
+    if (!invitation || invitation.organizationId !== id || invitation.status !== "pending" || Date.parse(invitation.expiresAt) <= now.getTime()) throw new WebNotFoundError("invitation not found");
+    if (action !== "revoke" && (typeof token !== "string" || token.length !== 43 || invitation.email !== actor.email.toLocaleLowerCase("en-US") || !timingSafeEqual(createHash("sha256").update(token).digest(), Buffer.from(invitation.tokenHash, "hex")))) throw new WebNotFoundError("invitation not found");
+    if (action === "accept") {
+      const org = file.organizations[id];
+      // An invitation never changes the role of an existing member.
+      if (!Object.hasOwn(org.members, actor.id)) org.members[actor.id] = { userId: actor.id, role: invitation.role, createdAt: now.toISOString(), updatedAt: now.toISOString() };
+      org.updatedAt = now.toISOString();
+    }
+    invitation.status = action === "accept" ? "accepted" : action === "decline" ? "declined" : "revoked";
+    return { invitation: publicInvitation(invitation, now) };
+  });
 }
