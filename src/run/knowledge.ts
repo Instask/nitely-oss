@@ -230,6 +230,7 @@ async function readStagedFile(repoPath: string, filename: string): Promise<strin
 
 export async function generateAgentMemorySkeleton(
   repoPath: string,
+  repositoryName = basename(repoPath),
 ): Promise<string> {
   const packageJson = await readPackageJson(repoPath);
   const scripts = recordField(packageJson?.scripts);
@@ -243,8 +244,9 @@ export async function generateAgentMemorySkeleton(
   const tree = await runGit(repoPath, ["ls-tree", "-z", "HEAD"]);
   const topLevel = tree.exitCode === 0
     ? tree.stdout.split("\0").filter(Boolean).map((line) => {
-        const [metadata, name] = line.split("\t");
-        return { name, directory: metadata.split(" ")[1] === "tree" };
+        const separator = line.indexOf("\t");
+        const metadata = line.slice(0, separator);
+        return { name: line.slice(separator + 1), directory: metadata.split(" ")[1] === "tree" };
       })
     : (await readdir(repoPath, { withFileTypes: true })).map((entry) => ({
         name: entry.name, directory: entry.isDirectory(),
@@ -261,7 +263,7 @@ export async function generateAgentMemorySkeleton(
   return [
     "# Repository Memory",
     "",
-    `Repository: ${basename(repoPath)}`,
+    `Repository: ${repositoryName}`,
     "",
     "## Layout",
     "",
@@ -329,7 +331,10 @@ export async function prepareAgentMemory(input: {
     };
   }
 
-  const content = await generateAgentMemorySkeleton(sourceRepoPath);
+  const content = await generateAgentMemorySkeleton(
+    sourceRepoPath,
+    basename(input.repoPath),
+  );
   await mkdir(knowledgeDirectory(input.repoPath), { recursive: true });
   await writeFile(cacheContentPath, content, "utf8");
   const metadata: AgentMemoryMetadata = {

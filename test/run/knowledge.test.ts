@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
 
 import { describe, expect, it } from "vitest";
@@ -105,6 +105,7 @@ describe("agent knowledge cache", () => {
     // An uncommitted manifest must not override the selected commit's commands.
     await writeFile(join(worktree, "package.json"), JSON.stringify({ scripts: { test: "wrong" } }));
     const memory = await prepareAgentMemory({ repoPath: repo, sourceRepoPath: worktree, runtime: "claude" });
+    expect(memory.content).toContain(`Repository: ${basename(repo)}`);
     expect(memory.content).toContain("- src/");
     expect(memory.content).toContain("- test: `vitest`");
     expect(memory.content).not.toContain("- - ");
