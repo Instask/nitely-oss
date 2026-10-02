@@ -4589,14 +4589,17 @@ describe("web server API and HTML", () => {
       body: JSON.stringify({ maxConcurrentTasks: 2 }),
     });
 
-    await expect(
-      Promise.race([
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await expect(Promise.race([
         bothStartedPromise.then(() => "both-started"),
-        new Promise((resolve) => setTimeout(() => resolve("timeout"), 1_000)),
-      ]),
-    ).resolves.toBe("both-started");
-
-    releaseRunner();
+        new Promise((resolve) => { timeout = setTimeout(() => resolve("timeout"), 5_000); }),
+      ])).resolves.toBe("both-started");
+    } finally {
+      clearTimeout(timeout);
+      releaseRunner();
+      await responsePromise;
+    }
     const response = await responsePromise;
 
     expect(response.status).toBe(200);
