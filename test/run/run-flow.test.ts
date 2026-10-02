@@ -14747,6 +14747,7 @@ describe("runFlow", () => {
                 uri: "specs/tech-design.md",
               },
             },
+            configuration: { verifyCommand: "pnpm exec vitest run && pnpm run check && pnpm run build" },
             changeRequestTarget: { provider: "github", target: "43" },
           },
           {
@@ -14843,6 +14844,7 @@ describe("runFlow", () => {
                 uri: "specs/tech-design.md",
               },
             },
+            configuration: { verifyCommand: "pnpm exec vitest run && pnpm run check && pnpm run build" },
             changeRequestTarget: { provider: "github", target: "43" },
           },
           {

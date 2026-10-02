@@ -728,6 +728,7 @@ async function startBeforeBuiltInTaskPlan(input: {
       flowDocument: JSON.stringify(flowDocument),
       repoPath: input.repo,
       inputs: {},
+      configuration: { verifyCommand: "true" },
     },
     {
       createRunId: () => input.runId,
