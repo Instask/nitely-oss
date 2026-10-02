@@ -1051,6 +1051,8 @@ export class OciExecutionBackend implements ExecutionBackend {
       "--env",
       "HOME=/tmp/nitely-home",
       "--env",
+      "NITELY_SANDBOX=1",
+      "--env",
       "NITELY_OUTPUT_DIR=/nitely/output",
       "--env",
       "NITELY_ATTEMPT_DIR=/nitely/output",

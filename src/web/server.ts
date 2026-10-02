@@ -11433,7 +11433,7 @@ export async function startWebServer(
     });
   }
 
-  if (readiness.execution.backend === "oci") {
+  if (readiness.execution.backend === "oci" && process.env.NITELY_SANDBOX !== "1") {
     // Same env resolution the execution-backend policy uses: an explicitly
     // supplied env wins, and otherwise the reaper needs the process env so it
     // reads the operator's DOCKER_HOST, engine command and PATH rather than

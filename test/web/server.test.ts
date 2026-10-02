@@ -39,6 +39,7 @@ import type {
   SetConnectionInput as ProviderSetConnectionInput,
 } from "../../src/providers/types.js";
 import { FileProviderConnectionStore } from "../../src/providers/file-store.js";
+import * as ociExecution from "../../src/run/execution/oci.js";
 import { startWebServer, type WebServer } from "../../src/web/server.js";
 import {
   createTask,
@@ -12594,4 +12595,17 @@ None.
     });
     expect(JSON.stringify(retryBody)).not.toContain(secret);
   });
+});
+
+it("does not start a host OCI reaper inside an OCI workload", async () => {
+  const repo = await createRepo();
+  const reap = vi.spyOn(ociExecution, "reapExpiredOciContainers");
+  vi.stubEnv("NITELY_SANDBOX", "1");
+  try {
+    await startTestServer(repo);
+    expect(reap).not.toHaveBeenCalled();
+  } finally {
+    vi.unstubAllEnvs();
+    reap.mockRestore();
+  }
 });

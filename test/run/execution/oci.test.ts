@@ -510,6 +510,7 @@ describe("OciExecutionBackend", () => {
     expect(launch.args.join("\0")).not.toContain("super-secret-value");
     expect(launch.args.join("\0")).not.toContain("must-not-enter-container");
     expect(launch.args).not.toContain("HOST_SECRET");
+    expect(launch.args).toContain("NITELY_SANDBOX=1");
     expect(launch.env).toEqual({
       DOCKER_HOST: "unix:///run/user/501/docker.sock",
       LANG: "C.UTF-8",
