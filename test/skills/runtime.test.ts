@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { stringify } from "yaml";
 import { parseSkillManifest } from "../../src/skills/manifest.js";
 import { loadStageSkills } from "../../src/skills/load.js";
+import { OciSkillSandboxProvider, selectSkillSandboxProvider, type SkillSandboxProvider } from "../../src/skills/sandbox.js";
 import { expect, it } from "vitest";
 import { PythonSkillRuntime } from "../../src/skills/runtime.js";
 import type { SandboxProcessInput } from "../../src/run/execution/oci.js";
@@ -44,6 +45,8 @@ it("stages only declared inputs, archives hashed outputs, bounds OCI execution a
   let outcome = 0;
   let removed = false;
   let launches = 0;
+  let pythonAvailable = true;
+  let workloads = 0;
   const processRunner = async (input: SandboxProcessInput) => {
     if (input.args[0] === "info") return { stdout: '["name=rootless"]\t"2"\t[]', stderr: "", exitCode: 0 };
     if (input.args[0] === "image") return { stdout: `"sha256:${"a".repeat(64)}"\t[]`, stderr: "", exitCode: 0 };
@@ -59,6 +62,8 @@ it("stages only declared inputs, archives hashed outputs, bounds OCI execution a
     expect(input.args).not.toContain("DOCKER_HOST");
     expect(await readFile(join(workspace, "inputs/value.txt"), "utf8")).toBe("declared");
     expect(await readFile(join(workspace, "code/main.py"), "utf8")).toContain("example");
+    if (input.args.at(-1)?.includes("sys.version_info")) return { stdout: "", stderr: "", exitCode: pythonAvailable ? 0 : 127 };
+    workloads++;
     if (outcome === 2) throw Object.assign(new Error("too much output"), { code: "OUTPUT_LIMIT_EXCEEDED" });
     expect(input.args).toContain(`/nitely/output:rw,nosuid,nodev,noexec,mode=1777,size=${policy.resources.tmpfsBytes}`);
     expect(input.args[input.args.indexOf('--cpus') + 1]).toBe(String(policy.resources.cpus));
@@ -89,13 +94,20 @@ it("stages only declared inputs, archives hashed outputs, bounds OCI execution a
     expect(evidence.manifest.resources).toEqual(policy.resources);
     expect(evidence.resolvedEntrypoint).toBe("main.py");
     expect(evidence.request.inputs["value.txt"]).toMatchObject({ sha256: expect.any(String), size: 8 });
+    const executedWorkloads = workloads;
+    pythonAvailable = false;
+    await expect(runtime.execute(repo, { skillId: "example", entrypoint: "main", inputs: { "value.txt": "declared" } })).rejects.toThrow(/lacks.*Python 3/);
+    expect(workloads).toBe(executedWorkloads);
+    pythonAvailable = true;
+    const unavailable = new PythonSkillRuntime({ image: "unused", sandboxProviders: [{ id: "unsupported", capabilities: new Set(["python:3"]), execute: async () => { throw new Error("must not execute"); } }] });
+    await expect(unavailable.execute(repo, { skillId: "example", entrypoint: "main" })).rejects.toThrow(/No sandbox provider/);
     const authorizedLaunches = launches;
     for (const requested of [{ entrypoint: "undeclared" }, { entrypoint: "main", inputs: { "undeclared.txt": "value" } }, { entrypoint: "main", outputs: ["undeclared.txt"] }]) {
       await expect(runtime.execute(repo, { skillId: "example", ...requested })).rejects.toThrow(/skill.yaml/);
     }
     for (const denied of [{ network: { mode: "allowlist", domains: ["example.test"] } }, { secrets: [{ name: "NITELY_SKILL_SECRET_TEST", scope: "skill", reference: "test" }] }, { dependencies: { mode: "locked", lockFile: "requirements.txt", sha256: "a".repeat(64), installHooks: false } }]) {
       await writeFile(join(packagePath, "skill.yaml"), stringify({ ...policy, ...denied }));
-      await expect(runtime.execute(repo, { skillId: "example", entrypoint: "main" })).rejects.toThrow(/unavailable/);
+      await expect(runtime.execute(repo, { skillId: "example", entrypoint: "main" })).rejects.toThrow(/satisfies|unavailable/);
     }
     expect(launches).toBe(authorizedLaunches);
     await rm(join(packagePath, "skill.yaml"));
@@ -106,4 +118,23 @@ it("stages only declared inputs, archives hashed outputs, bounds OCI execution a
     await symlink("/etc/passwd", join(packagePath, "host.txt"));
     await expect(runtime.execute(repo, { skillId: "example", entrypoint: "main.py" })).rejects.toThrow();
   } finally { await chmod(repo, 0o700); await rm(repo, { recursive: true, force: true }); }
+});
+
+it("selects providers by complete capabilities and rejects missing or split guarantees before execution", () => {
+  const policy = parseSkillManifest(stringify(manifest));
+  const reference = new OciSkillSandboxProvider({ image: "python-image:local", env: {} });
+  let executions = 0;
+  const incomplete: SkillSandboxProvider = { id: "external", capabilities: new Set(["python:3", "resource:cpu", "resource:memory", "snapshots"]),
+    execute: async () => { executions++; throw new Error("must not execute"); } };
+  expect(selectSkillSandboxProvider([incomplete, { ...incomplete, id: "arbitrary-name", capabilities: reference.capabilities }], policy).id).toBe("arbitrary-name");
+  expect(() => selectSkillSandboxProvider([incomplete], policy)).toThrow(/network:none/);
+  const capabilities = [...reference.capabilities];
+  for (const missing of capabilities) {
+    const candidate = { ...incomplete, capabilities: new Set(capabilities.filter((value) => value !== missing)) };
+    expect(() => selectSkillSandboxProvider([candidate], policy)).toThrow();
+  }
+  const left = { ...incomplete, capabilities: new Set(capabilities.slice(0, 8)) };
+  const right = { ...incomplete, capabilities: new Set(capabilities.slice(8)) };
+  expect(() => selectSkillSandboxProvider([left, right], policy)).toThrow(/one provider/);
+  expect(executions).toBe(0);
 });
