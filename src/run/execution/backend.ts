@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { LocalExecutionBackend, type RuntimeEnv } from "./local.js";
 import { MiseExecutionBackend } from "./mise.js";
 import { parseNetworkAllowlist } from "./network-gateway.js";
@@ -130,6 +132,19 @@ export function createExecutionBackend(
   return new LocalExecutionBackend({ env: input.env });
 }
 
+const OCI_READINESS_TTL_MS = 30_000;
+const ociReadinessCache = new Map<string, { expiresAt: number; issues: Promise<OciReadinessIssue[]> }>();
+
+/** Drops cached probe results, for callers that just changed the engine or image. */
+export function clearOciReadinessCache(): void {
+  ociReadinessCache.clear();
+}
+
+/**
+ * Probes launch containers, so identical environment and stage inputs share
+ * one in-flight probe and reuse its result briefly. The key is a digest
+ * because the environment can carry credentials.
+ */
 export async function checkOciReadiness(input: {
   env?: RuntimeEnv;
   stages?: import("./types.js").AgentRunnableStage[];
@@ -138,16 +153,35 @@ export async function checkOciReadiness(input: {
   if (!env.NITELY_OCI_IMAGE?.trim()) {
     return [{ code: "oci.image.missing", message: "NITELY_OCI_IMAGE is required for the OCI execution backend" }];
   }
+  const now = Date.now();
+  for (const [key, entry] of ociReadinessCache) {
+    if (entry.expiresAt <= now) ociReadinessCache.delete(key);
+  }
+  const key = createHash("sha256").update(JSON.stringify([
+    Object.entries(env).filter(([, value]) => value !== undefined).sort(([left], [right]) => left.localeCompare(right)),
+    input.stages ?? null,
+  ])).digest("hex");
+  const cached = ociReadinessCache.get(key);
+  if (cached) return await cached.issues;
+  const issues = probeOciReadiness(env, input.stages);
+  ociReadinessCache.set(key, { expiresAt: now + OCI_READINESS_TTL_MS, issues });
+  return await issues;
+}
+
+async function probeOciReadiness(
+  env: RuntimeEnv,
+  stages: import("./types.js").AgentRunnableStage[] | undefined,
+): Promise<OciReadinessIssue[]> {
   try {
     const backend = createExecutionBackend({ backend: "oci", env }) as OciExecutionBackend;
-    if (!input.stages?.length) return await backend.checkReadiness();
+    if (!stages?.length) return await backend.checkReadiness();
     const issues: OciReadinessIssue[] = [];
-    const groups = new Map<string, typeof input.stages>();
-    for (const stage of input.stages) groups.set(stage.id, [...(groups.get(stage.id) ?? []), stage]);
-    for (const stages of groups.values()) {
+    const groups = new Map<string, import("./types.js").AgentRunnableStage[]>();
+    for (const stage of stages) groups.set(stage.id, [...(groups.get(stage.id) ?? []), stage]);
+    for (const group of groups.values()) {
       const failures: OciReadinessIssue[] = [];
       let available = false;
-      for (const stage of stages) {
+      for (const stage of group) {
         const result = await backend.checkReadiness(stage);
         if (result.length === 0) { available = true; break; }
         failures.push(...result);
