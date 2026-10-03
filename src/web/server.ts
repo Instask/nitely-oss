@@ -5,6 +5,7 @@ import { isIP } from "node:net";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PythonSkillRuntime, skillExecutionSchema, type SkillRuntime } from "../skills/runtime.js";
+import { SkillManifestError } from "../skills/manifest.js";
 
 import {
   GitHubWebhookRequestError,
@@ -8632,7 +8633,8 @@ async function handleApiRequest(
         organizationId: repository.organizationId, source: "runtime", context: { repositoryId: repository.id },
         target: { type: "skill", id: `${result.skillId}/${result.executionId}` } });
       sendJson(response, result.failure ? 422 : 200, { execution: result });
-    } catch {
+    } catch (error) {
+      if (error instanceof SkillManifestError) throw new WebInputError(error.message);
       throw new WebInputError("Skill execution could not be prepared or cleaned up");
     }
     return true;

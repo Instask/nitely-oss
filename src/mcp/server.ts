@@ -288,7 +288,7 @@ export function createNitelyMcpServer(input: NitelyMcpServerInput): McpServer {
 
   server.registerTool("execute_skill", {
     title: "Execute repository Skill",
-    description: "Execute a repository-local Python Skill in a non-root, network-denied sandbox. Inputs are declared UTF-8 files; outputs are archived with hashes. Requires runs:start.",
+    description: "Execute a repository-local Python Skill using a skill.yaml named entrypoint in a non-root, network-denied sandbox. Inputs/outputs must be declared by its manifest; outputs are archived with hashes. Requires runs:start.",
     inputSchema: skillExecutionSchema.extend({ repoId: idSchema }),
     annotations: writeAnnotations,
   }, async (request) => await execute(() => api.request("/api/skills/execute", { method: "POST", body: request })));

@@ -8,12 +8,13 @@ import { OciExecutionBackend, type OciExecutionBackendOptions } from "../run/exe
 import { ensureRunOwnedDirectory, listRunOwnedDirectory, readRunOwnedFile, writeRunOwnedFileAtomically } from "../run/owned-file.js";
 import { validateSkillDirectory } from "./load.js";
 import { withKnowledgeLease } from "../knowledge-repositories/lock.js";
+import { loadExecutionManifest, SkillManifestError, skillRelativePathSchema } from "./manifest.js";
 
 // Relative POSIX paths only: no shell syntax, hidden components or parent hops.
-const pathSchema = z.string().max(256).regex(/^[A-Za-z0-9_-][A-Za-z0-9_.-]*(?:\/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$/);
+const pathSchema = skillRelativePathSchema;
 export const skillExecutionSchema = z.object({
   skillId: identifierSchema,
-  entrypoint: pathSchema.refine((path) => path.endsWith(".py"), "Python entrypoint required"),
+  entrypoint: pathSchema,
   inputs: z.record(pathSchema, z.string().max(1024 * 1024)).default({}),
   outputs: z.array(pathSchema).max(16).default([]),
   timeoutMs: z.number().int().min(100).max(60_000).default(10_000),
@@ -36,6 +37,9 @@ export interface SkillRuntime {
 
 const PYTHON_WRAPPER = `import base64, json, os, stat, subprocess, sys, tempfile
 request = json.load(open('/workspace/request.json'))
+assert sys.version_info.major == 3
+log_limit = request['resources']['maxCapturedOutputBytes']
+file_limit = request['resources']['maxFileBytes']
 result = dict(stdout='', stderr='', exitCode=None, artifacts=[])
 with tempfile.TemporaryDirectory(dir='/tmp') as logs:
     with open(logs + '/stdout', 'wb') as stdout, open(logs + '/stderr', 'wb') as stderr:
@@ -55,10 +59,10 @@ with tempfile.TemporaryDirectory(dir='/tmp') as logs:
     total = 0
     for name in ('stdout', 'stderr'):
         with open(logs + '/' + name, 'rb') as log:
-            data = log.read(1048577)
+            data = log.read(log_limit + 1)
         total += len(data)
-        result[name] = data[:1048576].decode('utf8', errors='replace')
-    if total > 1048576: result['failure'] = 'output-limit'
+        result[name] = data[:log_limit].decode('utf8', errors='replace')
+    if total > log_limit: result['failure'] = 'output-limit'
     if result.get('failure') is None and result['exitCode'] != 0: result['failure'] = 'process-exit'
     if result.get('failure') is None:
         try:
@@ -75,9 +79,9 @@ with tempfile.TemporaryDirectory(dir='/tmp') as logs:
                     with os.fdopen(descriptor, 'rb') as output:
                         details = os.fstat(output.fileno())
                         if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1: raise ValueError('unsafe output')
-                        data = output.read(4194305)
+                        data = output.read(file_limit + 1)
                     total += len(data)
-                    if len(data) > 4194304 or total > 8388608: raise ValueError('oversized output')
+                    if len(data) > file_limit or total > 8388608: raise ValueError('oversized output')
                     result['artifacts'].append(dict(path=path, content=base64.b64encode(data).decode('ascii')))
                 finally: os.close(parent)
         except Exception:
@@ -134,26 +138,34 @@ export class PythonSkillRuntime implements SkillRuntime {
       };
       await copy("");
       const skill = await validateSkillDirectory({ skillDirectory: code, skillId: request.skillId });
-      if (!skill.resources.some((file) => file.relativePath === request.entrypoint)) throw new Error("Skill entrypoint is not a package resource");
+      const manifest = await loadExecutionManifest(code, request.skillId);
+      if (manifest.network.mode !== "none") throw new SkillManifestError("skill.yaml network: approved allowlist execution is unavailable; use mode none");
+      if (manifest.secrets.length) throw new SkillManifestError("skill.yaml secrets: approved scoped-secret injection is unavailable");
+      if (manifest.dependencies.mode !== "none") throw new SkillManifestError("skill.yaml dependencies: locked dependency installation is unavailable; use mode none");
+      const entrypoint = Object.hasOwn(manifest.entrypoints, request.entrypoint) ? manifest.entrypoints[request.entrypoint] : Object.values(manifest.entrypoints).includes(request.entrypoint) ? request.entrypoint : undefined;
+      if (!entrypoint || !skill.resources.some((file) => file.relativePath === entrypoint)) throw new SkillManifestError("skill.yaml must declare the requested package entrypoint");
+      if (Object.keys(request.inputs).some((path) => !manifest.filesystem.inputs.includes(path)) || request.outputs.some((path) => !manifest.filesystem.outputs.includes(path))) {
+        throw new SkillManifestError("skill.yaml does not grant the requested input/output paths");
+      }
+      const timeoutMs = Math.min(request.timeoutMs, manifest.resources.timeoutMs);
       for (const [path, content] of Object.entries(request.inputs)) {
         await mkdir(dirname(join(workspace, "inputs", path)), { recursive: true, mode: 0o755 });
         await writeFile(join(workspace, "inputs", path), content, { flag: "wx", mode: 0o644 });
       }
       const output = join(workspace, "outputs");
       await mkdir(output, { mode: 0o700 });
-      await writeFile(join(workspace, "request.json"), JSON.stringify(request), { mode: 0o644 });
+      await writeFile(join(workspace, "request.json"), JSON.stringify({ ...request, entrypoint, timeoutMs, resources: manifest.resources }), { mode: 0o644 });
       await writeFile(join(workspace, "execute.py"), PYTHON_WRAPPER, { mode: 0o644 });
       const backend = new OciExecutionBackend({ ...this.options, uid: 1000, gid: 1000,
         environmentAllowlist: [], secretAllowlist: [], networkAllowlist: [],
-        resources: { cpus: 1, memoryBytes: 256 * 1024 * 1024, pids: 64, tmpfsBytes: 32 * 1024 * 1024,
-          maxFileBytes: 4 * 1024 * 1024, maxCapturedOutputBytes: 20 * 1024 * 1024, timeoutMs: request.timeoutMs + 5000 } });
+        resources: { ...manifest.resources, maxCapturedOutputBytes: 20 * 1024 * 1024, timeoutMs: timeoutMs + 5000 } });
       const result: SkillExecutionResult = { executionId, skillId: request.skillId, contentHash: skill.contentHash,
         durationMs: 0, exitCode: null, stdout: "", stderr: "", artifacts: [] };
       let captured: Array<{ path: string; content: string }> = [];
       try {
         await backend.prepareForRun();
         const command = await backend.runCommand({ runId: executionId, path: workspace },
-          "python3 -I /workspace/execute.py", { isolatedWorkspace: true, outputDirectory: output, timeoutMs: request.timeoutMs + 5000, runId: executionId, stageId: request.skillId });
+          "python3 -I /workspace/execute.py", { isolatedWorkspace: true, outputDirectory: output, timeoutMs: timeoutMs + 5000, runId: executionId, stageId: request.skillId });
         if (command.exitCode !== 0) {
           result.exitCode = command.exitCode;
           result.failure = command.exitCode === 124 ? "timeout" : "process-exit";
@@ -192,7 +204,7 @@ export class PythonSkillRuntime implements SkillRuntime {
       }
       result.durationMs = Date.now() - started;
       await writeRunOwnedFileAtomically({ runDirectory: repoPath, path: `${archive}/execution.json`, subject: "Skill execution evidence",
-        content: JSON.stringify({ ...result, request: { ...request, inputs: Object.fromEntries(Object.entries(request.inputs).map(([path, content]) => [path, { sha256: createHash("sha256").update(content).digest("hex"), size: Buffer.byteLength(content) }])) }, createdAt: new Date().toISOString(), sandbox: { ...backend.describeExecution(), mounts: ["staged-code-and-inputs:read-only", "outputs:bounded-tmpfs"], limitations: ["Python standard library only; no dependency installation"] } }) });
+        content: JSON.stringify({ ...result, manifest, resolvedEntrypoint: entrypoint, request: { ...request, inputs: Object.fromEntries(Object.entries(request.inputs).map(([path, content]) => [path, { sha256: createHash("sha256").update(content).digest("hex"), size: Buffer.byteLength(content) }])) }, createdAt: new Date().toISOString(), sandbox: { ...backend.describeExecution(), mounts: ["staged-code-and-inputs:read-only", "outputs:bounded-tmpfs"], limitations: ["Python standard library only; no dependency installation"] } }) });
       return result;
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
