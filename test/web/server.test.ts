@@ -12674,6 +12674,34 @@ describe("Web usage-limit recovery", () => {
     expect((await fetch(`${server.url}/api/runs/completed/resume`, { method: "POST" })).status).toBe(400);
     expect(resumed).toHaveLength(1);
   });
+
+  it("resumes a run once when submits race, and releases the claim afterwards", async () => {
+    const repo = await createRepo();
+    await mkdir(join(repo, ".nitely"), { recursive: true });
+    const events = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      events.append({ runId: "interrupted", type: "run.created", payload: { ownerId: "local", flowName: "test", flowPath: "flows/implement-spec-bootstrap.json", inputs: {} } });
+      events.append({ runId: "interrupted", stageId: "implement", attempt: 1, createdAt: "2020-01-01T00:00:00Z", type: "stage.started", payload: { runtime: "mock" } });
+    } finally { events.close(); }
+    let finish!: () => void;
+    const resumed: string[] = [];
+    const server = await startTestServer(repo, undefined, undefined, {
+      resumeRun: async (input) => {
+        resumed.push(input.runId);
+        await new Promise<void>((resolvePromise) => { finish = resolvePromise; });
+        return { runId: input.runId, branchName: "test", worktreePath: repo };
+      },
+    });
+    const submit = () => fetch(`${server.url}/api/runs/interrupted/resume`, { method: "POST" });
+    const statuses = (await Promise.all([submit(), submit()])).map((response) => response.status).sort();
+    expect(statuses).toEqual([202, 409]);
+    await waitFor(async () => resumed, (ids) => ids.length === 1);
+    expect((await submit()).status).toBe(409);
+    finish();
+    await waitFor(async () => (await submit()).status, (status) => status === 202);
+    expect(resumed).toEqual(["interrupted", "interrupted"]);
+    finish();
+  });
 });
 
 it("refuses Web task admission when the selected OCI backend cannot launch", async () => {
