@@ -9,6 +9,12 @@ const repo=await mkdtemp(join(tmpdir(),'nitely-real-skill-'));
 const pkg=join(repo,'.nitely/skills/example');
 await mkdir(pkg,{recursive:true});
 await writeFile(join(pkg,'SKILL.md'),'---\nname: example\ndescription: real Python Skill\n---\nExecute main.py.');
+await writeFile(join(pkg,'skill.yaml'), JSON.stringify({
+ apiVersion:'nitely.dev/skill/v1', name:'example', version:'1.0.0',
+ runtime:{language:'python',major:3},entrypoints:{main:'main.py'},
+ resources:{cpus:1,memoryBytes:268435456,pids:64,tmpfsBytes:33554432,maxFileBytes:4194304,maxCapturedOutputBytes:1048576,timeoutMs:10000},
+ filesystem:{package:'read-only',inputs:['value.txt'],outputs:['result.txt']},network:{mode:'none'},dependencies:{mode:'none'},secrets:[]
+}));
 const runtime=new PythonSkillRuntime({ image, env:process.env });
 const sentinel=join(tmpdir(),'nitely-host-sentinel-'+process.pid);await writeFile(sentinel,'private-host-data');
 const initial=(await readdir(tmpdir())).filter(x=>x.startsWith('nitely-skill-'));

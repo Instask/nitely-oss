@@ -492,12 +492,12 @@ login. Changing configuration invalidates pending requests, which must restart.
 
 The MCP `execute_skill` tool calls `POST /api/skills/execute` with `runs:start`
 authorization and current repository/organization access. The request contains
-`repoId`, `skillId`, `entrypoint` (a relative `.py` package resource), optional
+`repoId`, `skillId`, `entrypoint` (a manifest entrypoint name), optional
 `inputs` (relative UTF-8 filenames to content), `outputs` (declared relative
 filenames), and `timeoutMs` (100–60,000; default 10,000). Example:
 
 ```json
-{"repoId":"home","skillId":"summarize","entrypoint":"main.py","inputs":{"source.txt":"Example text"},"outputs":["summary.txt"]}
+{"repoId":"home","skillId":"summarize","entrypoint":"main","inputs":{"source.txt":"Example text"},"outputs":["summary.txt"]}
 ```
 
 Packages live in `.nitely/skills/<skillId>` and retain the required `SKILL.md`.
@@ -530,3 +530,59 @@ library only. For real-container verification, run
 on the rootless Linux host; it checks output capture, host/network denial,
 timeout, output bounds, symlink rejection, restrictive permissions and memory
 limits, including temporary-directory cleanup after each outcome.
+
+#### Execution manifest v1
+
+`skill.yaml` grants executable authority; `SKILL.md` supplies instructions only.
+Without a manifest a package remains instruction-only. A complete example is:
+
+```yaml
+apiVersion: nitely.dev/skill/v1
+name: summarize
+version: 1.0.0
+runtime:
+  language: python
+  major: 3
+entrypoints:
+  main: main.py
+resources:
+  cpus: 1
+  memoryBytes: 268435456
+  pids: 64
+  tmpfsBytes: 33554432
+  maxFileBytes: 4194304
+  maxCapturedOutputBytes: 1048576
+  timeoutMs: 10000
+filesystem:
+  package: read-only
+  inputs: [source.txt]
+  outputs: [summary.txt]
+network:
+  mode: none
+dependencies:
+  mode: none
+secrets: []
+```
+
+All fields are required. Unknown fields, YAML aliases/tags, duplicate keys,
+unsupported versions/languages and path traversal fail closed with field errors.
+The manifest name must match the package id and every requested entrypoint must
+exist in the bounded package snapshot. For compatibility, a raw `.py` path is
+accepted only if a named entrypoint declares that exact path. Requested input
+and output paths must be subsets of the manifest declarations; instructions
+cannot expand either set. The manifest and resolved entrypoint enter execution
+evidence alongside the package content hash.
+
+Resource values can reduce operator ceilings: CPU 0.1–1, memory 32–256 MiB,
+processes 8–64, tmpfs 1–32 MiB, individual files 1 KiB–4 MiB, combined captured
+logs 1 KiB–1 MiB, and execution timeout 100–60,000 ms. The shorter request/manifest
+timeout wins. The OCI transport separately permits up to 20 MiB of encoded
+result/artifact data and five seconds for startup/capture.
+
+The schema also recognizes `network: {mode: allowlist, domains: [...]}`, scoped
+secret declarations (`name: NITELY_SKILL_SECRET_<NAME>`, `scope: skill`,
+`reference: <credential-id>`), and locked dependency descriptors (`mode: locked`,
+`lockFile`, SHA256 `sha256`, `installHooks: false`). This runtime rejects these
+requests before provisioning because it has no approved network, secret or
+dependency-install capability. A declaration is a request for authority, never
+an approval; raw credentials and install commands are not manifest fields.

@@ -17,6 +17,7 @@ import {
 } from "../../src/web/api-tokens.js";
 import { startWebServer } from "../../src/web/server.js";
 import { createTokenOwner } from "../helpers/token-owner.js";
+import { SkillManifestError } from "../../src/skills/manifest.js";
 import { listPublicMemberships } from "../../src/web/organizations.js";
 
 async function connectClient(input: NitelyMcpServerInput) {
@@ -56,7 +57,7 @@ describe("Nitely MCP server", () => {
     const web = await startWebServer({ repoPath: repo, host: "127.0.0.1", port: 0, authMode: "required", authEnv: {},
       providerEnv: { NITELY_EXECUTION_BACKEND: "local", NITELY_ALLOW_UNSAFE_LOCAL_EXECUTION: "true" },
       repositories: [{ id: "home", path: repo, synthetic: true, organizationId }],
-      skillRuntime: { execute: async (path, request) => { calls.push({ path, request }); return { executionId: "execution-1", skillId: request.skillId, contentHash: "hash", durationMs: 10, exitCode: 0, stdout: "done", stderr: "", artifacts: [] }; } } });
+      skillRuntime: { execute: async (path, request) => { if (request.entrypoint === "missing") throw new SkillManifestError("skill.yaml must declare the requested package entrypoint"); calls.push({ path, request }); return { executionId: "execution-1", skillId: request.skillId, contentHash: "hash", durationMs: 10, exitCode: 0, stdout: "done", stderr: "", artifacts: [] }; } } });
     const connected = await connectClient({ serverUrl: web.url, apiToken: token.token });
     const readOnly = await connectClient({ serverUrl: web.url, apiToken: readToken.token });
     const outside = await connectClient({ serverUrl: web.url, apiToken: outsiderToken.token });
@@ -69,6 +70,9 @@ describe("Nitely MCP server", () => {
       expect((await outside.client.callTool({ name: "execute_skill", arguments: args })).isError).toBe(true);
       expect((await connected.client.callTool({ name: "execute_skill", arguments: { ...args, repoId: "foreign" } })).isError).toBe(true);
       expect((await connected.client.callTool({ name: "execute_skill", arguments: { ...args, entrypoint: "../host.py" } })).isError).toBe(true);
+      const missing = await connected.client.callTool({ name: "execute_skill", arguments: { ...args, entrypoint: "missing" } });
+      expect(missing.isError).toBe(true);
+      expect(JSON.stringify(missing)).toContain("skill.yaml must declare");
       expect(calls).toHaveLength(1);
     } finally { await outside.close(); await readOnly.close(); await connected.close(); await web.close(); await rm(repo, { recursive: true, force: true }); }
   });
