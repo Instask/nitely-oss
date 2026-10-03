@@ -586,3 +586,26 @@ secret declarations (`name: NITELY_SKILL_SECRET_<NAME>`, `scope: skill`,
 requests before provisioning because it has no approved network, secret or
 dependency-install capability. A declaration is a request for authority, never
 an approval; raw credentials and install commands are not manifest fields.
+
+#### Sandbox provider contract
+
+The controller stages and validates a bounded, read-only snapshot and retains
+ownership of host temporary-directory cleanup. `SkillSandboxProvider.execute`
+bundles provision, snapshot staging, execution, bounded artifact transport and
+workload cleanup as one atomic lifecycle: it must settle only after the workload
+and all its descendants are removed. There is no public partially provisioned
+sandbox handle that a tool call could leave behind. The reference adapter reuses
+the existing OCI backend rather than maintaining separate Docker launch logic.
+
+Provider selection checks the complete capability set on one provider, regardless
+of its name. Required guarantees include Python 3, non-root identity, read-only
+staging, CPU/memory/process/tmpfs/file/output/deadline bounds, bounded artifact
+collection, blocking cleanup, workload expiry, and the requested network policy.
+Scoped secrets, locked dependencies and snapshots are separate capabilities;
+the OCI reference advertises neither secret/dependency installation nor snapshots.
+Missing guarantees fail closed before package code executes. The reference also
+probes Python 3 in its pinned image before executing the Skill. Runtime evidence
+records the selected provider and capabilities, including sandbox policy on
+bounded-output and cleanup failures. Third-party provider adapters are operator
+code and must verify their own runtime and enforcement before advertising them;
+agent requests and manifest provider names cannot select or upgrade a backend.

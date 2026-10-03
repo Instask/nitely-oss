@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { identifierSchema } from "../flow/schema.js";
-import { OciExecutionBackend, type OciExecutionBackendOptions } from "../run/execution/oci.js";
+import type { OciExecutionBackendOptions } from "../run/execution/oci.js";
+import type { ExecutionBackendDescription } from "../run/execution/types.js";
+import { OciSkillSandboxProvider, selectSkillSandboxProvider, type SkillSandboxProvider } from "./sandbox.js";
 import { ensureRunOwnedDirectory, listRunOwnedDirectory, readRunOwnedFile, writeRunOwnedFileAtomically } from "../run/owned-file.js";
 import { validateSkillDirectory } from "./load.js";
 import { withKnowledgeLease } from "../knowledge-repositories/lock.js";
@@ -92,7 +94,7 @@ print(json.dumps(result))
 
 /** Repository-local Python only; the operator supplies the preinstalled image. */
 export class PythonSkillRuntime implements SkillRuntime {
-  constructor(private readonly options: Pick<OciExecutionBackendOptions, "image" | "env" | "processRunner" | "engineSocketVerifier">) {}
+  constructor(private readonly options: Pick<OciExecutionBackendOptions, "image" | "env" | "processRunner" | "engineSocketVerifier"> & { sandboxProviders?: readonly SkillSandboxProvider[] }) {}
 
   async execute(repoPath: string, raw: SkillExecutionRequest): Promise<SkillExecutionResult> {
     skillExecutionSchema.parse(raw);
@@ -139,6 +141,7 @@ export class PythonSkillRuntime implements SkillRuntime {
       await copy("");
       const skill = await validateSkillDirectory({ skillDirectory: code, skillId: request.skillId });
       const manifest = await loadExecutionManifest(code, request.skillId);
+      const provider = selectSkillSandboxProvider(this.options.sandboxProviders ?? [new OciSkillSandboxProvider(this.options)], manifest);
       if (manifest.network.mode !== "none") throw new SkillManifestError("skill.yaml network: approved allowlist execution is unavailable; use mode none");
       if (manifest.secrets.length) throw new SkillManifestError("skill.yaml secrets: approved scoped-secret injection is unavailable");
       if (manifest.dependencies.mode !== "none") throw new SkillManifestError("skill.yaml dependencies: locked dependency installation is unavailable; use mode none");
@@ -156,16 +159,14 @@ export class PythonSkillRuntime implements SkillRuntime {
       await mkdir(output, { mode: 0o700 });
       await writeFile(join(workspace, "request.json"), JSON.stringify({ ...request, entrypoint, timeoutMs, resources: manifest.resources }), { mode: 0o644 });
       await writeFile(join(workspace, "execute.py"), PYTHON_WRAPPER, { mode: 0o644 });
-      const backend = new OciExecutionBackend({ ...this.options, uid: 1000, gid: 1000,
-        environmentAllowlist: [], secretAllowlist: [], networkAllowlist: [],
-        resources: { ...manifest.resources, maxCapturedOutputBytes: 20 * 1024 * 1024, timeoutMs: timeoutMs + 5000 } });
       const result: SkillExecutionResult = { executionId, skillId: request.skillId, contentHash: skill.contentHash,
         durationMs: 0, exitCode: null, stdout: "", stderr: "", artifacts: [] };
       let captured: Array<{ path: string; content: string }> = [];
+      let sandbox: ExecutionBackendDescription | undefined;
       try {
-        await backend.prepareForRun();
-        const command = await backend.runCommand({ runId: executionId, path: workspace },
-          "python3 -I /workspace/execute.py", { isolatedWorkspace: true, outputDirectory: output, timeoutMs: timeoutMs + 5000, runId: executionId, stageId: request.skillId });
+        const execution = await provider.execute({ workspace, outputDirectory: output, executionId, skillId: request.skillId, resources: manifest.resources, timeoutMs });
+        sandbox = execution.evidence;
+        const command = execution.command;
         if (command.exitCode !== 0) {
           result.exitCode = command.exitCode;
           result.failure = command.exitCode === 124 ? "timeout" : "process-exit";
@@ -177,7 +178,9 @@ export class PythonSkillRuntime implements SkillRuntime {
           captured = payload.artifacts;
         }
       } catch (error) {
-        const failure = error as { code?: string; cleanupFailed?: boolean };
+        if (error instanceof SkillManifestError) throw error;
+        const failure = error as { code?: string; cleanupFailed?: boolean; sandboxEvidence?: ExecutionBackendDescription };
+        sandbox = failure.sandboxEvidence;
         result.failure = failure.cleanupFailed ? "cleanup" : failure.code === "OUTPUT_LIMIT_EXCEEDED" ? "output-limit" : "sandbox";
         // No engine diagnostics, host paths or environment values in the tool response.
       }
@@ -204,7 +207,7 @@ export class PythonSkillRuntime implements SkillRuntime {
       }
       result.durationMs = Date.now() - started;
       await writeRunOwnedFileAtomically({ runDirectory: repoPath, path: `${archive}/execution.json`, subject: "Skill execution evidence",
-        content: JSON.stringify({ ...result, manifest, resolvedEntrypoint: entrypoint, request: { ...request, inputs: Object.fromEntries(Object.entries(request.inputs).map(([path, content]) => [path, { sha256: createHash("sha256").update(content).digest("hex"), size: Buffer.byteLength(content) }])) }, createdAt: new Date().toISOString(), sandbox: { ...backend.describeExecution(), mounts: ["staged-code-and-inputs:read-only", "outputs:bounded-tmpfs"], limitations: ["Python standard library only; no dependency installation"] } }) });
+        content: JSON.stringify({ ...result, manifest, resolvedEntrypoint: entrypoint, provider: { id: provider.id, capabilities: [...provider.capabilities] }, request: { ...request, inputs: Object.fromEntries(Object.entries(request.inputs).map(([path, content]) => [path, { sha256: createHash("sha256").update(content).digest("hex"), size: Buffer.byteLength(content) }])) }, createdAt: new Date().toISOString(), sandbox }) });
       return result;
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
