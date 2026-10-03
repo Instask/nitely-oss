@@ -1,0 +1,201 @@
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { z } from "zod";
+import { identifierSchema } from "../flow/schema.js";
+import { OciExecutionBackend, type OciExecutionBackendOptions } from "../run/execution/oci.js";
+import { ensureRunOwnedDirectory, listRunOwnedDirectory, readRunOwnedFile, writeRunOwnedFileAtomically } from "../run/owned-file.js";
+import { validateSkillDirectory } from "./load.js";
+import { withKnowledgeLease } from "../knowledge-repositories/lock.js";
+
+// Relative POSIX paths only: no shell syntax, hidden components or parent hops.
+const pathSchema = z.string().max(256).regex(/^[A-Za-z0-9_-][A-Za-z0-9_.-]*(?:\/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$/);
+export const skillExecutionSchema = z.object({
+  skillId: identifierSchema,
+  entrypoint: pathSchema.refine((path) => path.endsWith(".py"), "Python entrypoint required"),
+  inputs: z.record(pathSchema, z.string().max(1024 * 1024)).default({}),
+  outputs: z.array(pathSchema).max(16).default([]),
+  timeoutMs: z.number().int().min(100).max(60_000).default(10_000),
+}).strict();
+export type SkillExecutionRequest = z.input<typeof skillExecutionSchema>;
+export interface SkillExecutionResult {
+  executionId: string;
+  skillId: string;
+  contentHash: string;
+  durationMs: number;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  failure?: "timeout" | "process-exit" | "output-limit" | "sandbox" | "artifact" | "cleanup";
+  artifacts: { path: string; sha256: string; size: number }[];
+}
+export interface SkillRuntime {
+  execute(repoPath: string, request: SkillExecutionRequest): Promise<SkillExecutionResult>;
+}
+
+const PYTHON_WRAPPER = `import base64, json, os, stat, subprocess, sys, tempfile
+request = json.load(open('/workspace/request.json'))
+result = dict(stdout='', stderr='', exitCode=None, artifacts=[])
+with tempfile.TemporaryDirectory(dir='/tmp') as logs:
+    with open(logs + '/stdout', 'wb') as stdout, open(logs + '/stderr', 'wb') as stderr:
+        process = subprocess.Popen([sys.executable, '-I', '/workspace/code/' + request['entrypoint']],
+            cwd='/workspace/code', stdout=stdout, stderr=stderr,
+            env=dict(os.environ, NITELY_INPUT_DIR='/workspace/inputs'), start_new_session=True)
+        try:
+            result['exitCode'] = process.wait(timeout=request['timeoutMs'] / 1000)
+        except subprocess.TimeoutExpired:
+            result['failure'] = 'timeout'
+        finally:
+            # Descendants may keep writing after the entrypoint exits. Capture only after killing its group.
+            import signal
+            try: os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError: pass
+            process.wait()
+    total = 0
+    for name in ('stdout', 'stderr'):
+        with open(logs + '/' + name, 'rb') as log:
+            data = log.read(1048577)
+        total += len(data)
+        result[name] = data[:1048576].decode('utf8', errors='replace')
+    if total > 1048576: result['failure'] = 'output-limit'
+    if result.get('failure') is None and result['exitCode'] != 0: result['failure'] = 'process-exit'
+    if result.get('failure') is None:
+        try:
+            total = 0
+            for path in request['outputs']:
+                segments = path.split('/')
+                parent = os.open('/nitely/output', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    for segment in segments[:-1]:
+                        following = os.open(segment, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                        os.close(parent)
+                        parent = following
+                    descriptor = os.open(segments[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                    with os.fdopen(descriptor, 'rb') as output:
+                        details = os.fstat(output.fileno())
+                        if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1: raise ValueError('unsafe output')
+                        data = output.read(4194305)
+                    total += len(data)
+                    if len(data) > 4194304 or total > 8388608: raise ValueError('oversized output')
+                    result['artifacts'].append(dict(path=path, content=base64.b64encode(data).decode('ascii')))
+                finally: os.close(parent)
+        except Exception:
+            result['failure'] = 'artifact'
+            result['artifacts'] = []
+print(json.dumps(result))
+`;
+
+/** Repository-local Python only; the operator supplies the preinstalled image. */
+export class PythonSkillRuntime implements SkillRuntime {
+  constructor(private readonly options: Pick<OciExecutionBackendOptions, "image" | "env" | "processRunner" | "engineSocketVerifier">) {}
+
+  async execute(repoPath: string, raw: SkillExecutionRequest): Promise<SkillExecutionResult> {
+    skillExecutionSchema.parse(raw);
+    await ensureRunOwnedDirectory({ runDirectory: repoPath, path: ".nitely/skill-executions", subject: "Skill execution archive" });
+    // ponytail: one active Skill per repository; per-tenant admission if throughput matters.
+    return await withKnowledgeLease({ path: join(repoPath, ".nitely/skill-executions/execution.lock"), waitMs: 0 },
+      async () => await this.executeIsolated(repoPath, raw));
+  }
+
+  private async executeIsolated(repoPath: string, raw: SkillExecutionRequest): Promise<SkillExecutionResult> {
+    const request = skillExecutionSchema.parse(raw);
+    if (new Set(request.outputs).size !== request.outputs.length) throw new Error("duplicate Skill output paths");
+    if (Object.keys(request.inputs).length > 16 || Object.values(request.inputs).reduce((size, value) => size + Buffer.byteLength(value), 0) > 1024 * 1024) {
+      throw new Error("Skill inputs exceed the 1 MiB / 16 file limit");
+    }
+    const executionId = randomUUID();
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "nitely-skill-"));
+    const workspace = join(temporaryRoot, "workspace");
+    const started = Date.now();
+    try {
+      await mkdir(workspace, { mode: 0o755 });
+      const code = join(workspace, "code");
+      await mkdir(code, { mode: 0o755 });
+      let fileCount = 0;
+      let totalBytes = 0;
+      const source = `.nitely/skills/${request.skillId}`;
+      const copy = async (path: string): Promise<void> => {
+        const entries = await listRunOwnedDirectory({ runDirectory: repoPath, path: join(source, path), subject: "Skill package" });
+        for (const entry of entries) {
+          const relative = path ? `${path}/${entry.name}` : entry.name;
+          pathSchema.parse(relative);
+          if (++fileCount > 128) throw new Error("Skill package exceeds 128 entries");
+          if (entry.isDirectory()) {
+            await mkdir(join(code, relative), { mode: 0o755 });
+            await copy(relative);
+          } else {
+            const file = await readRunOwnedFile({ runDirectory: repoPath, path: join(source, relative), subject: "Skill package", maximumBytes: 4 * 1024 * 1024 });
+            totalBytes += file.content.byteLength;
+            if (totalBytes > 8 * 1024 * 1024) throw new Error("Skill package exceeds 8 MiB");
+            await writeFile(join(code, relative), file.content, { flag: "wx", mode: 0o644 });
+          }
+        }
+      };
+      await copy("");
+      const skill = await validateSkillDirectory({ skillDirectory: code, skillId: request.skillId });
+      if (!skill.resources.some((file) => file.relativePath === request.entrypoint)) throw new Error("Skill entrypoint is not a package resource");
+      for (const [path, content] of Object.entries(request.inputs)) {
+        await mkdir(dirname(join(workspace, "inputs", path)), { recursive: true, mode: 0o755 });
+        await writeFile(join(workspace, "inputs", path), content, { flag: "wx", mode: 0o644 });
+      }
+      const output = join(workspace, "outputs");
+      await mkdir(output, { mode: 0o700 });
+      await writeFile(join(workspace, "request.json"), JSON.stringify(request), { mode: 0o644 });
+      await writeFile(join(workspace, "execute.py"), PYTHON_WRAPPER, { mode: 0o644 });
+      const backend = new OciExecutionBackend({ ...this.options, uid: 1000, gid: 1000,
+        environmentAllowlist: [], secretAllowlist: [], networkAllowlist: [],
+        resources: { cpus: 1, memoryBytes: 256 * 1024 * 1024, pids: 64, tmpfsBytes: 32 * 1024 * 1024,
+          maxFileBytes: 4 * 1024 * 1024, maxCapturedOutputBytes: 20 * 1024 * 1024, timeoutMs: request.timeoutMs + 5000 } });
+      const result: SkillExecutionResult = { executionId, skillId: request.skillId, contentHash: skill.contentHash,
+        durationMs: 0, exitCode: null, stdout: "", stderr: "", artifacts: [] };
+      let captured: Array<{ path: string; content: string }> = [];
+      try {
+        await backend.prepareForRun();
+        const command = await backend.runCommand({ runId: executionId, path: workspace },
+          "python3 -I /workspace/execute.py", { isolatedWorkspace: true, outputDirectory: output, timeoutMs: request.timeoutMs + 5000, runId: executionId, stageId: request.skillId });
+        if (command.exitCode !== 0) {
+          result.exitCode = command.exitCode;
+          result.failure = command.exitCode === 124 ? "timeout" : "process-exit";
+        } else {
+          const payload = z.object({ stdout: z.string().max(1024 * 1024), stderr: z.string().max(1024 * 1024),
+            exitCode: z.number().int().nullable(), failure: z.enum(["timeout", "process-exit", "output-limit", "artifact"]).optional(),
+            artifacts: z.array(z.object({ path: pathSchema, content: z.string().max(6 * 1024 * 1024) }).strict()).max(16) }).strict().parse(JSON.parse(command.stdout));
+          Object.assign(result, { stdout: payload.stdout, stderr: payload.stderr, exitCode: payload.exitCode, ...(payload.failure ? { failure: payload.failure } : {}) });
+          captured = payload.artifacts;
+        }
+      } catch (error) {
+        const failure = error as { code?: string; cleanupFailed?: boolean };
+        result.failure = failure.cleanupFailed ? "cleanup" : failure.code === "OUTPUT_LIMIT_EXCEEDED" ? "output-limit" : "sandbox";
+        // No engine diagnostics, host paths or environment values in the tool response.
+      }
+      const archive = `.nitely/skill-executions/${executionId}`;
+      await ensureRunOwnedDirectory({ runDirectory: repoPath, path: archive, subject: "Skill execution archive" });
+      if (!result.failure) {
+        try {
+          let artifactBytes = 0;
+          // Materialize bytes only after OCI cleanup. Workload writes stay in bounded tmpfs.
+          if (captured.length !== request.outputs.length || new Set(captured.map((artifact) => artifact.path)).size !== captured.length) throw new Error("invalid artifact set");
+          for (const artifact of captured) {
+            const path = artifact.path;
+            if (!request.outputs.includes(path) || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(artifact.content)) throw new Error("invalid artifact");
+            const file = { content: Buffer.from(artifact.content, "base64") };
+            if (file.content.byteLength > 4 * 1024 * 1024) throw new Error("oversized artifact");
+            artifactBytes += file.content.byteLength;
+            if (artifactBytes > 8 * 1024 * 1024) throw new Error("Skill artifacts exceed 8 MiB");
+            const artifactPath = `${archive}/outputs/${path}`;
+            await ensureRunOwnedDirectory({ runDirectory: repoPath, path: dirname(artifactPath), subject: "Skill artifact directory" });
+            await writeRunOwnedFileAtomically({ runDirectory: repoPath, path: artifactPath, subject: "Skill artifact", content: file.content });
+            result.artifacts.push({ path: artifactPath, sha256: createHash("sha256").update(file.content).digest("hex"), size: file.content.byteLength });
+          }
+        } catch { result.failure = "artifact"; }
+      }
+      result.durationMs = Date.now() - started;
+      await writeRunOwnedFileAtomically({ runDirectory: repoPath, path: `${archive}/execution.json`, subject: "Skill execution evidence",
+        content: JSON.stringify({ ...result, request: { ...request, inputs: Object.fromEntries(Object.entries(request.inputs).map(([path, content]) => [path, { sha256: createHash("sha256").update(content).digest("hex"), size: Buffer.byteLength(content) }])) }, createdAt: new Date().toISOString(), sandbox: { ...backend.describeExecution(), mounts: ["staged-code-and-inputs:read-only", "outputs:bounded-tmpfs"], limitations: ["Python standard library only; no dependency installation"] } }) });
+      return result;
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  }
+}

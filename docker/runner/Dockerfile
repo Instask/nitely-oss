@@ -3,7 +3,7 @@
 # Nitely runner image family.
 #
 # Two targets:
-#   command  node + pnpm + git + bash, for offline `command` stages
+#   command  node + pnpm + git + bash + Python, for commands and Skills
 #   agent    command plus the agent CLIs named by AGENT_CLIS
 #
 # Nothing here bakes a credential. Agent CLIs read their tokens from the
@@ -37,6 +37,7 @@ RUN set -eux; \
       ca-certificates \
       git \
       openssh-client \
+      python3 \
       procps; \
     rm -rf /var/lib/apt/lists/*; \
     corepack enable; \

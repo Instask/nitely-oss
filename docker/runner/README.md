@@ -8,7 +8,7 @@ directory is the in-repo baseline for building one.
 
 | Variant | Contains | Use for |
 | --- | --- | --- |
-| `command` | Debian slim, Node 24, pnpm, git, bash, ca-certificates | offline `command` stages |
+| `command` | Debian slim, Node 24, pnpm, git, bash, Python 3, ca-certificates | offline `command` stages and Python Skills |
 | `agent` | `command` plus the agent CLIs you name | `agent` stages and review gates |
 
 The `agent` variant installs nothing by default. Name the CLIs you want and the

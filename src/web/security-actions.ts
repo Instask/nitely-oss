@@ -64,6 +64,9 @@ export function webSecurityActionForRequest(
   if (method === "POST" && pathname === "/api/skills/preview") {
     return action("skills.preview", "skills:manage", { type: "skill" });
   }
+  if (method === "POST" && pathname === "/api/skills/execute") {
+    return action("skills.execute", "runs:start", { type: "skill" });
+  }
   if (method === "POST" && pathname === "/api/skills/import") {
     return action("skills.import", "skills:manage", { type: "skill" });
   }

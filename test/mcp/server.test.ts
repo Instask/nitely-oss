@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,6 +17,7 @@ import {
 } from "../../src/web/api-tokens.js";
 import { startWebServer } from "../../src/web/server.js";
 import { createTokenOwner } from "../helpers/token-owner.js";
+import { listPublicMemberships } from "../../src/web/organizations.js";
 
 async function connectClient(input: NitelyMcpServerInput) {
   const server = createNitelyMcpServer(input);
@@ -43,6 +44,34 @@ function jsonResponse(value: unknown, status = 200): Response {
 }
 
 describe("Nitely MCP server", () => {
+  it("executes Skills through the authenticated repository API and rejects read-only tokens and unknown repositories", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "nitely-skill-api-"));
+    const owner = await createTokenOwner(repo);
+    const organizationId = (await listPublicMemberships(repo, owner.id))[0].organizationId;
+    const token = await createApiToken(repo, { ownerUserId: owner.id, name: "skill-tool", capabilities: ["runs:start"], allowHighImpact: true });
+    const readToken = await createApiToken(repo, { ownerUserId: owner.id, name: "read-only", capabilities: ["runs:read"] });
+    const outsider = await createTokenOwner(repo, "outsider@example.test");
+    const outsiderToken = await createApiToken(repo, { ownerUserId: outsider.id, name: "outsider", capabilities: ["runs:start"], allowHighImpact: true });
+    const calls: unknown[] = [];
+    const web = await startWebServer({ repoPath: repo, host: "127.0.0.1", port: 0, authMode: "required", authEnv: {},
+      providerEnv: { NITELY_EXECUTION_BACKEND: "local", NITELY_ALLOW_UNSAFE_LOCAL_EXECUTION: "true" },
+      repositories: [{ id: "home", path: repo, synthetic: true, organizationId }],
+      skillRuntime: { execute: async (path, request) => { calls.push({ path, request }); return { executionId: "execution-1", skillId: request.skillId, contentHash: "hash", durationMs: 10, exitCode: 0, stdout: "done", stderr: "", artifacts: [] }; } } });
+    const connected = await connectClient({ serverUrl: web.url, apiToken: token.token });
+    const readOnly = await connectClient({ serverUrl: web.url, apiToken: readToken.token });
+    const outside = await connectClient({ serverUrl: web.url, apiToken: outsiderToken.token });
+    try {
+      const args = { repoId: "home", skillId: "example", entrypoint: "main.py", inputs: { "input.txt": "declared" } };
+      const result = await connected.client.callTool({ name: "execute_skill", arguments: args });
+      expect(result.isError).not.toBe(true);
+      expect(calls).toEqual([{ path: repo, request: { skillId: "example", entrypoint: "main.py", inputs: { "input.txt": "declared" }, outputs: [], timeoutMs: 10000 } }]);
+      expect((await readOnly.client.callTool({ name: "execute_skill", arguments: args })).isError).toBe(true);
+      expect((await outside.client.callTool({ name: "execute_skill", arguments: args })).isError).toBe(true);
+      expect((await connected.client.callTool({ name: "execute_skill", arguments: { ...args, repoId: "foreign" } })).isError).toBe(true);
+      expect((await connected.client.callTool({ name: "execute_skill", arguments: { ...args, entrypoint: "../host.py" } })).isError).toBe(true);
+      expect(calls).toHaveLength(1);
+    } finally { await outside.close(); await readOnly.close(); await connected.close(); await web.close(); await rm(repo, { recursive: true, force: true }); }
+  });
   it("lists the first-slice tools and maps every call onto the existing JSON API", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const connected = await connectClient({
@@ -57,6 +86,7 @@ describe("Nitely MCP server", () => {
     try {
       const tools = await connected.client.listTools();
       expect(tools.tools.map((tool) => tool.name)).toEqual([
+        "execute_skill",
         "list_tasks",
         "list_flows",
         "get_task",
