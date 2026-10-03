@@ -403,12 +403,14 @@ async function waitFor<T>(
   read: () => Promise<T>,
   matches: (value: T) => boolean,
 ): Promise<T> {
+  const deadline = Date.now() + 5_000;
   let latest = await read();
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  while (Date.now() < deadline) {
     if (matches(latest)) return latest;
     await new Promise((resolve) => setTimeout(resolve, 10));
     latest = await read();
   }
+  expect(matches(latest), "Web API state did not reach its expected predicate within 5 seconds").toBe(true);
   return latest;
 }
 
