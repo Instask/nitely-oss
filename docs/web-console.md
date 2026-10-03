@@ -533,7 +533,7 @@ limits, including temporary-directory cleanup after each outcome.
 
 #### Execution manifest v1
 
-`skill.yaml` grants executable authority; `SKILL.md` supplies instructions only.
+`skill.yaml` declares requested executable authority; `SKILL.md` supplies instructions only.
 Without a manifest a package remains instruction-only. A complete example is:
 
 ```yaml
@@ -609,3 +609,36 @@ records the selected provider and capabilities, including sandbox policy on
 bounded-output and cleanup failures. Third-party provider adapters are operator
 code and must verify their own runtime and enforcement before advertising them;
 agent requests and manifest provider names cannot select or upgrade a backend.
+
+#### Package approval
+
+Every executable package starts untrusted, including local imports. The MCP
+`inspect_skill` tool (`runs:read`) returns its SHA256 identity, version, manifest
+and current approval status. An agent cannot approve a package. An organization
+owner must use a browser session and reauthenticate with their password:
+
+```text
+POST /api/skills/approve
+{"repoId":"home","skillId":"summarize","contentHash":"<inspected SHA256>","password":"<owner password>"}
+
+POST /api/skills/revoke-approval
+{"repoId":"home","skillId":"summarize","password":"<owner password>"}
+```
+
+API tokens cannot call either approval endpoint, even with an owner cookie.
+Approval records are controller-owned files outside the package and bind the
+reviewed content hash to the current organization and repository. Execution
+checks the hash of the same bounded snapshot that will run. Any changed code,
+resource or manifest needs fresh approval; clients may also pin
+`expectedContentHash` in `execute_skill`. Revocation blocks future admissions;
+it does not interrupt an already admitted execution. Owner approval cannot
+enable network access, secrets or dependency installation in this runtime.
+
+Imports use bounded, descriptor-relative snapshots and verify the copied hash
+before replacing an existing package. Symlinks, hardlinks and oversized files
+are rejected; a failed replacement preserves the previous package. Importing
+instructions remains supported without execution approval. No package-provided
+install hooks run. Execution evidence includes version/hash, approval identity,
+provider and granted authority. Denied attempts record a reason and no granted
+authority. Organization audit records approval, revocation and execution
+outcomes without passwords, API tokens or input contents.

@@ -6,6 +6,8 @@ import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PythonSkillRuntime, skillExecutionSchema, type SkillRuntime } from "../skills/runtime.js";
 import { SkillManifestError } from "../skills/manifest.js";
+import { approveRepositorySkill, inspectRepositorySkill, revokeRepositorySkill, SkillTrustError, skillHashSchema } from "../skills/trust.js";
+import { identifierSchema } from "../flow/schema.js";
 
 import {
   GitHubWebhookRequestError,
@@ -8610,6 +8612,48 @@ async function handleApiRequest(
     });
     return true;
   }
+  if (request.method === "POST" && ["/api/skills/inspect", "/api/skills/approve", "/api/skills/revoke-approval"].includes(url.pathname)) {
+    const user = await requireUserContext(request, input, homeRepoPath);
+    const body = requireObject(await readRequestJson(request));
+    const allowed = url.pathname === "/api/skills/inspect" ? ["repoId", "skillId"] : url.pathname === "/api/skills/approve" ? ["repoId", "skillId", "contentHash", "password"] : ["repoId", "skillId", "password"];
+    if (Object.keys(body).some((key) => !allowed.includes(key)) || typeof body.repoId !== "string" || !identifierSchema.safeParse(body.skillId).success) throw new WebInputError("invalid Skill identity request");
+    const skillId = body.skillId as string;
+    const repository = requireVisibleRepository(repositories, body.repoId, user);
+    if (user.authMode === "required" && repository.organizationId && !user.memberships?.some((membership) => membership.organizationId === repository.organizationId)) throw new WebNotFoundError("repository not found");
+    try {
+      if (url.pathname === "/api/skills/inspect") {
+        sendJson(response, 200, { skill: await inspectRepositorySkill(repository.path, skillId, { organizationId: repository.organizationId, repositoryId: repository.id }) });
+        return true;
+      }
+      const sessionId = parseCookies(request.headers.cookie).nitely_session;
+      if (user.authMode !== "required" || !sessionId || authorizedApiTokenRequests.has(request) || !repository.organizationId ||
+          user.memberships?.find((membership) => membership.organizationId === repository.organizationId)?.role !== "owner") throw new WebForbiddenError("Skill approval requires an owner browser session");
+      const verified = typeof body.password === "string" ? await verifyUserPassword(homeRepoPath, user.email, body.password) : null;
+      const current = await readSessionUser(homeRepoPath, sessionId, { organizationId: repository.organizationId, touch: false });
+      if (!verified || verified.id !== user.id || current?.id !== user.id || current.memberships?.find((membership) => membership.organizationId === repository.organizationId)?.role !== "owner") throw new WebForbiddenError("owner password reauthentication is required");
+      await appendSecurityAuditEvent(homeRepoPath, { action: "skills.approval.requested", permission: "organizations:manage", decision: "allow", outcome: "success", httpStatus: 200, reasonCode: "owner-reauthenticated",
+        actor: { type: "user", id: user.id, organizationId: repository.organizationId, organizationRole: "owner" }, organizationId: repository.organizationId,
+        context: { repositoryId: repository.id }, target: { type: "skill", id: skillId } });
+      let result: unknown;
+      if (url.pathname === "/api/skills/approve") {
+        if (!skillHashSchema.safeParse(body.contentHash).success) throw new WebInputError("valid inspected contentHash is required");
+        const approval = await approveRepositorySkill(repository.path, { skillId, contentHash: body.contentHash as string, actorId: user.id,
+          scope: { organizationId: repository.organizationId, repositoryId: repository.id } });
+        result = { approval };
+      } else {
+        await revokeRepositorySkill(repository.path, skillId);
+        result = { revoked: true };
+      }
+      await appendSecurityAuditEvent(homeRepoPath, { action: url.pathname === "/api/skills/approve" ? "skills.approved" : "skills.approval.revoked", permission: "organizations:manage",
+        decision: "allow", outcome: "success", httpStatus: 200, reasonCode: "ok", actor: { type: "user", id: user.id, organizationId: repository.organizationId, organizationRole: "owner" },
+        organizationId: repository.organizationId, context: { repositoryId: repository.id }, target: { type: "skill", id: skillId } });
+      sendJson(response, 200, result);
+    } catch (error) {
+      if (isWebError(error)) throw error;
+      throw new WebInputError(error instanceof SkillManifestError ? error.message : "Skill package validation failed");
+    }
+    return true;
+  }
   if (request.method === "POST" && url.pathname === "/api/skills/execute") {
     const user = await requireUserContext(request, input, homeRepoPath);
     const body = requireObject(await readRequestJson(request));
@@ -8625,7 +8669,7 @@ async function handleApiRequest(
     const env = input.providerEnv || input.authEnv ? { ...input.providerEnv, ...input.authEnv } : process.env;
     const runtime = input.skillRuntime ?? new PythonSkillRuntime({ image: env.NITELY_OCI_IMAGE ?? "", env });
     try {
-      const result = await runtime.execute(repository.path, parsed.data);
+      const result = await runtime.execute(repository.path, parsed.data, { organizationId: repository.organizationId, repositoryId: repository.id });
       await appendSecurityAuditEvent(homeRepoPath, { action: "skills.execution.finished", permission: "runs:start", decision: "allow",
         outcome: result.failure ? "error" : "success", httpStatus: result.failure ? 422 : 200, reasonCode: result.failure ?? "ok",
         actor: { type: user.authMode === "local" ? "local" : "user", id: user.id, organizationId: repository.organizationId,
@@ -8634,6 +8678,10 @@ async function handleApiRequest(
         target: { type: "skill", id: `${result.skillId}/${result.executionId}` } });
       sendJson(response, result.failure ? 422 : 200, { execution: result });
     } catch (error) {
+      await appendSecurityAuditEvent(homeRepoPath, { action: "skills.execution.denied", decision: "deny", outcome: "error", httpStatus: 400,
+        reasonCode: error instanceof SkillTrustError ? error.code : "package-policy", actor: { type: user.authMode === "local" ? "local" : "user", id: user.id, organizationId: repository.organizationId },
+        organizationId: repository.organizationId, source: "runtime", context: { repositoryId: repository.id },
+        target: { type: "skill", id: `${parsed.data.skillId}/${(error as { executionId?: string }).executionId ?? "unstarted"}` } });
       if (error instanceof SkillManifestError) throw new WebInputError(error.message);
       throw new WebInputError("Skill execution could not be prepared or cleaned up");
     }

@@ -2,6 +2,7 @@ import { mkdtemp,mkdir,writeFile,readFile,rm,readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
+import { approveRepositorySkill, inspectRepositorySkill } from '../src/skills/trust.js';
 import { PythonSkillRuntime } from '../src/skills/runtime.js';
 const image=process.env.NITELY_OCI_IMAGE;
 if(!image)throw new Error('Set NITELY_OCI_IMAGE to a local image containing Python 3 and configure a rootless engine.');
@@ -30,6 +31,8 @@ try {
  ];
  for(const c of cases){
   await writeFile(join(pkg,'main.py'),c.code);
+  const identity=await inspectRepositorySkill(repo,'example');
+  await approveRepositorySkill(repo,{skillId:'example',contentHash:identity.contentHash,actorId:'verification-operator'});
   const r=await runtime.execute(repo,{skillId:'example',entrypoint:'main.py',inputs:{'value.txt':'declared'},outputs:c.outputs??[],timeoutMs:c.timeoutMs??5000});
   console.log(JSON.stringify({name:c.name,executionId:r.executionId,failure:r.failure,exitCode:r.exitCode,durationMs:r.durationMs}));assert.equal(r.failure,c.failure);
   if(c.outputs?.length && !c.failure)assert.equal(await readFile(join(repo,r.artifacts[0].path),'utf8'),'artifact');

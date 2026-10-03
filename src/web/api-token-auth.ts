@@ -23,6 +23,7 @@ export function apiTokenActionForRequest(
   method: string | undefined,
   pathname: string,
 ): ApiTokenAction | null {
+  if (method === "POST" && pathname === "/api/skills/inspect") return { action: "skills.inspect", capability: "runs:read" };
   if (method === "POST" && pathname === "/api/skills/execute") {
     return { action: "skills.execute", capability: "runs:start" };
   }

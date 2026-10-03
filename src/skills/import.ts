@@ -1,13 +1,18 @@
 import {
-  copyFile,
+  mkdtemp,
   lstat,
   mkdir,
   rename,
   rm,
 } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { ensureRunOwnedDirectory } from "../run/owned-file.js";
+import { withKnowledgeLease } from "../knowledge-repositories/lock.js";
+import { snapshotSkillPackage } from "./package.js";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
-import { validateSkillDirectory } from "./load.js";
+import type { ValidatedSkillDirectory } from "./load.js";
 
 export interface ImportLocalSkillInput {
   sourcePath: string;
@@ -34,7 +39,7 @@ interface ResolvedLocalSkillImport {
   sourceSkillPath: string;
   targetDirectory: string;
   preview: LocalSkillImportPreview;
-  resources: Array<{ relativePath: string; absolutePath: string }>;
+  includeResources: boolean;
 }
 
 function toPosixPath(path: string): string {
@@ -65,19 +70,10 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-async function copyValidatedSkill(input: {
-  sourceSkillPath: string;
-  targetDirectory: string;
-  resources: Array<{ relativePath: string; absolutePath: string }>;
-}): Promise<void> {
-  await mkdir(input.targetDirectory, { recursive: true });
-  await copyFile(input.sourceSkillPath, join(input.targetDirectory, "SKILL.md"));
-  for (const resource of input.resources) {
-    const targetPath = join(input.targetDirectory, resource.relativePath);
-    requirePathInside(input.targetDirectory, targetPath, "skill import target");
-    await mkdir(dirname(targetPath), { recursive: true });
-    await copyFile(resource.absolutePath, targetPath);
-  }
+async function snapshotImportSource(sourceSkillPath: string, destination: string, includeResources: boolean): Promise<ValidatedSkillDirectory> {
+  const directory = dirname(sourceSkillPath);
+  await mkdir(destination, { mode: 0o700 });
+  return await snapshotSkillPackage({ rootDirectory: dirname(directory), sourcePath: basename(directory), destination, includeResources });
 }
 
 async function resolveLocalSkillImport(
@@ -110,11 +106,10 @@ async function resolveLocalSkillImport(
     throw new Error(`skill import: source SKILL.md is a symlink: ${input.sourcePath}`);
   }
 
-  const validated = await validateSkillDirectory({
-    skillDirectory,
-    includeResources: sourceIsDirectory,
-    errorRoot: skillDirectory,
-  });
+  const inspection = await mkdtemp(join(tmpdir(), "nitely-skill-import-"));
+  let validated: ValidatedSkillDirectory;
+  try { validated = await snapshotImportSource(sourceSkillPath, join(inspection, "code"), sourceIsDirectory); }
+  finally { await rm(inspection, { recursive: true, force: true }); }
 
   const skillsRoot = join(repoPath, ".nitely", "skills");
   const targetDirectory = join(skillsRoot, validated.id);
@@ -135,7 +130,7 @@ async function resolveLocalSkillImport(
       targetExists,
       overwriteRequired: targetExists && !input.overwrite,
     },
-    resources: validated.resources,
+    includeResources: sourceIsDirectory,
   };
 }
 
@@ -156,34 +151,30 @@ export async function importLocalSkill(
     );
   }
 
-  const tempDirectory = join(
-    dirname(resolved.targetDirectory),
-    `.import-${resolved.preview.id}-${process.pid}-${Date.now()}`,
-  );
-  requirePathInside(dirname(resolved.targetDirectory), tempDirectory, "skill import temp");
-  await rm(tempDirectory, { recursive: true, force: true });
-
-  try {
-    await copyValidatedSkill({
-      sourceSkillPath: resolved.sourceSkillPath,
-      targetDirectory: tempDirectory,
-      resources: resolved.resources,
-    });
-
-    if (input.overwrite) {
-      await rm(resolved.targetDirectory, { recursive: true, force: true });
-    }
-    await mkdir(dirname(resolved.targetDirectory), { recursive: true });
-    await rename(tempDirectory, resolved.targetDirectory);
-  } catch (error) {
-    await rm(tempDirectory, { recursive: true, force: true });
-    throw error;
-  }
-
-  return {
-    id: resolved.preview.id,
-    targetPath: resolved.preview.targetPath,
-    contentHash: resolved.preview.contentHash,
-    resourceCount: resolved.preview.resourceCount,
-  };
+  await ensureRunOwnedDirectory({ runDirectory: input.repoPath, path: ".nitely/skills", subject: "Skill installation directory" });
+  return await withKnowledgeLease({ path: join(resolve(input.repoPath), ".nitely/skills-install.lock"), waitMs: 10_000 }, async () => {
+    if (!input.overwrite && await pathExists(resolved.targetDirectory)) throw new Error(`skill import: target already exists: .nitely/skills/${resolved.preview.id} (use --overwrite)`);
+    const suffix = randomUUID();
+    const tempDirectory = join(dirname(resolved.targetDirectory), `.import-${suffix}`);
+    const backupDirectory = join(dirname(resolved.targetDirectory), `.backup-${suffix}`);
+    let backedUp = false;
+    let installed = false;
+    try {
+      const snapshot = await snapshotImportSource(resolved.sourceSkillPath, tempDirectory, resolved.includeResources);
+      if (snapshot.contentHash !== resolved.preview.contentHash) throw new Error("skill import: package changed after validation; retry the import");
+      if (input.overwrite && await pathExists(resolved.targetDirectory)) {
+        const current = await lstat(resolved.targetDirectory);
+        if (!current.isDirectory() || current.isSymbolicLink()) throw new Error("skill import: unsafe existing target");
+        await rename(resolved.targetDirectory, backupDirectory);
+        backedUp = true;
+      }
+      await rename(tempDirectory, resolved.targetDirectory);
+      installed = true;
+      if (backedUp) await rm(backupDirectory, { recursive: true, force: true });
+    } catch (error) {
+      if (backedUp && !installed) await rename(backupDirectory, resolved.targetDirectory);
+      throw error;
+    } finally { await rm(tempDirectory, { recursive: true, force: true }); }
+    return { id: resolved.preview.id, targetPath: resolved.preview.targetPath, contentHash: resolved.preview.contentHash, resourceCount: resolved.preview.resourceCount };
+  });
 }
