@@ -487,3 +487,46 @@ Certificate rotation uses an explicit overlap: configure old and new valid
 certificates, start new requests, then remove the retired certificate. Validation
 continues throughout overlap; expired/not-yet-valid certificates cannot verify a
 login. Changing configuration invalidates pending requests, which must restart.
+
+### Executable Python Skills
+
+The MCP `execute_skill` tool calls `POST /api/skills/execute` with `runs:start`
+authorization and current repository/organization access. The request contains
+`repoId`, `skillId`, `entrypoint` (a relative `.py` package resource), optional
+`inputs` (relative UTF-8 filenames to content), `outputs` (declared relative
+filenames), and `timeoutMs` (100–60,000; default 10,000). Example:
+
+```json
+{"repoId":"home","skillId":"summarize","entrypoint":"main.py","inputs":{"source.txt":"Example text"},"outputs":["summary.txt"]}
+```
+
+Packages live in `.nitely/skills/<skillId>` and retain the required `SKILL.md`.
+Code and declared inputs are copied using Linux descriptor-relative, no-symlink
+reads into a private temporary parent. Only that staged workspace is mounted,
+read-only; outputs and scratch storage use separate 32 MiB container tmpfs.
+Python reads inputs at `/workspace/inputs` (`NITELY_INPUT_DIR`) and writes declared
+outputs under `NITELY_OUTPUT_DIR`. Execution uses Python isolated mode, UID/GID
+1000, no capabilities, no Docker socket, no forwarded provider credentials and
+no network. The operator must preload a Python 3 image as `NITELY_OCI_IMAGE` and
+configure a rootless Docker engine with cgroup v2. The runner command image now
+includes Python; no package installation occurs during Skill execution.
+
+Limits are one CPU, 256 MiB memory, 64 processes, 4 MiB per file, 1 MiB combined
+stdout/stderr, 16 input/output files and 8 MiB total output artifacts. There is
+one active execution per repository. Container startup/capture has five seconds
+of additional deadline allowance. The result reports duration, exit code,
+bounded logs, structured failure and artifact paths/hashes/sizes. Memory/process
+limit failures retain their process exit status; sandbox cleanup failures are
+reported explicitly. Exit status zero alone does not accept invalid outputs.
+
+After container removal, declared outputs and `execution.json` are archived at
+`.nitely/skill-executions/<executionId>`; evidence includes the package hash,
+immutable image identity, resource policy and input hashes rather than input
+contents. Temporary host files are removed on success, error and timeout.
+A host/controller crash still requires the existing OCI expiry reaper and
+operator temporary-directory cleanup. This slice supports Python's standard
+library only. For real-container verification, run
+`NITELY_OCI_IMAGE=<local-python-image> pnpm exec tsx scripts/verify-python-skills.mts`
+on the rootless Linux host; it checks output capture, host/network denial,
+timeout, output bounds, symlink rejection, restrictive permissions and memory
+limits, including temporary-directory cleanup after each outcome.

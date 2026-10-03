@@ -470,6 +470,7 @@ function workloadAndCleanupError(input: {
     `${workloadMessage}; OCI container cleanup failed for ${input.containerName}: ${cleanupMessage}`,
     input.primaryError !== undefined ? { cause: input.primaryError } : undefined,
   ) as Error & { code?: unknown };
+  Object.assign(combined, { cleanupFailed: true });
   if (
     typeof input.primaryError === "object" &&
     input.primaryError !== null &&
@@ -899,6 +900,9 @@ export class OciExecutionBackend implements ExecutionBackend {
     options?: RunCommandOptions,
   ): Promise<CommandResult> {
     const domains = [...new Set((options?.networkDomains ?? []).map(normalizeAllowlistDomain))];
+    if (options?.isolatedWorkspace && domains.length > 0) {
+      throw new Error("isolated workspace commands require deny-all networking");
+    }
     if (domains.length === 0) {
       const plan = await this.commandPlan(ws, command, options);
       return await this.executePlan(plan);
@@ -1002,7 +1006,7 @@ export class OciExecutionBackend implements ExecutionBackend {
     }
     await mkdir(outputPath, { recursive: true });
     const workspace = await realpath(ws.path);
-    const runRoot = await realpath(dirname(workspace));
+    const runRoot = options?.isolatedWorkspace ? workspace : await realpath(dirname(workspace));
     const output = await realpath(outputPath);
     if (!isContained(runRoot, output)) {
       throw new Error(`OCI output directory escapes the task run directory: ${outputPath}`);
@@ -1026,7 +1030,7 @@ export class OciExecutionBackend implements ExecutionBackend {
     });
     const networkArgs = networkPlan?.dockerArgs ?? ["--network=none"];
     const runArtifactMountArgs =
-      visibleInputPaths === undefined
+      options?.isolatedWorkspace ? [] : visibleInputPaths === undefined
         ? [
             "--mount",
             `type=bind,src=${runRoot},dst=/nitely/run,readonly`,
@@ -1064,13 +1068,13 @@ export class OciExecutionBackend implements ExecutionBackend {
       `/tmp:rw,${this.tmpfsExec ? "exec," : ""}nosuid,nodev,${this.tmpfsExec ? "" : "noexec,"}size=${this.resources.tmpfsBytes}`,
       ...(workspaceMountArgs ?? [
         "--mount",
-        `type=bind,src=${workspace},dst=/workspace`,
+        `type=bind,src=${workspace},dst=/workspace${options?.isolatedWorkspace ? ",readonly" : ""}`,
       ]),
-      "--mount",
-      "type=bind,src=/dev/null,dst=/workspace/.git,readonly",
+      ...(options?.isolatedWorkspace ? [] : ["--mount", "type=bind,src=/dev/null,dst=/workspace/.git,readonly"]),
       ...runArtifactMountArgs,
-      "--mount",
-      `type=bind,src=${output},dst=/nitely/output`,
+      ...(options?.isolatedWorkspace
+        ? ["--tmpfs", `/nitely/output:rw,nosuid,nodev,noexec,mode=1777,size=${this.resources.tmpfsBytes}`]
+        : ["--mount", `type=bind,src=${output},dst=/nitely/output`]),
       ...this.containerEnvironmentArgs(
         options,
         networkPlan?.containerEnv,

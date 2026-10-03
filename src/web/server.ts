@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { isIP } from "node:net";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { PythonSkillRuntime, skillExecutionSchema, type SkillRuntime } from "../skills/runtime.js";
 
 import {
   GitHubWebhookRequestError,
@@ -496,6 +497,7 @@ const staticDir = resolve(
 );
 
 export interface StartWebServerInput {
+  skillRuntime?: SkillRuntime;
   repoPath: string;
   repositories?: WebRepositoryInput[];
   /** Test seam for the home-checkout migration; defaults to reading git. */
@@ -8604,6 +8606,34 @@ async function handleApiRequest(
     sendJson(response, 200, {
       skills: await listRepositorySkills(visibleRepositories(repositories, user)),
     });
+    return true;
+  }
+  if (request.method === "POST" && url.pathname === "/api/skills/execute") {
+    const user = await requireUserContext(request, input, homeRepoPath);
+    const body = requireObject(await readRequestJson(request));
+    const repoId = typeof body.repoId === "string" ? body.repoId : "";
+    const repository = requireVisibleRepository(repositories, repoId, user);
+    if (user.authMode === "required" && repository.organizationId && !user.memberships?.some((membership) => membership.organizationId === repository.organizationId)) {
+      throw new WebNotFoundError("repository not found");
+    }
+    requireWriteAccessToOrganization(user, repository.organizationId, "runs:start");
+    const { repoId: _repoId, ...execution } = body;
+    const parsed = skillExecutionSchema.safeParse(execution);
+    if (!parsed.success) throw new WebInputError("invalid Skill execution request");
+    const env = input.providerEnv || input.authEnv ? { ...input.providerEnv, ...input.authEnv } : process.env;
+    const runtime = input.skillRuntime ?? new PythonSkillRuntime({ image: env.NITELY_OCI_IMAGE ?? "", env });
+    try {
+      const result = await runtime.execute(repository.path, parsed.data);
+      await appendSecurityAuditEvent(homeRepoPath, { action: "skills.execution.finished", permission: "runs:start", decision: "allow",
+        outcome: result.failure ? "error" : "success", httpStatus: result.failure ? 422 : 200, reasonCode: result.failure ?? "ok",
+        actor: { type: user.authMode === "local" ? "local" : "user", id: user.id, organizationId: repository.organizationId,
+          organizationRole: user.memberships?.find((membership) => membership.organizationId === repository.organizationId)?.role },
+        organizationId: repository.organizationId, source: "runtime", context: { repositoryId: repository.id },
+        target: { type: "skill", id: `${result.skillId}/${result.executionId}` } });
+      sendJson(response, result.failure ? 422 : 200, { execution: result });
+    } catch {
+      throw new WebInputError("Skill execution could not be prepared or cleaned up");
+    }
     return true;
   }
   if (request.method === "POST" && url.pathname === "/api/skills/preview") {

@@ -145,7 +145,7 @@ if [[ "${verify}" -eq 1 ]]; then
     --tmpfs /tmp:rw,nosuid,nodev,size=64m \
     --env HOME=/tmp/nitely-home \
     "${tag}" \
-    sh -lc 'set -eux; mkdir -p "$HOME"; command -v sh; command -v git; command -v bash; node --version; pnpm --version'
+    sh -lc 'set -eux; mkdir -p "$HOME"; command -v sh; command -v git; command -v bash; python3 --version; node --version; pnpm --version'
 fi
 
 echo "built ${tag} (variant ${variant})"

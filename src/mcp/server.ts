@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { skillExecutionSchema } from "../skills/runtime.js";
 
 type FetchFunction = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -285,6 +286,12 @@ export function createNitelyMcpServer(input: NitelyMcpServerInput): McpServer {
     }
   };
 
+  server.registerTool("execute_skill", {
+    title: "Execute repository Skill",
+    description: "Execute a repository-local Python Skill in a non-root, network-denied sandbox. Inputs are declared UTF-8 files; outputs are archived with hashes. Requires runs:start.",
+    inputSchema: skillExecutionSchema.extend({ repoId: idSchema }),
+    annotations: writeAnnotations,
+  }, async (request) => await execute(() => api.request("/api/skills/execute", { method: "POST", body: request })));
   server.registerTool(
     "list_tasks",
     {

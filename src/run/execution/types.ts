@@ -129,6 +129,8 @@ export interface AgentSessionOutcome {
 }
 
 export interface RunCommandOptions {
+  /** Only the staged workspace and its output subdirectory may be mounted. */
+  isolatedWorkspace?: boolean;
   networkDomains?: readonly string[];
   timeoutMs?: number;
   signal?: AbortSignal;

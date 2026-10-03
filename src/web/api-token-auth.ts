@@ -23,6 +23,9 @@ export function apiTokenActionForRequest(
   method: string | undefined,
   pathname: string,
 ): ApiTokenAction | null {
+  if (method === "POST" && pathname === "/api/skills/execute") {
+    return { action: "skills.execute", capability: "runs:start" };
+  }
   const previewSessionId = decodedMatch(
     pathname,
     /^\/api\/preview-sessions\/([^/]+)(?:\/(?:stop|navigate|reload|restart|screenshot|attach-screenshot|compare-reference|diagnostics|hierarchy|click|type|scroll))?$/,
