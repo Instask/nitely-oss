@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { isIP } from "node:net";
 import { resolve, dirname, join } from "node:path";
@@ -281,6 +281,7 @@ import {
   readSchedulerCooldowns,
   runtimeKey,
 } from "../scheduler/cooldown.js";
+import { ResumeClaimStore, resumeClaimStorePath } from "../scheduler/resume-claim.js";
 import {
   dispatchFactoryQueue,
   getFactoryQueueSnapshot,
@@ -10715,14 +10716,33 @@ async function handleApiRequest(
       throw new WebInputError("only blocked or interrupted runs can be resumed");
     }
     const repository = repositories.find((repo) => repo.path === run.repoPath)!;
-    const prepared = await prepareWebRunResume(input, repository, runId, user);
+    // The scheduler's durable claim fences a double submit and the usage-limit
+    // recovery timer; the status check above happens before resume records anything.
+    await mkdir(join(repository.path, ".nitely"), { recursive: true });
+    const claimToken = randomUUID();
+    const withClaims = <T>(operation: (claims: ResumeClaimStore) => T): T => {
+      const claims = new ResumeClaimStore(resumeClaimStorePath(repository.path));
+      try { return operation(claims); } finally { claims.close(); }
+    };
+    if (!withClaims((claims) => claims.claim({ runId, token: claimToken, now: new Date() }))) {
+      throw new WebRunStartConflictError("run is already being resumed", runId);
+    }
+    const release = () => { withClaims((claims) => claims.release(runId, claimToken)); };
+    let prepared: Awaited<ReturnType<typeof prepareWebRunResume>>;
+    try {
+      // Re-validate under the claim: a resume that finished first leaves the run non-resumable.
+      prepared = await prepareWebRunResume(input, repository, runId, user);
+    } catch (error) {
+      release();
+      throw error;
+    }
     void (input.resumeRun ?? resumeRun)(prepared.resumeInput, prepared.dependencies).then(async () => {
       const tasks = await listUnifiedWorkItems(repository.path);
       const task = tasks.find((item) => item.latestRunId === runId);
       if (task) await reconcileTerminalWorkItemRun({ repoPath: repository.path, workItemId: task.id, runId });
     }).catch((error: unknown) => {
       console.error(`Nitely Web resume failed for ${runId}: ${error instanceof Error ? error.message : String(error)}`);
-    });
+    }).finally(release);
     sendJson(response, 202, { runId });
     return true;
   }
