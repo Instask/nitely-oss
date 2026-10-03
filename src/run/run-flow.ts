@@ -146,7 +146,7 @@ import {
   type ReworkRequest,
 } from "../policy/decide.js";
 import { findDescriptor } from "../providers/descriptors.js";
-import { resolveProviderStore } from "../providers/index.js";
+import { bindProviderConnections, validateProviderConnectionBindings, resolveProviderStore } from "../providers/index.js";
 import type {
   ProviderConnectionStatus,
   ProviderConnectionStore,
@@ -493,6 +493,7 @@ export interface RunFlowInput {
   repoName?: string;
   inputs: Record<string, ResourceReference>;
   configuration?: Record<string, unknown>;
+  providerConnections?: Partial<Record<import("../providers/types.js").ProviderId, string>>;
   ownerId?: string;
   organizationId?: string;
   workItemId?: string;
@@ -1548,11 +1549,9 @@ async function resolveFreshRemoteBaseline(input: {
 function providerStoreForRun(
   repoPath: string,
   dependencies: RunFlowDependencies,
+  bindings?: unknown,
 ): ProviderConnectionStore {
-  return (
-    dependencies.providerStore ??
-    resolveProviderStore(join(repoPath, ".nitely"), process.env)
-  );
+  return bindProviderConnections(dependencies.providerStore ?? resolveProviderStore(join(repoPath, ".nitely"), process.env), bindings);
 }
 
 async function collectRuntimeRedactionSecrets(input: {
@@ -2418,6 +2417,7 @@ async function runCommandInWorkspace(input: {
   workspace: WorkspaceHandle;
   command: string;
   timeoutMs?: number;
+  networkDomains?: readonly string[];
   cancellation?: RunCancellationControl;
   maxToolOutputTokens?: number;
   attemptDirectory: string;
@@ -2446,6 +2446,7 @@ async function runCommandInWorkspace(input: {
   );
   const result = await input.backend.runCommand(input.workspace, input.command, {
     timeoutMs: input.timeoutMs,
+    ...(input.networkDomains?.length ? { networkDomains: input.networkDomains } : {}),
     signal: input.cancellation?.signal,
     ...(input.runId ? { runId: input.runId } : {}),
     ...(input.stageId ? { stageId: input.stageId } : {}),
@@ -4960,6 +4961,7 @@ async function runAlwaysRunFinalizers(input: {
 
 async function executeCommandStage(input: {
   runId: string;
+  configuration: FlowConfiguration;
   stage: Extract<Stage, { type: "command" }>;
   attempt: number;
   attemptDirectory: string;
@@ -4976,6 +4978,9 @@ async function executeCommandStage(input: {
   completedStages: string[];
   cancellation?: RunCancellationControl;
 }): Promise<{ failureError?: string }> {
+  input = { ...input, stage: { ...input.stage,
+    command: applyFlowConfigurationTemplate(input.stage.command, input.configuration),
+  } };
   assertHardBudgetAdmission({
     eventStore: input.eventStore,
     runId: input.runId,
@@ -5005,6 +5010,7 @@ async function executeCommandStage(input: {
         backend: input.backend,
         workspace: input.workspace,
         command: input.stage.command,
+        ...(input.stage.type === "command" && input.stage.networkDomains ? { networkDomains: input.stage.networkDomains } : {}),
         timeoutMs,
         maxToolOutputTokens: resolveMaxToolOutputTokens(
           input.stage,
@@ -12582,7 +12588,7 @@ export async function runFlow(
     throw new Error("invalid eval replay invocation id");
   }
   assertPlanningReadyForExecution(input.planningApproval);
-  const providerStore = providerStoreForRun(repoPath, dependencies);
+  const providerStore = providerStoreForRun(repoPath, dependencies, input.providerConnections);
   const contextPolicy = await loadContextPolicy(repoPath);
   const contextPolicySha256 = sha256Text(JSON.stringify(contextPolicy));
   if (
@@ -12674,7 +12680,8 @@ export async function runFlow(
   });
   let configuration: FlowConfiguration;
   try {
-    configuration = normalizeFlowConfiguration(loaded.flow, input.configuration ?? {});
+    configuration = normalizeFlowConfiguration(loaded.flow, input.configuration ?? {},
+      projectInstructions.loaded ? projectInstructions.configuration : undefined);
   } catch (error) {
     if (error instanceof FlowConfigurationError) {
       throw new Error(error.message);
@@ -12806,6 +12813,7 @@ export async function runFlow(
       executionBackend: effectiveExecutionBackend,
       sandboxPolicy: effectiveSandboxPolicy,
       inputs: runInputReferences,
+      providerConnections: validateProviderConnectionBindings(input.providerConnections),
       configuration,
       configurationSnapshotPath,
       configurationSha256,
@@ -13542,6 +13550,7 @@ export async function runFlow(
 
             await injectedAgentMemory.cleanup();
             const commandResult = await executeCommandStage({
+              configuration,
               runId,
               stage,
               attempt,
@@ -14652,7 +14661,7 @@ export async function resumeRun(
     const flowPath = projection.flowPath;
     const branchName = projection.branchName;
     const worktreePath = projection.worktreePath;
-    const providerStore = providerStoreForRun(repoPath, dependencies);
+    const providerStore = providerStoreForRun(repoPath, dependencies, projection.providerConnections);
     const contextPolicy = await loadContextPolicy(repoPath);
     const contextPolicySha256 = sha256Text(JSON.stringify(contextPolicy));
     if (evalReplay) {
@@ -15715,6 +15724,7 @@ export async function resumeRun(
               } else {
                 await injectedAgentMemory.cleanup();
                 const commandResult = await executeCommandStage({
+                  configuration,
                   runId: input.runId,
                   stage,
                   attempt,

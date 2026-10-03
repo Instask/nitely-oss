@@ -37,7 +37,6 @@ import {
   eventStorePath,
   getProjectedRun,
   getProjectedRunLogs,
-  listProjectedRuns,
   listRunEvents,
   projectedRunLogSources,
   projectRun,
@@ -1997,14 +1996,6 @@ async function readFallbackRunSummary(
   };
 }
 
-async function tryListProjectedRuns(repoPath: string): Promise<ProjectedRun[]> {
-  try {
-    return await listProjectedRuns(repoPath);
-  } catch {
-    return [];
-  }
-}
-
 async function tryProjectedRunWithRecovery(
   repoPath: string,
   runId: string,
@@ -2108,14 +2099,42 @@ export interface ListRunsOptions {
    * something from the whole history.
    */
   limit?: number;
+  beforeRunId?: string;
+  includeBefore?: boolean;
+  runIds?: readonly string[];
 }
 
 function resolvedRunListLimit(limit: number | undefined): number {
   return limit ?? Number.POSITIVE_INFINITY;
 }
 
-function runScanKey(repoPath: string, limit: number): string {
-  return `${resolve(repoPath)}\0${Number.isFinite(limit) ? String(limit) : "all"}`;
+function runScanKey(repoPath: string, limit: number, options: ListRunsOptions): string {
+  return JSON.stringify([resolve(repoPath), Number.isFinite(limit) ? limit : "all", options.beforeRunId, options.includeBefore, options.runIds]);
+}
+
+const runSummariesInFlight = new Map<string, Promise<WebRunSummary | undefined>>();
+const runIdsInFlight = new Map<string, Promise<string[]>>();
+
+function listRunIds(repoPath: string): Promise<string[]> {
+  const key = resolve(repoPath);
+  const pending = runIdsInFlight.get(key);
+  if (pending) return pending;
+  const scan = (async () => {
+    let stored: string[] = [];
+    try {
+      const events = new EventStore(eventStorePath(repoPath));
+      try { stored = events.listRunIds(); } finally { events.close(); }
+    } catch { /* Legacy repositories may have no event store. */ }
+    let entries: string[] = [];
+    try { entries = await readdir(runsRoot(repoPath)); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    return [...new Set([...stored, ...entries])].sort((left, right) => right.localeCompare(left));
+  })();
+  runIdsInFlight.set(key, scan);
+  const clear = () => { if (runIdsInFlight.get(key) === scan) runIdsInFlight.delete(key); };
+  scan.then(clear, clear);
+  return scan;
 }
 
 export function listRuns(
@@ -2123,10 +2142,10 @@ export function listRuns(
   options: ListRunsOptions = {},
 ): Promise<WebRunSummary[]> {
   const limit = resolvedRunListLimit(options.limit);
-  const key = runScanKey(repoPath, limit);
+  const key = runScanKey(repoPath, limit, options);
   const inFlight = runScansInFlight.get(key);
   if (inFlight) return inFlight;
-  const scan = scanRuns(repoPath, limit);
+  const scan = scanRuns(repoPath, limit, options);
   runScansInFlight.set(key, scan);
   const clear = () => {
     if (runScansInFlight.get(key) === scan) runScansInFlight.delete(key);
@@ -2138,52 +2157,35 @@ export function listRuns(
 async function scanRuns(
   repoPath: string,
   limit: number,
+  options: ListRunsOptions,
 ): Promise<WebRunSummary[]> {
-  const projected = await tryListProjectedRuns(repoPath);
-  let entries: string[] = [];
-  try {
-    entries = await readdir(runsRoot(repoPath));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw error;
-    }
+  const ids = options.runIds ? [...new Set(options.runIds)].sort((left, right) => right.localeCompare(left)) : await listRunIds(repoPath);
+  const eligibleIds = options.beforeRunId
+    ? ids.filter((id) => id.localeCompare(options.beforeRunId!) < 0 || (options.includeBefore && id === options.beforeRunId))
+    : ids;
+  const summaries: WebRunSummary[] = [];
+  for (let offset = 0; offset < eligibleIds.length && summaries.length < limit;) {
+    const selectedIds = eligibleIds.slice(offset, Number.isFinite(limit) ? offset + limit - summaries.length : undefined);
+    offset += selectedIds.length;
+    const missingIds = selectedIds.filter((id) => !runSummariesInFlight.has(JSON.stringify([resolve(repoPath), id])));
+    const eventsByRun = missingIds.length ? tryRunEventsForRuns(repoPath, missingIds) : new Map<string, StoredRunEvent[]>();
+    const batch = await Promise.all(selectedIds.map((runId) => {
+      const key = JSON.stringify([resolve(repoPath), runId]);
+      const existing = runSummariesInFlight.get(key);
+      if (existing) return existing;
+      const pending = (async () => {
+        const events = eventsByRun.get(runId) ?? [];
+        if (events.length) return await summaryFromProjectedRun(repoPath, projectRun(events), events);
+        try { return await readRunSummary(repoPath, runId); } catch { return undefined; }
+      })();
+      runSummariesInFlight.set(key, pending);
+      const clear = () => { if (runSummariesInFlight.get(key) === pending) runSummariesInFlight.delete(key); };
+      pending.then(clear, clear);
+      return pending;
+    }));
+    summaries.push(...batch.filter((run): run is WebRunSummary => run !== undefined));
   }
-
-  const ids = new Set<string>([
-    ...projected.map((run) => run.runId),
-    ...entries,
-  ]);
-  const sortedIds = [...ids].sort((left, right) => right.localeCompare(left));
-  const selectedIds = Number.isFinite(limit)
-    ? sortedIds.slice(0, Math.max(0, limit))
-    : sortedIds;
-  const projectedById = new Map(
-    projected.map((run) => [run.runId, run] as const),
-  );
-  const eventsByRun = tryRunEventsForRuns(
-    repoPath,
-    selectedIds.filter((runId) => projectedById.has(runId)),
-  );
-  const summaries = await Promise.all(
-    selectedIds.map(async (runId) => {
-      const rawProjection = projectedById.get(runId);
-      if (rawProjection) {
-        return await summaryFromProjectedRun(
-          repoPath,
-          rawProjection,
-          eventsByRun.get(runId) ?? [],
-        );
-      }
-      try {
-        return await readRunSummary(repoPath, runId);
-      } catch {
-        return undefined;
-      }
-    }),
-  );
-  return summaries
-    .filter((run): run is WebRunSummary => run !== undefined)
-    .sort((left, right) => right.runId.localeCompare(left.runId));
+  return summaries.sort((left, right) => right.runId.localeCompare(left.runId));
 }
 
 async function summaryFromProjectedRun(

@@ -147,6 +147,19 @@ add it to `--verify` when you add it to the image.
 Raise `NITELY_OCI_TMPFS_BYTES` when a stage's install or build needs more than
 the 256 MiB default.
 
+Nitely marks every workload with `NITELY_SANDBOX=1`. A Web server started by
+a verification test inside that workload does not start the host OCI orphan
+reaper: the workload has no engine socket and cannot reap host containers.
+The marker does not change execution-backend selection or admission checks.
+
+Run dependency setup inside the image before offline verification. Dependencies
+installed on the host can have incompatible pnpm metadata; the setup stage uses
+its explicit registry allowlist, while verification stays on `--network=none`.
+Nitely's systemd, mise and engine unit checks use local executable fixtures, so
+keep them enabled with executable `/tmp`. Browser checks require the image's
+Chromium package; `--maxWorkers=2` bounds contention for the 2-CPU test example.
+
+
 ## Keeping it fresh
 
 There is no CI in this repository yet, so nothing rebuilds this Dockerfile on a

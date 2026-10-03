@@ -1,3 +1,4 @@
+import { organizationSessionAccessAllowed, type OrganizationSessionAccess } from "./session-policy.js";
 import type { TaskDetail, TaskRecord } from "./tasks.js";
 import { getTaskDetail, listTasks } from "./tasks.js";
 import { getRunDetail, listRuns, type WebRunSummary } from "./runs.js";
@@ -20,7 +21,7 @@ export interface TaskWorkItemDetail extends TaskDetail {
   runs: TaskRunSummary[];
 }
 
-export interface WebAccessContext {
+export interface WebAccessContext extends OrganizationSessionAccess {
   id: string;
   role: "admin" | "user";
   authMode: "local" | "required";
@@ -31,6 +32,7 @@ function ownedRecordVisibleToUser(
   record: { ownerId?: string; organizationId?: string },
   user?: WebAccessContext,
 ): boolean {
+  if (!organizationSessionAccessAllowed(user, record.organizationId)) return false;
   if (!user || user.authMode === "local" || user.role === "admin") {
     return true;
   }

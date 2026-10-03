@@ -450,6 +450,7 @@ const flowTemplateDefinitions: FlowTemplateDefinition[] = [
       kind: "Flow",
       metadata: {
         name: "plan-approve-implement",
+        configurables: [{ key: "verifyCommand", label: "Repository verification command", type: "text", required: true }],
         workItemType: "dev.pr",
         inputs: [{ id: "intake" }],
       },
@@ -512,7 +513,7 @@ const flowTemplateDefinitions: FlowTemplateDefinition[] = [
           {
             id: "test",
             type: "command",
-            command: "pnpm exec vitest run",
+            command: "{{config.verifyCommand}}",
             timeoutMs: 600000,
             inputs: ["implementation"],
             outputs: ["test-report"],
@@ -539,6 +540,7 @@ const flowTemplateDefinitions: FlowTemplateDefinition[] = [
       kind: "Flow",
       metadata: {
         name: "dev-pr",
+        configurables: [{ key: "verifyCommand", label: "Repository verification command", type: "text", required: true }],
         workItemType: "dev.pr",
         inputs: [{ id: "spec" }, { id: "tech-design" }],
       },
@@ -568,7 +570,7 @@ const flowTemplateDefinitions: FlowTemplateDefinition[] = [
           {
             id: "test",
             type: "command",
-            command: "pnpm exec vitest run",
+            command: "{{config.verifyCommand}}",
             timeoutMs: 600000,
             inputs: ["implementation"],
             outputs: ["test-report"],
@@ -669,6 +671,7 @@ const flowTemplateDefinitions: FlowTemplateDefinition[] = [
       kind: "Flow",
       metadata: {
         name: "pilot-approved-spec-pr",
+        configurables: [{ key: "verifyCommand", label: "Repository verification command", type: "text", required: true }],
         workItemType: "dev.pr",
         inputs: [{ id: "spec" }, { id: "tech-design" }],
       },
@@ -707,7 +710,7 @@ const flowTemplateDefinitions: FlowTemplateDefinition[] = [
           {
             id: "verify",
             type: "command",
-            command: "pnpm exec vitest run && pnpm run check",
+            command: "{{config.verifyCommand}}",
             timeoutMs: 600000,
             maxAttempts: 12,
             inputs: ["task-plan", "implementation"],
@@ -767,6 +770,7 @@ const flowTemplateDefinitions: FlowTemplateDefinition[] = [
       kind: "Flow",
       metadata: {
         name: "pilot-issue-to-production",
+        configurables: [{ key: "verifyCommand", label: "Repository verification command", type: "text", required: true }],
         workItemType: "dev.pr",
         inputs: [
           { id: "issue" },
@@ -845,7 +849,7 @@ const flowTemplateDefinitions: FlowTemplateDefinition[] = [
           {
             id: "verify",
             type: "command",
-            command: "pnpm exec vitest run && pnpm run check",
+            command: "{{config.verifyCommand}}",
             timeoutMs: 600000,
             maxAttempts: GOVERNED_PRODUCTION_TASK_LOOP_BUDGET,
             inputs: ["task-plan", "implementation"],
@@ -1012,6 +1016,7 @@ const flowTemplateDefinitions: FlowTemplateDefinition[] = [
       kind: "Flow",
       metadata: {
         name: "pilot-bug-ticket-fix-pr",
+        configurables: [{ key: "verifyCommand", label: "Repository verification command", type: "text", required: true }],
         workItemType: "dev.pr",
         inputs: [{ id: "bug-ticket" }, { id: "repo-notes" }],
       },
@@ -1039,7 +1044,7 @@ const flowTemplateDefinitions: FlowTemplateDefinition[] = [
           {
             id: "verify",
             type: "command",
-            command: "pnpm exec vitest run && pnpm run check",
+            command: "{{config.verifyCommand}}",
             timeoutMs: 600000,
             inputs: ["regression-test", "implementation"],
             outputs: [artifactOutputs.verificationReport],
@@ -1086,6 +1091,7 @@ const flowTemplateDefinitions: FlowTemplateDefinition[] = [
       kind: "Flow",
       metadata: {
         name: "pilot-pr-review-rework",
+        configurables: [{ key: "verifyCommand", label: "Repository verification command", type: "text", required: true }],
         workItemType: "dev.pr",
         inputs: [{ id: "review-feedback" }, { id: "implementation-notes" }],
       },
@@ -1104,7 +1110,7 @@ const flowTemplateDefinitions: FlowTemplateDefinition[] = [
           {
             id: "verify",
             type: "command",
-            command: "pnpm exec vitest run && pnpm run check",
+            command: "{{config.verifyCommand}}",
             timeoutMs: 600000,
             inputs: ["implementation"],
             outputs: [artifactOutputs.verificationReport],

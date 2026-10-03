@@ -510,6 +510,7 @@ describe("OciExecutionBackend", () => {
     expect(launch.args.join("\0")).not.toContain("super-secret-value");
     expect(launch.args.join("\0")).not.toContain("must-not-enter-container");
     expect(launch.args).not.toContain("HOST_SECRET");
+    expect(launch.args).toContain("NITELY_SANDBOX=1");
     expect(launch.env).toEqual({
       DOCKER_HOST: "unix:///run/user/501/docker.sock",
       LANG: "C.UTF-8",
@@ -2610,6 +2611,36 @@ describe("OciExecutionBackend", () => {
       ),
     ).resolves.toMatchObject({ stdout: "", stderr: "" });
   });
+});
+
+it("scopes setup command egress to its explicit domains and disposes the gateway", async () => {
+  const fixture = await createFixture();
+  const calls: SandboxProcessInput[] = [];
+  let disposed = 0;
+  const backend = new OciExecutionBackend({
+    image: "runner:local", processRunner: successfulRunner(calls),
+    networkAllowlist: ["api.openai.com"],
+    networkGatewayFactory: (domains) => {
+      expect(domains).toEqual(["registry.npmjs.org"]);
+      return { id: "http-connect-allowlist", domains,
+        assertEnforceable: async () => undefined,
+        prepareContainerNetwork: async () => ({ dockerArgs: ["--network=setup-internal"],
+          containerEnv: { HTTPS_PROXY: "http://gateway:8080" }, description: "registry only" }),
+        dispose: async () => { disposed++; },
+      };
+    },
+  });
+  await backend.runCommand({ runId: "setup", path: fixture.worktree }, "pnpm install --frozen-lockfile", {
+    outputDirectory: fixture.attempt, networkDomains: ["registry.npmjs.org"],
+  });
+  const setup = calls.find((call) => call.args[0] === "run")!;
+  expect(setup.args).toContain("--network=setup-internal");
+  expect(setup.args).toContain("HTTPS_PROXY=http://gateway:8080");
+  expect(disposed).toBe(1);
+  calls.length = 0;
+  await backend.runCommand({ runId: "setup", path: fixture.worktree }, "pnpm test", { outputDirectory: fixture.attempt });
+  expect(calls.find((call) => call.args[0] === "run")!.args).toContain("--network=none");
+  expect(disposed).toBe(1);
 });
 
 describe("OCI readiness probes", () => {

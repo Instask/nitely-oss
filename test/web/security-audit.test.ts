@@ -41,6 +41,8 @@ describe("Web security audit", () => {
       version: 1,
       event: "security.action",
       eventId: "audit-event-1",
+      organizationId: "org_team",
+      source: "web",
       createdAt: "2026-07-14T00:00:00.000Z",
       action: "planning.approve-spec",
       permission: "planning:approve",

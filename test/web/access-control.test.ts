@@ -35,6 +35,8 @@ describe("Web access-control policy", () => {
 
   it("gives owners the complete organization-scoped permission set", () => {
     expect(allowedForRole("owner")).toEqual([
+      "organizations:manage",
+      "organizations:audit:view",
       "tasks:view",
       "tasks:write",
       "planning:approve",
@@ -43,6 +45,7 @@ describe("Web access-control policy", () => {
       "flows:manage",
       "providers:write:personal",
       "providers:write:shared",
+      "providers:use:shared",
       "notifications:manage",
       "notifications:resolve",
       "evidence:view",
@@ -55,6 +58,7 @@ describe("Web access-control policy", () => {
 
   it("lets maintainers coordinate work but not shared credential ownership", () => {
     expect(allowedForRole("maintainer")).toEqual([
+      "organizations:audit:view",
       "tasks:view",
       "tasks:write",
       "planning:approve",
@@ -62,6 +66,7 @@ describe("Web access-control policy", () => {
       "runs:review",
       "flows:manage",
       "providers:write:personal",
+      "providers:use:shared",
       "notifications:manage",
       "notifications:resolve",
       "evidence:view",
@@ -81,6 +86,7 @@ describe("Web access-control policy", () => {
       "runs:review",
       "flows:manage",
       "providers:write:personal",
+      "providers:use:shared",
       "notifications:resolve",
       "evidence:view",
       "preview:view",

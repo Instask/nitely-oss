@@ -6,7 +6,7 @@ import type {
 
 export interface WebSecurityAction {
   action: string;
-  permission: WebPermission;
+  permission?: WebPermission;
   target?: SecurityAuditTarget;
 }
 
@@ -36,6 +36,28 @@ export function webSecurityActionForRequest(
   method: string | undefined,
   pathname: string,
 ): WebSecurityAction | null {
+  const audit = /^\/api\/organizations\/([^/]+)\/audit(?:\/|$)/.exec(pathname);
+  if (audit) return action(`audit.organization.${method === "GET" ? "view" : "manage"}`, method === "GET" ? "organizations:audit:view" : "organizations:manage", decodedTarget(pathname, /^\/api\/organizations\/([^/]+)/, "organization"));
+  const organizationProvider = /^\/api\/organizations\/([^/]+)\/providers(?:\/|$)/.exec(pathname);
+  if (organizationProvider) return action(`providers.organization.${method === "GET" ? "view" : "manage"}`, method === "GET" ? "providers:use:shared" : "providers:write:shared", decodedTarget(pathname, /^\/api\/organizations\/([^/]+)/, "organization"));
+  const policy = /^\/api\/organizations\/([^/]+)\/security-policy(?:\/(revoke-sessions))?$/.exec(pathname);
+  if (policy && ["GET", "PUT", "POST"].includes(method ?? "")) return action(`organizations.policy.${policy[2] ?? (method === "GET" ? "view" : "update")}`, "organizations:manage", decodedTarget(pathname, /^\/api\/organizations\/([^/]+)/, "organization"));
+  const oidc = /^\/api\/organizations\/([^/]+)\/sso\/oidc(?:\/(login|link|callback))?$/.exec(pathname);
+  if (oidc && ["GET", "POST", "PUT"].includes(method ?? "")) {
+    const target = decodedTarget(pathname, /^\/api\/organizations\/([^/]+)/, "organization");
+    return { action: `auth.oidc.${oidc[2] ?? (method === "GET" ? "configuration.view" : "configuration.update")}`,
+      ...(target ? { target } : {}), ...(!oidc[2] ? { permission: "organizations:manage" } : {}) };
+  }
+  const organization = /^\/api\/organizations\/([^/]+)\/(members|invitations)(?:\/[^/]+)?(?:\/(accept|decline|revoke))?$/.exec(pathname);
+  if (organization && ["GET", "POST", "PATCH", "DELETE"].includes(method ?? "")) {
+    const target = decodedTarget(pathname, /^\/api\/organizations\/([^/]+)/, "organization");
+    const name = `organizations.${organization[2]}.${organization[3] ?? (method === "GET" ? "list" : method === "POST" ? "create" : method === "PATCH" ? "update" : "remove")}`;
+    // Joining uses recipient-bound possession of the invitation, not an owner permission.
+    return { action: name, ...(target ? { target } : {}),
+      ...(method === "GET" && organization[2] === "members" || organization[3] === "accept" || organization[3] === "decline" ? {} : { permission: "organizations:manage" }) };
+  }
+  const resume = decodedTarget(pathname, /^\/api\/runs\/([^/]+)\/resume$/, "run");
+  if (method === "POST" && resume) return action("runs.resume", "runs:start", resume);
   if (method === "POST" && pathname === "/api/demo/golden-path") {
     return action("demo.run", "demo:run");
   }

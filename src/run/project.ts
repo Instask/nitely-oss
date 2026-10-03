@@ -559,6 +559,7 @@ export interface ProjectedRun {
   worktreePath?: string;
   inputs?: Record<string, unknown>;
   configuration?: Record<string, unknown>;
+  providerConnections?: Partial<Record<import("../providers/types.js").ProviderId, string>>;
   budgets?: unknown;
   verificationBudget?: ProjectedVerificationBudget;
   workflowStages?: ProjectedWorkflowStage[];
@@ -1850,6 +1851,7 @@ export function projectRun(
       projection.changeRequestTarget = payload.changeRequestTarget;
       projection.trigger = payload.trigger;
       projection.priorRunId = asString(payload.priorRunId);
+      projection.providerConnections = payload.providerConnections as ProjectedRun["providerConnections"];
       if (typeof payload.inputs === "object" && payload.inputs !== null) {
         projection.inputs = payload.inputs as Record<string, unknown>;
       }

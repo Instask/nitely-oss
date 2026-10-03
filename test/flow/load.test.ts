@@ -1502,6 +1502,7 @@ describe("loadFlow", () => {
       expect(result.graph.order).toEqual([
         "write-tests",
         "implement",
+        "setup",
         "test",
         "review",
         "publish",
@@ -1534,6 +1535,7 @@ describe("loadFlow", () => {
     expect(result.flow.spec.stages.map((stage) => [stage.id, stage.type])).toEqual([
       ["write-tests", "agent"],
       ["implement", "agent"],
+      ["setup", "command"],
       ["test", "command"],
       ["review", "gate"],
       ["publish", "publish-change"],
@@ -1924,4 +1926,16 @@ describe("loadFlow", () => {
 
     await expect(loadFlow(path)).rejects.toThrow(/maxInputTokens is only valid on agent and review gate stages/);
   });
+});
+
+it("provisions bootstrap dependencies explicitly before the test gate", async () => {
+  for (const suffix of ["", "-claude", "-grok", "-pi"]) {
+    const { flow, graph } = await loadFlow(`flows/implement-spec-bootstrap${suffix}.json`, { externalInputs: ["spec", "tech-design"] });
+    expect(flow.spec.stages.find((stage) => stage.id === "setup")).toMatchObject({
+      type: "command", command: "{{config.setupCommand}}", networkDomains: ["registry.npmjs.org"],
+      inputs: ["implementation"], outputs: ["dependencies"],
+    });
+    expect(flow.spec.stages.find((stage) => stage.id === "test")?.inputs).toContain("dependencies");
+    expect(graph.order.indexOf("setup")).toBeLessThan(graph.order.indexOf("test"));
+  }
 });

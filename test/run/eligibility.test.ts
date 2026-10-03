@@ -2,11 +2,13 @@ import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { openFlowStore } from "../../src/flows/store.js";
 import { getFlowTemplate } from "../../src/flows/templates.js";
 import type { ProviderConnectionStore } from "../../src/providers/types.js";
+import { clearOciReadinessCache } from "../../src/run/execution/backend.js";
+import { OciExecutionBackend } from "../../src/run/execution/oci.js";
 import { evaluateWorkItemRunStarts } from "../../src/run/eligibility.js";
 import type { WorkItemRecord } from "../../src/work-items/types.js";
 
@@ -521,4 +523,68 @@ describe("run eligibility", () => {
       ]),
     );
   });
+});
+
+it("blocks unavailable image runtimes before admission, including manual overrides", async () => {
+  const repoPath = await createRepo();
+  const document = JSON.parse(await readFile(join(repoPath, "flows/eligible.json"), "utf8"));
+  document.spec.stages[0].runtime = "codex";
+  await writeFile(join(repoPath, "flows/eligible.json"), JSON.stringify(document));
+  const store: ProviderConnectionStore = {
+    getConnection: async () => ({ providerId: "codex", getAccessToken: async () => "token" }),
+    resolveEnv: vi.fn(async () => ({ NITELY_OCI_IMAGE: "claude-only:local" })),
+    listStatuses: async () => [{ id: "codex", name: "Codex", configured: true,
+      message: "configured", hints: [], reconnectRequired: false, authMethods: [] }],
+  };
+  clearOciReadinessCache();
+  const probe = vi.spyOn(OciExecutionBackend.prototype, "checkReadiness").mockResolvedValue([
+    { code: "oci.runtime.unavailable", message: "OCI image does not provide runtime codex command codex" },
+  ]);
+  try {
+    for (const intent of [
+      { kind: "automatic" as const },
+      { kind: "manual" as const, override: { actor: "operator", reason: "try anyway" } },
+    ]) {
+      const starts = await evaluateWorkItemRunStarts({
+        repoPath, workItems: [workItem("image-runtime")], intent,
+        executionBackend: "oci", providerStore: store,
+      });
+      expect(starts.eligibility["image-runtime"]).toMatchObject({ decision: "blocked",
+        blockers: [{ code: "preflight.oci.runtime.unavailable", overridePolicy: "never" }] });
+      expect(starts.runInputs).toEqual({});
+    }
+    expect(probe).toHaveBeenCalledWith(expect.objectContaining({ runtime: "codex" }));
+    // The second evaluation reuses the cached probe instead of launching another container.
+    expect(probe).toHaveBeenCalledTimes(1);
+    probe.mockResolvedValue([]);
+    clearOciReadinessCache();
+    const supported = await evaluateWorkItemRunStarts({ repoPath,
+      workItems: [workItem("image-runtime")], intent: { kind: "manual" },
+      executionBackend: "oci", providerStore: store });
+    expect(supported.eligibility["image-runtime"].decision).toBe("eligible");
+  } finally { probe.mockRestore(); clearOciReadinessCache(); }
+});
+
+it("resolves provider credentials once per evaluation, and never for a non-OCI backend", async () => {
+  const repoPath = await createRepo();
+  const resolveEnv = vi.fn(async () => ({ NITELY_OCI_IMAGE: "runner:local" }));
+  const store: ProviderConnectionStore = {
+    getConnection: async () => ({ providerId: "codex", getAccessToken: async () => "token" }),
+    resolveEnv,
+    listStatuses: async () => [{ id: "codex", name: "Codex", configured: true,
+      message: "configured", hints: [], reconnectRequired: false, authMethods: [] }],
+  };
+  const workItems = [workItem("first"), workItem("second"), workItem("third")];
+  await evaluateWorkItemRunStarts({ repoPath, workItems, intent: { kind: "manual" },
+    executionBackend: "local", providerStore: store });
+  expect(resolveEnv).not.toHaveBeenCalled();
+
+  clearOciReadinessCache();
+  const probe = vi.spyOn(OciExecutionBackend.prototype, "checkReadiness").mockResolvedValue([]);
+  try {
+    await evaluateWorkItemRunStarts({ repoPath, workItems, intent: { kind: "manual" },
+      executionBackend: "oci", providerStore: store });
+    expect(resolveEnv).toHaveBeenCalledTimes(1);
+    expect(probe).toHaveBeenCalledTimes(1);
+  } finally { probe.mockRestore(); clearOciReadinessCache(); }
 });

@@ -21,6 +21,7 @@ import type { RunFlowInput } from "./run-flow.js";
 import {
   evaluateRunPreflight,
   formatRunPreflightError,
+  preflightExecutionEnv,
   type RunPreflightReport,
 } from "./preflight.js";
 
@@ -79,6 +80,8 @@ export interface EvaluateWorkItemRunStartsInput {
   candidateIds?: readonly string[];
   intent: RunEligibilityIntent;
   providerStore?: ProviderConnectionStore;
+  executionBackend?: string;
+  env?: NodeJS.ProcessEnv;
   getChangeRequestStatus?: (
     url: string,
   ) => Promise<ChangeRequestStatus>;
@@ -400,6 +403,12 @@ export async function evaluateWorkItemRunStarts(
     dependencies.length > 0
       ? await changeRequestCompletion(input, dependencies)
       : () => false;
+  // One provider environment per evaluation; preflight would otherwise
+  // resolve every credential once per candidate.
+  let sharedExecutionEnv: Promise<NodeJS.ProcessEnv | undefined> | undefined;
+  const executionEnv = () => input.env
+    ? Promise.resolve(input.env)
+    : sharedExecutionEnv ??= preflightExecutionEnv(input).then((resolved) => resolved.env);
   const entries = await Promise.all(
     candidates.map(async (workItem) => {
       const workItemId = workItem.id;
@@ -478,6 +487,9 @@ export async function evaluateWorkItemRunStarts(
           flowPath: resolvedFlow.flowPath,
           flowDocument: resolvedFlow.flowDocument,
           inputs: workItem.inputs,
+          configuration: workItem.configuration,
+          executionBackend: input.executionBackend,
+          env: await executionEnv(),
           ...(input.providerStore ? { providerStore: input.providerStore } : {}),
         }),
       ]);
@@ -509,6 +521,7 @@ export async function evaluateWorkItemRunStarts(
                 : {}),
               ...(input.repoName ? { repoName: input.repoName } : {}),
               inputs: workItem.inputs,
+              ...(input.executionBackend ? { executionBackend: input.executionBackend } : {}),
               ...(workItem.configuration
                 ? { configuration: workItem.configuration }
                 : {}),

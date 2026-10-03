@@ -1,6 +1,7 @@
 import { FileProviderConnectionStore } from "./file-store.js";
 import type { FileProviderConnectionStoreOptions } from "./file-store.js";
-import type { ProviderConnectionStore } from "./types.js";
+import { PROVIDER_DESCRIPTORS } from "./descriptors.js";
+import type { ProviderId, ProviderConnectionStore } from "./types.js";
 
 export {
   EnvProviderConnectionStore,
@@ -46,7 +47,7 @@ export type {
   SetConnectionInput,
 } from "./types.js";
 
-export { MissingConnectionError, ReconnectRequiredError } from "./types.js";
+export { ConnectionManagementDeniedError, MissingConnectionError, ReconnectRequiredError } from "./types.js";
 
 export function resolveProviderStore(
   nitelyDir: string,
@@ -60,4 +61,20 @@ export function resolveProviderStore(
     commandStatus,
     ...options,
   });
+}
+
+
+export function validateProviderConnectionBindings(value: unknown): Partial<Record<ProviderId, string>> | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid provider connections");
+  const entries = Object.entries(value);
+  if (entries.some(([provider, id]) => !PROVIDER_DESCRIPTORS.some((descriptor) => descriptor.id === provider) || typeof id !== "string" || !/^[A-Za-z0-9_-]{1,256}$/.test(id))) throw new Error("invalid provider connection binding");
+  return Object.fromEntries(entries);
+}
+
+export function bindProviderConnections(store: ProviderConnectionStore, value: unknown): ProviderConnectionStore {
+  const bindings = validateProviderConnectionBindings(value);
+  if (!bindings || !Object.keys(bindings).length) return store;
+  if (!store.withConnectionBindings) throw new Error("provider store does not support explicit connection bindings");
+  return store.withConnectionBindings(bindings);
 }

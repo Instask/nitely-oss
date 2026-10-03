@@ -244,6 +244,7 @@ The local JSON API exposes:
 - `POST /api/scheduler/run`
 - `GET /api/runs`
 - `GET /api/runs/:runId`
+- `POST /api/runs/:runId/resume` for blocked or interrupted runs
 - `GET /api/providers`
 - `GET /api/session`
 - `POST /api/session`
@@ -255,3 +256,194 @@ The local JSON API exposes:
 `ready` is the compatibility default; `draft` marks both supplied planning
 artifacts as drafts so an external approval client can approve them before a
 run.
+
+### Web-only usage-limit recovery
+
+Set `NITELY_WEB_SCHEDULER_INTERVAL_MS=60000` in the Web service environment to
+opt into automatic recovery. The interval must be between 1 second and 24 hours;
+absence disables the timer. Each cycle selects at most 20 due usage-limit runs
+per repository, resumes them serially through the existing scheduler claims and
+cooldown policy, and finishes before another cycle begins. It does not intake
+new work. Servers running inside an OCI workload do not start this host timer.
+
+Automatic recovery and the Console's **Resume run** button use the persisted
+run owner's current provider and knowledge credentials and the server's selected
+execution backend. Deleted owners and revoked organization permissions fail
+closed. The button is available for writable blocked/interrupted runs; live or
+completed runs cannot be resumed through this endpoint. The API accepts browser
+sessions; the existing scheduler endpoint remains admin-session scoped.
+
+### Run history and live updates
+
+`GET /api/runs` returns the newest 50 visible summaries. Use `limit=1..100`
+and the returned opaque `nextCursor` in `cursor` to page backwards; cursors
+remain stable when newer runs arrive. The Sessions page loads older history
+on demand. Task, flow and dashboard associations still use full history.
+
+Live updates request summaries for the currently active ids with repeated
+`runId` query parameters (up to 100 per request), including their terminal
+transition. They do not reload historical pages or start during the initial
+workspace load. Concurrent page and full-history requests share in-flight
+summary reads; settled results are discarded so external writes remain visible.
+
+Organization membership administration requires a browser session in required
+authentication mode. Members can inspect their own organization's member list;
+only an organization owner can manage members or invitations. Global admin status
+does not grant access to another organization's membership metadata.
+
+- `GET /api/organizations/:id/members` lists member ids and roles.
+- `PATCH /api/organizations/:id/members/:userId` accepts `{ "role": "viewer" }`;
+ `DELETE` removes the member. The last owner cannot be removed or demoted.
+- `POST /api/organizations/:id/invitations` accepts `email`, `role`, and optional
+ `expiresInSeconds` (1 second to 30 days, default 7 days). It returns an opaque
+ token once. The caller delivers it to the recipient; Nitely does not send mail.
+- `GET /api/organizations/:id/invitations` lists metadata without token hashes.
+- `POST /api/organizations/:id/invitations/:invitationId/accept` or `/decline`
+ accepts `{ "token": "..." }` from the authenticated recipient. An invitation
+ cannot change an existing member's role. Owners can `POST .../revoke`.
+
+Membership writes and invitation consumption share the local cross-process
+storage lease and atomic organization-file replacement. Tokens are hashed at
+rest, expire at the saved deadline, and cannot be consumed twice. Invalid,
+expired, revoked, wrong-recipient, and wrong-organization invitations return the
+same not-found response. The existing metadata-only security audit records API
+actions without invitation tokens or email addresses; it remains a local audit,
+not a compliance delivery guarantee.
+
+OIDC sign-in is available in required authentication mode. An organization owner
+can `PUT /api/organizations/:id/sso/oidc` with `issuer`, `clientId`,
+`redirectUri`, optional `clientSecretRef`, and optional
+`jit: { enabled: false, domains: [] }`. The same endpoint supports owner-only
+`GET`. JIT provisioning defaults to disabled; enabling it requires explicit
+email domains and a verified IdP email. Existing email matches always require
+explicit linking, and new users receive the member role.
+
+The operator must set `NITELY_OIDC_ALLOWED_HOSTS` (comma-separated HTTPS IdP
+hosts, including token/JWKS hosts) and `NITELY_OIDC_REDIRECT_ORIGINS`
+(comma-separated HTTPS console origins). Discovery and token/JWKS requests
+cannot follow redirects or leave those approved hosts. The redirect URI must
+point to `/api/organizations/:id/sso/oidc/callback`. A secret reference resolves
+only to `NITELY_OIDC_SECRET_<sha256-of-organization-id>_<reference>` in the
+server's authentication environment; configuration and API responses contain
+the reference, never the secret. References use uppercase letters, digits and
+underscores. Public clients can omit the reference.
+
+Open `/api/organizations/:id/sso/oidc/login` in a browser to start sign-in.
+Linking a local account requires a browser session and
+`POST /api/organizations/:id/sso/oidc/link` with the account's password for
+reauthentication. The browser follows the returned authorization redirect;
+the callback establishes a new secure session and returns browsers to the Console. PKCE S256, a browser-bound
+single-use state, nonce, issuer, audience, expiry and ID-token signatures are
+validated using [openid-client](https://github.com/panva/openid-client).
+Pending attempts expire after ten minutes and are bounded to 256 per organization.
+
+Issuer/subject identities are persisted separately from email. Email changes
+at the IdP do not change account identity, and an existing identity cannot be
+rebound to another local user. Sign-in still requires current organization
+membership; JIT never restores a removed member. Local password sign-in remains
+available. Configuration changes invalidate pending sign-ins. Login, failure,
+linking and configuration actions use the existing metadata-only local audit;
+ID/access tokens, authorization codes and client secrets are not recorded.
+
+Organization session policy is read with
+`GET /api/organizations/:id/security-policy` and replaced by an organization
+owner with `PUT` on that path. The complete version 1 record contains
+`maxSessionLifetimeSeconds` (1–2592000), `idleTimeoutSeconds` (1–604800 or
+`null`), and `ssoRequired` (boolean). Defaults are seven days, no idle timeout,
+and optional SSO. The existing seven-day cookie lifetime remains an upper bound.
+Unknown fields and invalid limits are rejected.
+
+Policy is checked server-side on every authenticated request. Idle activity is
+refreshed across the browser session’s currently permitted organizations; an
+idle-expired organization cannot be revived by activity in another. Inspecting a
+session for audit does not refresh it. An SSO-required organization accepts only
+an OIDC session issued for that organization. Switching the current workspace
+cannot reveal its tasks, runs, flows, repositories, notifications, or shared
+credentials through another organization. Required-auth policy endpoints enforce
+current owner membership; local mode keeps its existing defaults.
+
+Owners can `POST /api/organizations/:id/security-policy/revoke-sessions` with
+`{}` to revoke every existing session for that organization, or `{"userId":"…"}`
+to revoke one current member's sessions there. Other organizations remain usable.
+A fresh sign-in is required; removing and re-adding a member cannot restore an
+old session. These browser controls do not revoke separately issued machine API
+tokens. A browser session denied in any organization cannot approve a new
+instance-wide device token.
+
+For SSO policy recovery, the operator can enable `NITELY_WEB_BREAK_GLASS=true`.
+A global administrator must also send `x-nitely-break-glass: true` to the policy
+endpoint. This exception applies only to the requested organization's policy
+endpoint and requires a successful audit write before access. It cannot bypass
+expiry, idle timeout, or revocation. Policy reads, changes, revocations, and
+recovery access produce security audit events. Disable the operator switch after
+recovery.
+
+Organization provider connections use the same connection/auth-method/secret-ref
+model as personal connections. Organization owners create them with
+`POST /api/organizations/:org/providers/:provider/connections` (`value`, optional
+`authMethod`, `label`, `makeDefault`, and `repositoryId`). Owners alone manage
+shared connections; members and maintainers can use them. Instance admin status
+alone does not grant access to another organization's secrets.
+
+Members with shared-use permission can list connection metadata with
+`GET /api/organizations/:org/providers` or append `/:provider/connections`.
+Secret values and secret references are omitted. Owners can `PATCH` a connection
+with `repositoryId` (or `null` to unbind) and `label`; a binding must identify a
+registered repository in that organization. Append `/rotate`, `/revoke`, or
+`/default` to a connection path and `POST` to rotate its value, revoke it, or
+change its default; `DELETE` the connection path to remove it. Rotation keeps the
+connection id. Revocation removes its secret material and leaves metadata.
+
+Task and work-item run requests can supply `providerConnections`, a provider-to-
+connection-id map. Selection order is explicit run binding, repository-bound
+organization connection, organization connection, personal connection, then
+repository-local/environment fallback. Only one selected connection per provider
+is projected in organization contexts; the descriptor's auth-method order breaks
+method ties. Invalid, foreign, conflicting, or revoked explicit bindings fail
+closed. Switching workspaces does not change the task's organization/repository
+context. Saved run bindings also apply when a run resumes.
+
+Connection mutations and use record actor, connection id, scope, and auth method
+without secret material. Reproducibility manifests retain the selected connection
+id and auth method. Later rotation/revocation leaves old run evidence untouched.
+Per-file leases serialize shared mutations and OAuth refreshes.
+
+### Organization audit
+
+Authenticated organization owners and maintainers have
+`organizations:audit:view`; maintainers serve as organization auditors. Global
+administrator status alone does not grant access to another organization's audit.
+`GET /api/organizations/:id/audit` returns newest events first with stable
+`eventId` and `createdAt`, and an optional `nextCursor`. Pass that cursor to
+retrieve older records. Filters are `from`/`until` (UTC ISO timestamps), `action`,
+`actorId`, `source`, `repositoryId`, `taskId`, `runId`, `providerId`, and `result`
+(`success` or `error`). Limits are 1–500, default 100. New events do not shift an
+existing cursor; a cursor removed by retention returns 404. Individual events use
+`GET .../audit/events/:eventId` with the same organization boundary.
+
+The first export format is JSONL: `GET .../audit/export?format=jsonl` accepts the
+same filters and limits. Each response is bounded to one page; continue with the
+`x-nitely-next-cursor` response header. Export keeps original ids/timestamps and
+records `audit.export` before releasing the response. Query and export scan the
+local file with bounded retained rows, rather than loading the entire log.
+
+`GET .../audit/retention` returns `{version:1,retentionDays:null}` until configured.
+Only organization owners can `PUT` that policy (`null` means retain indefinitely;
+integer days range from 1 to 3650). Changing policy does not delete records.
+`POST .../audit/prune` explicitly deletes only that organization's events strictly
+older than the configured cutoff, returning `deleted` and `cutoff`. Policy changes
+and prune requests are audited before mutation. Prune and all appends share a file
+lease and pruning uses a synced atomic replacement; other organizations' event
+metadata is preserved. Queries continue to include expired records until pruning.
+
+Audit records contain allowlisted metadata, source and organization attribution,
+request ids, and session hashes, without session cookies, credentials or run log
+payloads. Runtime execution and shared-provider use include resource identifiers
+when available. Legacy actor-attributed events remain queryable; unattributed
+legacy/local events remain available only through the operator's global audit API.
+
+Local JSONL is owner-only application-managed storage, not a tamper-proof ledger:
+file owners can edit it, there is no external signature chain, and retention
+intentionally rewrites it. Hosted deployments requiring immutable retention or
+multi-host writers must send audit metadata to an access-controlled external
+append-only store; the local file lease coordinates processes on one host only.

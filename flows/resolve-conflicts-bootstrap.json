@@ -2,6 +2,14 @@
   "apiVersion": "nitely.dev/v1alpha1",
   "kind": "Flow",
   "metadata": {
+    "configurables": [
+      {
+        "key": "verifyCommand",
+        "label": "Repository verification command",
+        "type": "text",
+        "required": true
+      }
+    ],
     "name": "resolve-conflicts-bootstrap"
   },
   "spec": {
@@ -25,7 +33,7 @@
       {
         "id": "test",
         "type": "command",
-        "command": "git diff --check && git diff --cached --check && test -z \"$(git diff --name-only --diff-filter=U)\" && untracked_conflicts=$(git ls-files --others --exclude-standard -z | xargs -0 -r grep -n -I -E '^(<<<<<<<|=======|>>>>>>>)' -- || true) && test -z \"$untracked_conflicts\" && pnpm exec vitest run && pnpm run check && pnpm run build",
+        "command": "git diff --check && git diff --cached --check && test -z \"$(git diff --name-only --diff-filter=U)\" && untracked_conflicts=$(git ls-files --others --exclude-standard -z | xargs -0 -r grep -n -I -E '^(<<<<<<<|=======|>>>>>>>)' -- || true) && test -z \"$untracked_conflicts\" && {{config.verifyCommand}}",
         "timeoutMs": 600000,
         "inputs": ["implementation"],
         "outputs": ["test-report"]

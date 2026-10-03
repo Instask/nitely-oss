@@ -6,6 +6,29 @@ no coding agent, credentials, or network access; step 3 is the first real run.
 Requirements: Node.js 24+, pnpm 11, and Git. Linux is the supported execution
 platform; see the [README](../README.md) for the full list.
 
+## Repository commands
+
+Built-in verification flows use your repository's commands. Create
+`.nitely/instructions.json` in the target repository:
+
+```json
+{
+  "version": 1,
+  "configuration": {
+    "setupCommand": "uv sync --frozen",
+    "verifyCommand": "uv run pytest"
+  }
+}
+```
+
+Use commands appropriate to your project; for Node projects, for example,
+`pnpm install --frozen-lockfile` and `pnpm test`. Nitely's own check/test/build
+sequence is configured in this repository's instructions file. Task flow
+configuration overrides repository defaults. Missing required commands block
+preflight with a configuration error. The command recorded in stage evidence
+is the resolved command. Resumed runs retain their saved configuration.
+For OCI setup, edit the setup stage's `networkDomains` to match your registries.
+
 ## 0. Install
 
 ```bash
@@ -70,18 +93,15 @@ A real run needs:
 - the agent CLI the flow uses. The flow above uses Claude Code with
   `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`; `flows/implement-spec-bootstrap.json` uses the Codex CLI.
 
-The built-in flows verify with Nitely's own commands
-(`pnpm exec vitest run && pnpm run check && pnpm run build`). Copy the flow into
-your repository, where it takes precedence over the built-in one, and point its
-`test` stage at your repository's checks:
+Configure your repository commands as shown above, then validate and check
+the selected flow before running:
 
 ```bash
 cd /path/to/your/repo
-mkdir -p flows
-cp /path/to/nitely/flows/implement-spec-bootstrap-claude.json flows/
-# edit the "command" of the stage with "id": "test", e.g. "npm test" or "make check"
 nitely validate flows/implement-spec-bootstrap-claude.json \
   --external-input spec --external-input tech-design
+nitely doctor flows/implement-spec-bootstrap-claude.json --repo . \
+  --input spec=spec.md --input tech-design=tech-design.md
 ```
 
 Write down the intent. Start from [templates/nitely-spec.md](templates/nitely-spec.md)

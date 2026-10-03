@@ -1,4 +1,6 @@
 export const WEB_PERMISSIONS = [
+  "organizations:manage",
+  "organizations:audit:view",
   "tasks:view",
   "tasks:write",
   "planning:approve",
@@ -7,6 +9,7 @@ export const WEB_PERMISSIONS = [
   "flows:manage",
   "providers:write:personal",
   "providers:write:shared",
+  "providers:use:shared",
   "notifications:manage",
   "notifications:resolve",
   "evidence:view",
@@ -37,6 +40,8 @@ const organizationPermissions: Record<
   ReadonlySet<WebPermission>
 > = {
   owner: new Set([
+    "organizations:audit:view",
+    "organizations:manage",
     "tasks:view",
     "tasks:write",
     "planning:approve",
@@ -45,6 +50,7 @@ const organizationPermissions: Record<
     "flows:manage",
     "providers:write:personal",
     "providers:write:shared",
+    "providers:use:shared",
     "notifications:manage",
     "notifications:resolve",
     "evidence:view",
@@ -54,6 +60,7 @@ const organizationPermissions: Record<
     "preview:control",
   ]),
   maintainer: new Set([
+    "organizations:audit:view",
     "tasks:view",
     "tasks:write",
     "planning:approve",
@@ -61,6 +68,7 @@ const organizationPermissions: Record<
     "runs:review",
     "flows:manage",
     "providers:write:personal",
+    "providers:use:shared",
     "notifications:manage",
     "notifications:resolve",
     "evidence:view",
@@ -77,6 +85,7 @@ const organizationPermissions: Record<
     "runs:review",
     "flows:manage",
     "providers:write:personal",
+    "providers:use:shared",
     "notifications:resolve",
     "evidence:view",
     "preview:view",

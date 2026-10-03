@@ -129,6 +129,7 @@ export interface AgentSessionOutcome {
 }
 
 export interface RunCommandOptions {
+  networkDomains?: readonly string[];
   timeoutMs?: number;
   signal?: AbortSignal;
   cancellationGraceMs?: number;

@@ -18,6 +18,7 @@ import {
   normalizeFlowConfiguration,
   type FlowConfiguration,
 } from "../flows/configurables.js";
+import { loadProjectInstructions } from "../run/project-instructions.js";
 import { WebInputError } from "../web/errors.js";
 import { assertWorkItemTypeAllowed } from "./governance.js";
 import { createWorkItem } from "./store.js";
@@ -119,7 +120,9 @@ export async function createFlowWorkItem(
   const workItemType = input.workItemType ?? flowWorkItemType(loaded.flow);
   let configuration: FlowConfiguration;
   try {
-    configuration = normalizeFlowConfiguration(loaded.flow, input.configuration ?? {});
+    const instructions = await loadProjectInstructions(repoPath);
+    configuration = normalizeFlowConfiguration(loaded.flow, input.configuration ?? {},
+      instructions.loaded ? instructions.configuration : undefined);
   } catch (error) {
     if (error instanceof FlowConfigurationError) {
       throw new WebInputError(error.message);

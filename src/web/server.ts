@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { isIP } from "node:net";
 import { resolve, dirname, join } from "node:path";
@@ -24,6 +24,7 @@ import {
   type RunFlowDependencies,
   type RunFlowInput,
   type RunFlowResult,
+  type ResumeRunInput,
 } from "../run/run-flow.js";
 import {
   normalizeExecutionBackendName,
@@ -150,10 +151,10 @@ import {
 } from "../providers/descriptors.js";
 import { FileProviderConnectionStore } from "../providers/file-store.js";
 import type { ProviderOAuthOptions } from "../providers/file-store.js";
-import { resolveProviderStore } from "../providers/index.js";
+import { bindProviderConnections, validateProviderConnectionBindings, resolveProviderStore } from "../providers/index.js";
 import { createProviderOAuthAdapters, PROVIDER_OAUTH_CLIENT_ENV } from "../providers/oauth/adapters.js";
 import type { ProviderOAuthAdapter } from "../providers/oauth/adapters.js";
-import { MissingConnectionError, ReconnectRequiredError } from "../providers/types.js";
+import { ConnectionManagementDeniedError, MissingConnectionError, ReconnectRequiredError } from "../providers/types.js";
 import { ProviderOAuthFlowError, ProviderOAuthFlowRegistry } from "./provider-oauth-flows.js";
 import type {
   ProviderAuthMethod,
@@ -266,6 +267,8 @@ import {
   MAX_SCHEDULER_CONCURRENCY,
   resolveMaxConcurrentTasks,
   runSchedulerOnce,
+  usageLimitBlockedRun,
+  parseRetryAfter,
   type SchedulerRunSummary,
 } from "../scheduler/run.js";
 import {
@@ -276,7 +279,9 @@ import {
 import {
   projectSchedulerCooldowns,
   readSchedulerCooldowns,
+  runtimeKey,
 } from "../scheduler/cooldown.js";
+import { ResumeClaimStore, resumeClaimStorePath } from "../scheduler/resume-claim.js";
 import {
   dispatchFactoryQueue,
   getFactoryQueueSnapshot,
@@ -431,6 +436,8 @@ import {
   canonicalChangeRequestTarget,
   changeRequestIdentity,
 } from "./change-requests.js";
+import { organizationSessionAccessAllowed, type OrganizationSessionAccess } from "./session-policy.js";
+import { configureOrganizationOidc, getOrganizationOidc, startOrganizationOidc, finishOrganizationOidc } from "./oidc.js";
 import {
   bootstrapInitialAdmin,
   createSession,
@@ -445,6 +452,9 @@ import {
 } from "./users.js";
 import {
   type PublicOrganizationMembership,
+  getOrganizationSecurityPolicy, updateOrganizationSecurityPolicy, revokeOrganizationSessions,
+  listOrganizationMembers, changeOrganizationMember,
+  listOrganizationInvitations, createOrganizationInvitation, resolveOrganizationInvitation,
 } from "./organizations.js";
 import {
   organizationRoleHasPermission,
@@ -458,6 +468,8 @@ import {
 import {
   appendSecurityAuditEvent,
   listSecurityAuditEvents,
+  queryOrganizationAudit, getOrganizationAuditRetention, setOrganizationAuditRetention, pruneOrganizationAudit,
+  type OrganizationAuditQuery, type SecurityAuditContext,
   securityAuditSubjectFingerprint,
   type SecurityAuditActor,
   type SecurityAuditTarget,
@@ -493,10 +505,12 @@ export interface StartWebServerInput {
   authMode?: WebAuthMode;
   authEnv?: Record<string, string | undefined>;
   providerEnv?: Record<string, string | undefined>;
+  providerConnectionBindings?: RunFlowInput["providerConnections"];
   runFlow?: (
     input: RunFlowInput,
     dependencies?: RunFlowDependencies,
   ) => Promise<RunFlowResult>;
+  resumeRun?: (input: ResumeRunInput, dependencies?: RunFlowDependencies) => Promise<RunFlowResult>;
   createRunId?: () => string;
   runGoldenPathDemo?: (input: { outputDir: string }) => Promise<GoldenPathDemoResult>;
   providerCommandStatus?: (command: string, args: string[]) => Promise<boolean>;
@@ -585,7 +599,7 @@ function providerStoreOAuthOptions(
 
 export type WebAuthMode = "local" | "required";
 
-export interface WebUserContext {
+export interface WebUserContext extends OrganizationSessionAccess {
   id: string;
   email: string;
   role: "admin" | "user";
@@ -614,6 +628,8 @@ interface PreparedApiTokenRequest {
   denial?: Error;
   denialReasonCode?: string;
 }
+
+const requestAuditContexts = new WeakMap<IncomingMessage, SecurityAuditContext>();
 
 const authorizedApiTokenRequests = new WeakMap<
   IncomingMessage,
@@ -874,6 +890,7 @@ async function auditWebSecurityAction(
   credential: string | null | undefined,
   status: number,
   reasonCode: string,
+  context?: SecurityAuditContext,
 ): Promise<void> {
   if (!action) return;
   const target = safeSecurityAuditTarget(action.target, credential);
@@ -886,6 +903,7 @@ async function auditWebSecurityAction(
     reasonCode,
     actor,
     ...(target ? { target } : {}),
+    context: { ...context, ...(target?.id && ["repository", "task", "run", "provider"].includes(target.type) ? { [target.type + "Id"]: target.id } : {}) },
   });
 }
 
@@ -1632,6 +1650,7 @@ function selectOrganizationContext(
   const membership = (user.memberships ?? []).find(
     (candidate) => candidate.organizationId === requestedOrganizationId,
   );
+  if (!membership && (user as OrganizationSessionAccess).breakGlassOrganizationId === requestedOrganizationId) return { ...user, currentOrganizationId: requestedOrganizationId };
   if (!membership) {
     throw new WebForbiddenError("organization access required");
   }
@@ -1692,6 +1711,17 @@ function clearSessionCookie(secure: boolean): string {
   }`;
 }
 
+function sessionRequestPolicyOptions(request: IncomingMessage, input: { authEnv?: Record<string, string | undefined> }) {
+  const url = new URL(request.url ?? "/", "http://localhost");
+  const route = /^\/api\/organizations\/([^/]+)/.exec(url.pathname);
+  const header = request.headers["x-nitely-organization-id"];
+  let organizationId: string | undefined;
+  try { organizationId = route ? decodeURIComponent(route[1]) : typeof header === "string" ? header : undefined; } catch { throw new WebInputError("invalid organization id"); }
+  const breakGlass = (input.authEnv ?? process.env).NITELY_WEB_BREAK_GLASS === "true" && requestHeader(request, "x-nitely-break-glass") === "true" &&
+    /^\/api\/organizations\/[^/]+\/security-policy(?:\/revoke-sessions)?$/.test(url.pathname);
+  return { organizationId, breakGlass };
+}
+
 async function resolveUserContext(
   request: IncomingMessage,
   input: Required<Pick<StartWebServerInput, "host" | "port">> &
@@ -1710,7 +1740,7 @@ async function resolveUserContext(
   if (!sessionId) {
     return null;
   }
-  const user = await readSessionUser(repoPath, sessionId);
+  const user = await readSessionUser(repoPath, sessionId, sessionRequestPolicyOptions(request, input));
   const requestedOrganizationId = request.headers["x-nitely-organization-id"];
   return user
     ? publicContext(
@@ -1742,6 +1772,7 @@ async function securityAuditActorForRequest(
     Omit<StartWebServerInput, "host" | "port">,
   repoPath: string,
   preparedApiToken?: PreparedApiTokenRequest,
+  resourceOrganizationId?: string,
 ): Promise<SecurityAuditActor> {
   if (preparedApiToken) {
     if (preparedApiToken.tokenId && preparedApiToken.tokenName) {
@@ -1755,9 +1786,12 @@ async function securityAuditActorForRequest(
   }
   const sessionId = parseCookies(request.headers.cookie).nitely_session;
   if (!sessionId) return { type: "anonymous" };
-  const user = await readSessionUser(repoPath, sessionId);
+  const user = await readSessionUser(repoPath, sessionId, { ...sessionRequestPolicyOptions(request, input), touch: false, auditBreakGlass: false });
   if (!user) return { type: "anonymous" };
-  const requestedOrganizationId = request.headers["x-nitely-organization-id"];
+  const routeOrg = /^\/api\/organizations\/([^/]+)/.exec(new URL(request.url ?? "/", "http://localhost").pathname);
+  let routeOrganizationId: string | undefined;
+  try { routeOrganizationId = routeOrg ? decodeURIComponent(routeOrg[1]) : undefined; } catch { /* Invalid resources remain unattributed. */ }
+  const requestedOrganizationId = resourceOrganizationId ?? routeOrganizationId ?? request.headers["x-nitely-organization-id"];
   const selected =
     typeof requestedOrganizationId === "string"
       ? (user.memberships ?? []).find(
@@ -1785,6 +1819,7 @@ function recordVisibleToUser(
   record: { ownerId?: string; organizationId?: string },
   user: WebUserContext,
 ): boolean {
+  if (!organizationSessionAccessAllowed(user, record.organizationId)) return false;
   if (user.authMode === "local" || user.role === "admin") {
     return true;
   }
@@ -1800,6 +1835,7 @@ function repositoryVisibleToUser(
   repository: WebRepository,
   user: WebUserContext,
 ): boolean {
+  if (!organizationSessionAccessAllowed(user, repository.organizationId)) return false;
   if (user.authMode === "local" || user.role === "admin") {
     return true;
   }
@@ -2084,6 +2120,7 @@ function requireWriteAccessToOrganization(
   organizationId: string | undefined,
   permission: WebPermission = "tasks:write",
 ): void {
+  if (!organizationSessionAccessAllowed(user, organizationId)) throw new WebForbiddenError("organization session policy denied access");
   const role = (user.memberships ?? []).find(
     (membership) => membership.organizationId === organizationId,
   )?.role;
@@ -2107,6 +2144,7 @@ function requireWriteAccessToRecord(
   record: { ownerId?: string; organizationId?: string },
   permission: WebPermission = "tasks:write",
 ): void {
+  if (!organizationSessionAccessAllowed(user, record.organizationId)) throw new WebForbiddenError("organization session policy denied access");
   if (user.authMode === "local" || user.role === "admin") {
     return;
   }
@@ -2124,6 +2162,7 @@ function currentWritableOrganizationId(
   user: WebUserContext,
   permission: WebPermission = "tasks:write",
 ): string | undefined {
+  if (!organizationSessionAccessAllowed(user, user.currentOrganizationId)) throw new WebForbiddenError("organization session policy denied access");
   if (user.authMode === "local" || user.role === "admin") {
     return user.currentOrganizationId;
   }
@@ -2135,6 +2174,7 @@ function requireCurrentOrganizationPermission(
   user: WebUserContext,
   permission: WebPermission,
 ): void {
+  if (!organizationSessionAccessAllowed(user, user.currentOrganizationId)) throw new WebForbiddenError("organization session policy denied access");
   if (user.authMode === "local" || user.role === "admin") return;
   const role = user.currentOrganizationId
     ? (user.memberships ?? []).find(
@@ -3474,10 +3514,27 @@ function getProviderStore(
   );
 }
 
+function organizationProviderPath(homeRepoPath: string, organizationId: string): string {
+  return join(homeRepoPath, ".nitely", "organizations", createHash("sha256").update(organizationId).digest("hex"), "connections.json");
+}
+
+function organizationProviderStore(input: RuntimeStartWebServerInput, homeRepoPath: string, organizationId: string, user: WebUserContext, manage: boolean): FileProviderConnectionStore {
+  const member = user.memberships?.find((membership) => membership.organizationId === organizationId);
+  if (!member || !organizationSessionAccessAllowed(user, organizationId)) throw new WebNotFoundError("organization not found");
+  if (!organizationRoleHasPermission(member.role, manage ? "providers:write:shared" : "providers:use:shared")) throw new WebForbiddenError();
+  return new FileProviderConnectionStore({ path: organizationProviderPath(homeRepoPath, organizationId), env: {}, actorId: user.id,
+    connectionAllowed: (record) => record.credential.organizationId === organizationId && (record.credential.scope === "org" || record.credential.scope === "external-vault-backed"),
+    ...providerStoreOAuthOptions(input),
+    onAudit: async (event) => { await appendSecurityAuditEvent(homeRepoPath, { action: "providers.connection." + event.action, decision: "allow", outcome: event.result === "failed" ? "error" : "success", httpStatus: 200, reasonCode: event.result,
+      actor: { type: "user", id: user.id, organizationId, organizationRole: member.role }, context: { providerId: event.providerId }, target: { type: "provider", id: event.connectionId ?? event.providerId } }); },
+  });
+}
+
 function providerStoreForUser(
   input: RuntimeStartWebServerInput,
   repoPath: string,
   user: WebUserContext,
+  context: { organizationId?: string; repositoryId?: string | null; repositoryOrganizationId?: string } = {},
 ): ProviderConnectionStore {
   if (user.authMode === "local") {
     return getProviderStore(input, repoPath);
@@ -3486,9 +3543,30 @@ function providerStoreForUser(
   // operator configured for the repository. Without the fallback a shared
   // credential is invisible to every Web Console user, and the run that needs
   // it fails with no indication that the credential exists one directory up.
+  const repository = context.repositoryId === null ? undefined : input.repositories?.find((candidate) => context.repositoryId ? candidate.id === context.repositoryId : resolve(candidate.path) === resolve(repoPath));
+  context = { repositoryId: repository?.id, ...context };
+  const organizationId = context.organizationId ?? context.repositoryOrganizationId ?? repository?.organizationId ?? user.currentOrganizationId;
+  if ((context.repositoryOrganizationId ?? repository?.organizationId) && (context.repositoryOrganizationId ?? repository?.organizationId) !== organizationId) throw new WebNotFoundError("repository not found in organization");
+  const membership = user.memberships?.find((member) => member.organizationId === organizationId);
+  const canUseShared = organizationSessionAccessAllowed(user, organizationId) && organizationRoleHasPermission(membership?.role, "providers:use:shared");
   return new FileProviderConnectionStore({
     path: join(repoPath, ".nitely", "users", user.id, "connections.json"),
-    fallbackPaths: [join(repoPath, ".nitely", "connections.json")],
+    fallbackPaths: [...(organizationId && canUseShared ? [organizationProviderPath(resolve(input.repoPath), organizationId)] : []), join(repoPath, ".nitely", "connections.json")],
+    actorId: user.id,
+    connectionManageable: (record) => record.credential.scope !== "org" && record.credential.scope !== "external-vault-backed" || organizationRoleHasPermission(membership?.role, "providers:write:shared"),
+    connectionPriority: (record) => record.credential.scope === "org" || record.credential.scope === "external-vault-backed" ? record.credential.repositoryId ? 0 : 1 : record.credential.scope === "user" ? 2 : 3,
+    connectionAllowed: (record) => {
+      const credential = record.credential;
+      if (!organizationSessionAccessAllowed(user, credential.organizationId)) return false;
+      if (credential.organizationId && credential.organizationId !== organizationId) return false;
+      if (credential.repositoryId && credential.repositoryId !== context.repositoryId) return false;
+      if (credential.scope === "org" || credential.scope === "external-vault-backed") return canUseShared && credential.organizationId === organizationId;
+      return credential.scope !== "user" || !credential.ownerId || credential.ownerId === user.id;
+    },
+    onAudit: async (event) => {
+      if (event.action === "status-check" || !event.organizationId) return;
+      await appendSecurityAuditEvent(resolve(input.repoPath), { action: "providers.connection." + event.action, decision: "allow", outcome: event.result === "failed" ? "error" : "success", httpStatus: 200, reasonCode: event.result, actor: { type: "user", id: user.id, organizationId: event.organizationId, organizationRole: membership?.role }, context: { repositoryId: context.repositoryId ?? undefined, providerId: event.providerId }, target: { type: "provider", id: event.connectionId } });
+    },
     env: input.providerEnv ?? process.env,
     commandStatus: input.providerCommandStatus,
     ...providerStoreOAuthOptions(input),
@@ -3641,6 +3719,7 @@ async function selectWebExternalKnowledge(input: {
     input.serverInput,
     input.homeRepoPath,
     input.user,
+    { repositoryId: input.repository.id, organizationId: input.repository.organizationId ?? input.user.currentOrganizationId, repositoryOrganizationId: input.repository.organizationId },
   );
   if (enabled.some((view) => view.attachment.source.type === "remote")) {
     await requireKnowledgeGitHubCredentialScope({
@@ -3702,6 +3781,7 @@ async function requireWebKnowledgeRunAccess(input: {
     input.serverInput,
     input.homeRepoPath,
     input.user,
+    { repositoryId: input.repository.id, organizationId: input.repository.organizationId ?? input.user.currentOrganizationId, repositoryOrganizationId: input.repository.organizationId },
   );
   if (
     !input.pinnedRun &&
@@ -4087,6 +4167,7 @@ async function runStoredWorkItem(
     requireRecordAccess(workItem, user, notFoundMessage);
     requireWriteAccessToRecord(user, workItem, "runs:start");
   }
+  providerStore = bindProviderConnections(user.authMode === "required" ? providerStoreForUser(serverInput, repository.path, user, { organizationId: workItem.organizationId, repositoryId: repository.id, repositoryOrganizationId: repository.organizationId }) : providerStore, serverInput.providerConnectionBindings);
   if (workItem.flowId) {
     const flowStore = openFlowStore(repoPath);
     try {
@@ -4107,6 +4188,7 @@ async function runStoredWorkItem(
     dependencyGuards: workItemDependencyGuards(candidateSnapshot, workItems),
   };
   const starts = await evaluateWorkItemRunStarts({
+    executionBackend: webExecutionBackendPolicyForInput(serverInput, user.authMode).backend,
     repoPath,
     repoId: repository.id,
     repoName: repository.name,
@@ -4128,6 +4210,7 @@ async function runStoredWorkItem(
   }
   const runnerInput: RunFlowInput = {
     ...evaluatedInput,
+    ...(serverInput.providerConnectionBindings ? { providerConnections: serverInput.providerConnectionBindings } : {}),
     ...(taskScope ? { taskScope } : {}),
   };
   const flowDocument = runnerInput.flowDocument ??
@@ -4285,13 +4368,14 @@ async function buildAllSchedulerView(
           )
         ).map((view) => withRepository(view, repository));
         const starts = await evaluateWorkItemRunStarts({
+          executionBackend: webExecutionBackendPolicyForInput(input, user.authMode).backend,
           repoPath: repository.path,
           repoId: repository.id,
           repoName: repository.name,
           workItems: prepared.workItems,
           candidateIds,
           intent: { kind: "automatic" },
-          providerStore: providerStoreForUser(input, repository.path, user),
+          providerStore: providerStoreForUser(input, repository.path, user, { repositoryId: repository.id, repositoryOrganizationId: repository.organizationId }),
           ...(input.getChangeRequestStatus
             ? { getChangeRequestStatus: input.getChangeRequestStatus }
             : {}),
@@ -4662,6 +4746,7 @@ function notificationVisibleToUser(
   notification: NotificationRecord,
   user: WebUserContext,
 ): boolean {
+  if (!organizationSessionAccessAllowed(user, notification.organizationId ?? notification.teamId)) return false;
   if (user.authMode === "local" || user.role === "admin") {
     return true;
   }
@@ -4694,6 +4779,7 @@ function requireNotificationManageAccess(
   notification: NotificationRecord,
   user: WebUserContext,
 ): void {
+  if (!organizationSessionAccessAllowed(user, notification.organizationId ?? notification.teamId)) throw new WebForbiddenError("organization session policy denied access");
   if (user.authMode === "local" || user.role === "admin") {
     return;
   }
@@ -4713,6 +4799,7 @@ function notificationManageableByUser(
   notification: NotificationRecord,
   user: WebUserContext,
 ): boolean {
+  if (!organizationSessionAccessAllowed(user, notification.organizationId ?? notification.teamId)) return false;
   if (user.authMode === "local" || user.role === "admin") {
     return true;
   }
@@ -4742,7 +4829,7 @@ function userBelongsToOrganization(user: PublicUser, organizationId: string): bo
 function manageableNotificationOrganizationIds(user: WebUserContext): string[] {
   return (user.memberships ?? [])
     .filter((membership) =>
-      membership.role === "owner" || membership.role === "maintainer",
+      organizationSessionAccessAllowed(user, membership.organizationId) && (membership.role === "owner" || membership.role === "maintainer"),
     )
     .map((membership) => membership.organizationId);
 }
@@ -4761,7 +4848,13 @@ function assignmentDirectoryUsers(
     ];
   }
   if (currentUser.role === "admin") {
-    return users;
+    if (!currentUser.sessionDeniedOrganizationIds?.length) return users;
+    return users.flatMap((user) => {
+      const memberships = user.memberships?.filter((member) => organizationSessionAccessAllowed(currentUser, member.organizationId));
+      if (user.memberships?.length && !memberships?.length) return [];
+      const current = memberships?.[0];
+      return [{ ...user, memberships, currentOrganizationId: current?.organizationId, currentOrganizationRole: current?.role }];
+    });
   }
   const manageableIds = new Set(manageableNotificationOrganizationIds(currentUser));
   if (manageableIds.size > 0) {
@@ -5643,6 +5736,7 @@ function appendAcceptedRunCreated(input: {
   repoName?: string;
   inputs: RunFlowInput["inputs"];
   configuration?: RunFlowInput["configuration"];
+  providerConnections?: RunFlowInput["providerConnections"];
   workItemId: string;
   workItemType?: string;
   ownerId?: string;
@@ -5660,6 +5754,7 @@ function appendAcceptedRunCreated(input: {
       repoName: input.repoName,
       inputs: input.inputs,
       configuration: input.configuration,
+      providerConnections: input.providerConnections,
       branchName: input.branchName,
       workItemId: input.workItemId,
       workItemType: input.workItemType,
@@ -5690,6 +5785,7 @@ function ensureRunCompletedEvent(
       repoName: runInput.repoName,
       inputs: runInput.inputs,
       ...(runInput.configuration ? { configuration: runInput.configuration } : {}),
+      ...(runInput.providerConnections ? { providerConnections: runInput.providerConnections } : {}),
       workItemId: runInput.workItemId,
       workItemType: runInput.workItemType,
       ...(runInput.ownerId ? { ownerId: runInput.ownerId } : {}),
@@ -5784,6 +5880,7 @@ async function startConfirmedTaskReworkRun(input: {
   };
   const runnerInput: RunFlowInput = {
     flowPath: input.request.flowPath,
+    ...(input.serverInput.providerConnectionBindings ? { providerConnections: input.serverInput.providerConnectionBindings } : {}),
     repoPath: input.repository.path,
     repoId: input.repository.id,
     repoName: input.repository.name,
@@ -6009,6 +6106,74 @@ async function runStoredWorkItemAcrossRepositories(
   throw new WebNotFoundError(notFoundMessage);
 }
 
+async function prepareWebRunResume(
+  input: RuntimeStartWebServerInput,
+  repository: WebRepository,
+  runId: string,
+  requestingUser?: WebUserContext,
+) {
+  const events = new EventStore(eventStorePath(repository.path));
+  const run = (() => { try { return projectRun(events.list(runId), { openAttemptStatus: "interrupted" }); } finally { events.close(); } })();
+  if (run.status !== "blocked" && run.status !== "interrupted") {
+    throw new WebInputError("only blocked or interrupted runs can be resumed");
+  }
+  const authMode = webStartupSecurityPolicy(input).authMode;
+  const owner = run.ownerId ? await getPublicUser(resolve(input.repoPath), run.ownerId) : null;
+  const user: WebUserContext = authMode === "local"
+    ? { id: "local", email: "local", role: "admin", authMode }
+    : owner ? publicContext(owner, authMode, run.organizationId)
+    : (() => { throw new WebInputError("run owner no longer exists"); })();
+  if (!repositoryVisibleToUser(repository, user)) throw new WebNotFoundError("repository not found");
+  requireWriteAccessToRecord(user, run, "runs:start");
+  if (requestingUser) requireWriteAccessToRecord(requestingUser, run, "runs:start");
+  const homeRepoPath = resolve(input.repoPath);
+  const providerStore = bindProviderConnections(providerStoreForUser(input, repository.path, user, { organizationId: run.organizationId, repositoryId: repository.id, repositoryOrganizationId: repository.organizationId }), run.providerConnections);
+  const knowledgeProviderStore = runHasPinnedExternalKnowledge(repository.path, runId)
+    ? await requireWebKnowledgeRunAccess({ serverInput: input, homeRepoPath, repository, user, pinnedRun: true })
+    : providerStoreForUser(input, homeRepoPath, user);
+  return {
+    resumeInput: { repoPath: repository.path, runId, executionBackend: webExecutionBackendPolicyForInput(input, authMode).backend },
+    dependencies: { providerStore, knowledgeProviderStore },
+  };
+}
+
+async function resumeWebRun(input: RuntimeStartWebServerInput, repository: WebRepository, runId: string): Promise<RunFlowResult> {
+  const prepared = await prepareWebRunResume(input, repository, runId);
+  return await (input.resumeRun ?? resumeRun)(prepared.resumeInput, prepared.dependencies);
+}
+
+// Recovery dispatches existing blocked runs only; intake remains operator-driven.
+export async function runWebUsageLimitRecovery(input: StartWebServerInput): Promise<void> {
+  const repositories = await loadWebRepositories(input.repoPath, input.repositories);
+  for (const repository of repositories.filter((repo) => !repo.synthetic)) {
+    const tasks = await listUnifiedWorkItems(repository.path);
+    if (!tasks.some((task) => task.latestRunId)) continue;
+    const persisted = new Map(readSchedulerCooldowns(repository.path).map((entry) => [entry.runtime, new Date(entry.until)]));
+    const now = new Date();
+    const events = new EventStore(eventStorePath(repository.path));
+    const candidates = (() => {
+      try {
+        return tasks.filter((task) => {
+          if (!task.latestRunId) return false;
+          const run = projectRun(events.list(task.latestRunId));
+          if (run.status !== "blocked" || run.blocker?.reason !== "agent_usage_limit") return false;
+          return Boolean(usageLimitBlockedRun({ task, eventStore: events, now, persisted })) ||
+            (!parseRetryAfter(run.blocker.retryAfter, now) && !persisted.has(runtimeKey(run.blocker.runtime ?? "")));
+        });
+      } finally { events.close(); }
+    })();
+    if (!candidates.length) continue;
+    await runSchedulerOnce({
+      repoPath: repository.path,
+      repoId: repository.id,
+      candidateIds: candidates.slice(0, 20).map((task) => task.id),
+      maxConcurrentTasks: 1,
+      executionBackend: webExecutionBackendPolicyForInput(input, webStartupSecurityPolicy(input).authMode).backend,
+      resumeRun: (resumeInput) => resumeWebRun(input, repository, resumeInput.runId),
+    });
+  }
+}
+
 async function updateUnifiedRunState(
   repoPath: string,
   id: string,
@@ -6079,6 +6244,49 @@ async function settleOrUpdateUnifiedRun(
     result.storeKind,
   );
   return true;
+}
+
+async function listRunPage(
+  repositories: WebRepository[], user: WebUserContext, url: URL,
+) {
+  const rawLimit = url.searchParams.get("limit");
+  const limit = rawLimit === null ? DEFAULT_RUN_LIST_LIMIT : Number(rawLimit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new WebInputError("run limit must be an integer between 1 and 100");
+  const requestedIds = url.searchParams.getAll("runId");
+  if (requestedIds.length) {
+    if (requestedIds.length > 100 || requestedIds.some((id) => !id || id.length > 512)) throw new WebInputError("at most 100 non-empty run ids are allowed");
+    return { runs: (await listAllRuns(repositories, user, { runIds: requestedIds })).slice(0, 100) };
+  }
+  let cursor: [string, string] | undefined;
+  const encoded = url.searchParams.get("cursor");
+  if (encoded !== null) {
+    try {
+      if (encoded.length > 2048) throw new Error("too long");
+      const value: unknown = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+      if (!Array.isArray(value) || value.length !== 2 || value.some((part) => typeof part !== "string" || !part || part.length > 512)) throw new Error("invalid cursor");
+      cursor = value as [string, string];
+    } catch { throw new WebInputError("invalid run cursor"); }
+  }
+  const grouped = await Promise.all(visibleRepositories(repositories, user).map(async (repository) => {
+    const visible: WebRunSummary[] = [];
+    let beforeRunId = cursor?.[0];
+    let includeBefore = Boolean(cursor && repository.id.localeCompare(cursor[1]) > 0);
+    while (visible.length <= limit) {
+      const batch = await listRuns(repository.path, { limit: limit + 1, beforeRunId, includeBefore });
+      visible.push(...batch.filter((run) => recordVisibleToUser(run, user)).map((run) => withRepository(run, repository)));
+      if (batch.length < limit + 1) break;
+      beforeRunId = batch.at(-1)!.runId;
+      includeBefore = false;
+    }
+    return visible;
+  }));
+  const rows = grouped.flat().sort((left, right) => right.runId.localeCompare(left.runId) || (left.repoId ?? "").localeCompare(right.repoId ?? ""));
+  const runs = rows.slice(0, limit);
+  const last = runs.at(-1);
+  return {
+    runs,
+    ...(rows.length > limit && last ? { nextCursor: Buffer.from(JSON.stringify([last.runId, last.repoId])).toString("base64url") } : {}),
+  };
 }
 
 async function listAllRuns(
@@ -6465,8 +6673,14 @@ async function getScopedRunDetail(
       });
       const decorated = withRepository(run, repository);
       requireRecordAccess(decorated, user, "run not found");
+      let canResume = false;
+      try {
+        requireWriteAccessToRecord(user, decorated, "runs:start");
+        canResume = decorated.status === "blocked" || decorated.status === "interrupted";
+      } catch { /* Read-only viewers keep evidence access. */ }
       return {
         ...decorated,
+        canResume,
         parentRun:
           decorated.parentRun && recordVisibleToUser(decorated.parentRun, user)
             ? withRepository(decorated.parentRun, repository)
@@ -6632,7 +6846,12 @@ function requireSharedProviderCredentialAccess(
   user: WebUserContext,
   organizationId: string | undefined,
 ): void {
-  requireCurrentOrganizationPermission(user, "providers:write:shared");
+  if (!organizationSessionAccessAllowed(user, organizationId)) throw new WebForbiddenError();
+  if (user.authMode === "required") {
+    const member = user.memberships?.find((membership) => membership.organizationId === (organizationId ?? user.currentOrganizationId));
+    if (!member) throw new WebNotFoundError("organization not found");
+    if (!organizationRoleHasPermission(member.role, "providers:write:shared")) throw new WebForbiddenError();
+  } else requireCurrentOrganizationPermission(user, "providers:write:shared");
   if (
     user.authMode === "required" &&
     user.role !== "admin" &&
@@ -6643,20 +6862,10 @@ function requireSharedProviderCredentialAccess(
   }
 }
 
-async function requireExistingProviderCredentialWriteAccess(
-  store: ProviderConnectionStore,
-  providerId: ProviderId,
-  user: WebUserContext,
-): Promise<void> {
-  const status = (await store.listStatuses()).find(
-    (candidate) => candidate.id === providerId,
-  );
-  if (providerCredentialScopeIsShared(status?.credential?.scope)) {
-    requireSharedProviderCredentialAccess(
-      user,
-      status?.credential?.organizationId,
-    );
-  }
+async function requireExistingProviderCredentialWriteAccess(store: ProviderConnectionStore, providerId: ProviderId, user: WebUserContext, connectionId?: string): Promise<void> {
+  if (!connectionId) return;
+  const record = (await store.listConnections?.(providerId))?.find((connection) => connection.id === connectionId);
+  if (providerCredentialScopeIsShared(record?.credential.scope)) requireSharedProviderCredentialAccess(user, record?.credential.organizationId);
 }
 
 function parseProviderCredentialMetadata(
@@ -6746,11 +6955,17 @@ async function handleApiRequest(
   const runner = async (
     runInput: RunFlowInput,
     dependencies?: RunFlowDependencies,
-  ): Promise<RunFlowResult> =>
-    await baseRunner(
-      { ...runInput, executionBackend: execution.backend },
-      dependencies,
-    );
+  ): Promise<RunFlowResult> => {
+    const auditContext = requestAuditContexts.get(request);
+    const [result, actor] = await Promise.all([
+      baseRunner({ ...runInput, executionBackend: execution.backend }, dependencies),
+      securityAuditActorForRequest(request, input, homeRepoPath, undefined, runInput.organizationId).catch(() => ({ type: "anonymous" as const })),
+    ]);
+    const repository = repositories.find((candidate) => resolve(candidate.path) === resolve(runInput.repoPath));
+    await appendSecurityAuditBestEffort(homeRepoPath, { action: "runs.execute", decision: "allow", outcome: "success", httpStatus: 200, reasonCode: "returned", source: "runtime", organizationId: runInput.organizationId,
+      actor, target: { type: "run", id: result.runId }, context: { ...auditContext, runId: result.runId, repositoryId: repository?.id, taskId: runInput.workItemId } });
+    return result;
+  };
 
   if (
     await dispatchHttpRoutes(
@@ -6758,13 +6973,7 @@ async function handleApiRequest(
       consoleListApiRoutes({
         "/api/runs": async () => {
           const user = await requireUserContext(request, input, homeRepoPath);
-          sendJson(response, 200, {
-            runs: await listAllRuns(
-              visibleRepositories(repositories, user),
-              user,
-              { limit: DEFAULT_RUN_LIST_LIMIT },
-            ),
-          });
+          sendJson(response, 200, await listRunPage(repositories, user, url));
           return true;
         },
         "/api/dashboard": async () => {
@@ -7319,6 +7528,8 @@ async function handleApiRequest(
       );
     }
     const decision = body.decision;
+    // Device grants carry instance-wide authority, so a scoped browser session cannot mint one.
+    if (decision === "approve" && actor.sessionDeniedOrganizationIds?.length) throw new WebForbiddenError("organization session policy denies instance-wide token issuance");
     const userCode = normalizeUserCode(
       typeof body.userCode === "string" ? body.userCode : "",
     );
@@ -7813,6 +8024,169 @@ async function handleApiRequest(
     }
   }
 
+  const organizationProviderRoute = /^\/api\/organizations\/([^/]+)\/providers(?:\/([^/]+)\/connections(?:\/([^/]+)(?:\/(rotate|revoke|default))?)?)?$/.exec(url.pathname);
+  if (organizationProviderRoute) {
+    if (authMode !== "required") throw new WebNotFoundError("organization connections require authenticated mode");
+    const user = await requireUserContext(request, input, homeRepoPath);
+    let org: string; let id: string | undefined;
+    try { org = decodeURIComponent(organizationProviderRoute[1]); id = organizationProviderRoute[3] ? decodeURIComponent(organizationProviderRoute[3]) : undefined; } catch { throw new WebInputError("invalid connection resource"); }
+    const store = organizationProviderStore(input, homeRepoPath, org, user, request.method !== "GET");
+    const providerId = organizationProviderRoute[2] ? requireWritableProviderId(organizationProviderRoute[2]) : undefined;
+    const action = organizationProviderRoute[4];
+    const existing = id && providerId ? (await store.listConnections(providerId)).find((record) => record.id === id) : undefined;
+    if (id && !existing) throw new WebNotFoundError("provider connection not found");
+    if (request.method === "GET" && !action) {
+      sendJson(response, 200, { connections: (await store.listConnections(providerId)).filter((record) => !id || record.id === id).map(publicProviderConnection) });
+      return true;
+    }
+    const validateBinding = (repositoryId: unknown): string | null | undefined => {
+      if (repositoryId === undefined || repositoryId === null) return repositoryId;
+      if (typeof repositoryId !== "string") throw new WebInputError("invalid repository binding");
+      if (!repositories.some((repository) => repository.id === repositoryId && repository.organizationId === org)) throw new WebNotFoundError("repository not found in organization");
+      return repositoryId;
+    };
+    if (request.method === "POST" && providerId && (!id || action === "rotate")) {
+      const body = requireObject(await readRequestJson(request));
+      if (typeof body.value !== "string" || !body.value.trim()) throw new WebInputError("value is required");
+      if (body.label !== undefined && (typeof body.label !== "string" || body.label.length > 128)) throw new WebInputError("invalid label");
+      const repositoryId = existing?.credential.repositoryId ?? validateBinding(body.repositoryId);
+      const record = await store.setConnection({ providerId, value: body.value.trim(), authMethod: existing?.authMethod ?? parsePastedProviderAuthMethod(providerId, body.authMethod),
+        ...(id ? { connectionId: id } : {}), ...(typeof body.label === "string" ? { label: body.label } : {}), ...(body.makeDefault === true ? { makeDefault: true } : {}),
+        metadata: { scope: "org", source: "web-console", ownerId: existing?.credential.ownerId ?? user.id, organizationId: org, ...(repositoryId ? { repositoryId } : {}) } });
+      sendJson(response, id ? 200 : 201, { connection: publicProviderConnection(record) });
+      return true;
+    }
+    if (request.method === "PATCH" && providerId && id && !action) {
+      const body = requireObject(await readRequestJson(request));
+      if (Object.keys(body).some((key) => !["repositoryId", "label"].includes(key)) || body.label !== undefined && body.label !== null && (typeof body.label !== "string" || body.label.length > 128)) throw new WebInputError("invalid connection metadata");
+      sendJson(response, 200, { connection: publicProviderConnection(await store.updateConnectionMetadata(providerId, id, { repositoryId: validateBinding(body.repositoryId), label: body.label as string | null | undefined })) });
+      return true;
+    }
+    if (providerId && id && request.method === "DELETE" && !action || providerId && id && request.method === "POST" && ["revoke", "default"].includes(action ?? "")) {
+      if (action === "revoke") await store.revokeConnection(providerId!, { connectionId: id });
+      else if (action === "default") await store.setDefaultConnection(providerId!, id!);
+      else await store.clearConnection(providerId!, { connectionId: id });
+      sendJson(response, 200, { ok: true });
+      return true;
+    }
+    throw new WebNotFoundError("organization provider endpoint not found");
+  }
+
+  const policyRoute = /^\/api\/organizations\/([^/]+)\/security-policy(?:\/(revoke-sessions))?$/.exec(url.pathname);
+  if (policyRoute) {
+    if (authMode !== "required") throw new WebNotFoundError("organization policy requires authenticated mode");
+    const user = await requireUserContext(request, input, homeRepoPath);
+    let org: string;
+    try { org = decodeURIComponent(policyRoute[1]); } catch { throw new WebInputError("invalid organization id"); }
+    if (!policyRoute[2] && (request.method === "GET" || request.method === "PUT")) {
+      const policy = request.method === "GET" ? await getOrganizationSecurityPolicy(homeRepoPath, org, user)
+        : await updateOrganizationSecurityPolicy(homeRepoPath, org, user, await readRequestJson(request));
+      sendJson(response, 200, { policy });
+      return true;
+    }
+    if (policyRoute[2] && request.method === "POST") {
+      const body = requireObject(await readRequestJson(request));
+      if (body.userId !== undefined && (typeof body.userId !== "string" || !body.userId)) throw new WebInputError("invalid user id");
+      sendJson(response, 200, await revokeOrganizationSessions(homeRepoPath, org, user, body.userId as string | undefined));
+      return true;
+    }
+    throw new WebNotFoundError("organization policy endpoint not found");
+  }
+
+  const oidcRoute = /^\/api\/organizations\/([^/]+)\/sso\/oidc(?:\/(login|link|callback))?$/.exec(url.pathname);
+  if (oidcRoute) {
+    if (authMode !== "required") throw new WebNotFoundError("OIDC requires authenticated mode");
+    let org: string;
+    try { org = decodeURIComponent(oidcRoute[1]); } catch { throw new WebInputError("invalid organization id"); }
+    const action = oidcRoute[2];
+    const env = input.authEnv ?? process.env;
+    const cookies = parseCookies(request.headers.cookie);
+    const cookieName = "nitely_oidc_" + createHash("sha256").update(org).digest("hex").slice(0, 16);
+    const cookiePath = `/api/organizations/${encodeURIComponent(org)}/sso/oidc`;
+    if (!action && (request.method === "GET" || request.method === "PUT")) {
+      const user = await requireUserContext(request, input, homeRepoPath);
+      const configuration = request.method === "GET"
+        ? await getOrganizationOidc(homeRepoPath, org, user)
+        : await configureOrganizationOidc(homeRepoPath, org, user, requireObject(await readRequestJson(request)), env);
+      sendJson(response, 200, { configuration });
+      return true;
+    }
+    if (request.method === "GET" && action === "login" || request.method === "POST" && action === "link") {
+      let link: { userId: string; sessionId: string } | undefined;
+      if (action === "link") {
+        const user = await requireUserContext(request, input, homeRepoPath);
+        const body = requireObject(await readRequestJson(request));
+        const verified = typeof body.password === "string" ? await verifyUserPassword(homeRepoPath, user.email, body.password) : null;
+        if (!verified || verified.id !== user.id || !cookies.nitely_session) throw new WebForbiddenError("password reauthentication is required for linking");
+        link = { userId: user.id, sessionId: cookies.nitely_session };
+      }
+      const started = await startOrganizationOidc(homeRepoPath, org, env, link);
+      sendJsonWithHeaders(response, 302, { redirect: started.url }, { location: started.url,
+        "set-cookie": `${cookieName}=${started.browserToken}; Path=${cookiePath}; HttpOnly; SameSite=Lax; Secure; Max-Age=600` });
+      return true;
+    }
+    if (request.method === "GET" && action === "callback") {
+      const sessionUser = cookies.nitely_session ? await readSessionUser(homeRepoPath, cookies.nitely_session) : null;
+      const result = await finishOrganizationOidc(homeRepoPath, org, env, url.searchParams, cookies[cookieName],
+        sessionUser && cookies.nitely_session ? { userId: sessionUser.id, sessionId: cookies.nitely_session } : undefined);
+      const session = await createSession(homeRepoPath, result.userId, { authenticationMethod: "oidc", organizationId: org });
+      await appendSecurityAuditBestEffort(homeRepoPath, { action: result.linked ? "auth.oidc.link" : "auth.oidc.login",
+        decision: "allow", outcome: "success", httpStatus: 200, reasonCode: result.created ? "jit_provisioned" : "ok",
+        actor: { type: "user", id: result.userId, organizationId: org }, target: { type: "organization", id: org } });
+      const browser = requestHeader(request, "accept").includes("text/html");
+      const authenticatedUser = await readSessionUser(homeRepoPath, session.id, { organizationId: org });
+      sendJsonWithHeaders(response, browser ? 303 : 200, { authRequired: true, user: authenticatedUser && { id: authenticatedUser.id, email: authenticatedUser.email, role: authenticatedUser.role, memberships: authenticatedUser.memberships, currentOrganizationId: org, currentOrganizationRole: authenticatedUser.currentOrganizationRole } },
+        { "set-cookie": sessionCookie(session.id, true), ...(browser ? { location: "/" } : {}) });
+      return true;
+    }
+    throw new WebNotFoundError("OIDC endpoint not found");
+  }
+
+  const organizationRoute = /^\/api\/organizations\/([^/]+)\/(members|invitations)(?:\/([^/]+))?(?:\/(accept|decline|revoke))?$/.exec(url.pathname);
+  if (organizationRoute) {
+    const user = await requireUserContext(request, input, homeRepoPath);
+    if (user.authMode !== "required") throw new WebForbiddenError("organization administration requires an authenticated user");
+    let organizationId: string;
+    let itemId: string | undefined;
+    try {
+      organizationId = decodeURIComponent(organizationRoute[1]);
+      itemId = organizationRoute[3] ? decodeURIComponent(organizationRoute[3]) : undefined;
+    } catch { throw new WebInputError("invalid organization resource id"); }
+    const kind = organizationRoute[2];
+    const action = organizationRoute[4];
+    const actor = { id: user.id, email: user.email };
+    if (kind === "members" && !action) {
+      if (request.method === "GET" && !itemId) {
+        sendJson(response, 200, { members: await listOrganizationMembers(homeRepoPath, organizationId, actor) });
+        return true;
+      }
+      if (itemId && (request.method === "PATCH" || request.method === "DELETE")) {
+        const body = request.method === "PATCH" ? requireObject(await readRequestJson(request)) : undefined;
+        if (body && !Object.hasOwn(body, "role")) throw new WebInputError("member role is required");
+        sendJson(response, 200, await changeOrganizationMember(homeRepoPath, organizationId, actor, itemId, body?.role));
+        return true;
+      }
+    }
+    if (kind === "invitations") {
+      if (request.method === "GET" && !itemId) {
+        sendJson(response, 200, { invitations: await listOrganizationInvitations(homeRepoPath, organizationId, actor) });
+        return true;
+      }
+      if (request.method === "POST" && !itemId) {
+        const body = requireObject(await readRequestJson(request));
+        sendJson(response, 201, await createOrganizationInvitation(homeRepoPath, organizationId, actor,
+          { email: body.email, role: body.role, expiresInSeconds: body.expiresInSeconds }));
+        return true;
+      }
+      if (request.method === "POST" && itemId && action) {
+        const body = action === "revoke" ? {} : requireObject(await readRequestJson(request));
+        sendJson(response, 200, await resolveOrganizationInvitation(homeRepoPath, organizationId, itemId, actor, action as "accept" | "decline" | "revoke", body.token));
+        return true;
+      }
+    }
+    throw new WebNotFoundError("organization endpoint not found");
+  }
+
   if (request.method === "GET" && url.pathname === "/api/users") {
     const user = await requireUserContext(request, input, homeRepoPath);
     const users = assignmentDirectoryUsers(
@@ -7824,6 +8198,55 @@ async function handleApiRequest(
       canManageAssignments: canManageNotificationAssignments(user),
     });
     return true;
+  }
+
+  const organizationAuditRoute = /^\/api\/organizations\/([^/]+)\/audit(?:\/(export|retention|prune|events)(?:\/([^/]+))?)?$/.exec(url.pathname);
+  if (organizationAuditRoute) {
+    if (authMode !== "required") throw new WebNotFoundError("organization audit requires authenticated mode");
+    const user = await requireUserContext(request, input, homeRepoPath);
+    let org: string; let eventId: string | undefined;
+    try { org = decodeURIComponent(organizationAuditRoute[1]); eventId = organizationAuditRoute[3] ? decodeURIComponent(organizationAuditRoute[3]) : undefined; } catch { throw new WebInputError("invalid audit resource"); }
+    const member = user.memberships?.find((membership) => membership.organizationId === org);
+    if (!member || !organizationSessionAccessAllowed(user, org)) throw new WebNotFoundError("organization not found");
+    const operation = organizationAuditRoute[2];
+    const manage = operation === "prune" || request.method === "PUT";
+    if (!organizationRoleHasPermission(member.role, manage ? "organizations:manage" : "organizations:audit:view")) throw new WebForbiddenError();
+    const actor = { ...securityAuditActorForUser(user), organizationId: org, organizationRole: member.role };
+    try {
+      if (operation === "retention" && !eventId && ["GET", "PUT"].includes(request.method ?? "")) {
+        const policy = request.method === "GET" ? await getOrganizationAuditRetention(homeRepoPath, org) : await setOrganizationAuditRetention(homeRepoPath, org, await readRequestJson(request), actor);
+        sendJson(response, 200, { policy }); return true;
+      }
+      if (operation === "prune" && !eventId && request.method === "POST") {
+        sendJson(response, 200, await pruneOrganizationAudit(homeRepoPath, org, actor)); return true;
+      }
+      if (request.method === "GET" && (!operation || operation === "export" || operation === "events" && eventId)) {
+        const query: OrganizationAuditQuery = { organizationId: org, ...(eventId ? { eventId } : {}) };
+        for (const key of ["action", "actorId", "source", "repositoryId", "taskId", "runId", "providerId", "from", "until", "cursor"] as const) {
+          const value = url.searchParams.get(key); if (value !== null) query[key] = value;
+        }
+        const limit = url.searchParams.get("limit"); if (limit !== null) query.limit = Number(limit);
+        const result = url.searchParams.get("result"); if (result !== null) query.result = result as OrganizationAuditQuery["result"];
+        const page = await queryOrganizationAudit(homeRepoPath, query);
+        if (eventId && !page.events.length) throw new WebNotFoundError("audit event not found");
+        if (operation === "export") {
+          if (url.searchParams.has("format") && url.searchParams.get("format") !== "jsonl") throw new WebInputError("supported audit export format is jsonl");
+          await appendSecurityAuditEvent(homeRepoPath, { action: "audit.export", decision: "allow", outcome: "success", httpStatus: 200, reasonCode: "ok", actor, organizationId: org, target: { type: "audit" } });
+          response.setHeader("content-type", "application/x-ndjson; charset=utf-8");
+          response.setHeader("cache-control", "no-store");
+          response.setHeader("content-disposition", 'attachment; filename="audit.jsonl"');
+          if (page.nextCursor) response.setHeader("x-nitely-next-cursor", page.nextCursor);
+          response.end(page.events.map((event) => JSON.stringify(event) + "\n").join(""));
+        } else sendJson(response, 200, eventId ? { event: page.events[0] } : page);
+        return true;
+      }
+    } catch (error) {
+      if (isWebError(error)) throw error;
+      if (error instanceof Error && error.message === "audit cursor not found") throw new WebNotFoundError("audit cursor not found");
+      if (error instanceof Error && /^(invalid audit|invalid security audit|security audit limit|retentionDays)/.test(error.message)) throw new WebInputError(error.message);
+      throw error;
+    }
+    throw new WebNotFoundError("organization audit endpoint not found");
   }
 
   if (request.method === "GET" && url.pathname === "/api/security/audit") {
@@ -8313,7 +8736,7 @@ async function handleApiRequest(
     );
     if (requestedRepoId && selected.length === 0) throw new WebNotFoundError("repository not found");
     const dispatched = await Promise.all(selected.map(async (repository) => {
-      const providerStore = providerStoreForUser(input, repository.path, user);
+      const providerStore = providerStoreForUser(input, repository.path, user, { repositoryId: repository.id, repositoryOrganizationId: repository.organizationId });
       const homeKnowledgeProviderStore = providerStoreForUser(input, homeRepoPath, user);
       const result = await dispatchFactoryQueue({
         repoPath: repository.path,
@@ -8381,7 +8804,7 @@ async function handleApiRequest(
     for (const repository of visibleRepositories(repositories, user).filter(
       (candidate) => candidate.synthetic !== true,
     )) {
-      const providerStore = providerStoreForUser(input, repository.path, user);
+      const providerStore = providerStoreForUser(input, repository.path, user, { repositoryId: repository.id, repositoryOrganizationId: repository.organizationId });
       const homeKnowledgeProviderStore = providerStoreForUser(
         input,
         homeRepoPath,
@@ -9070,7 +9493,7 @@ async function handleApiRequest(
       ...(task.ownerId ? { targetUserId: task.ownerId } : {}),
       ...(task.organizationId ? { organizationId: task.organizationId } : {}),
     }, {
-      providerStore: providerStoreForUser(input, repository.path, user),
+      providerStore: providerStoreForUser(input, repository.path, user, { repositoryId: repository.id, repositoryOrganizationId: repository.organizationId }),
     });
     sendJson(response, 200, {
       task: withRepository(updated, repository),
@@ -9194,7 +9617,7 @@ async function handleApiRequest(
       preflightTaskId,
       user,
     );
-    const providerStore = providerStoreForUser(input, repository.path, user);
+    const providerStore = providerStoreForUser(input, repository.path, user, { organizationId: detail.organizationId, repositoryId: repository.id, repositoryOrganizationId: repository.organizationId });
     const snapshot = await prepareManualWorkItemDetailSnapshot(
       repository.path,
       detail.id,
@@ -9202,6 +9625,7 @@ async function handleApiRequest(
     );
     requireRecordAccess(snapshot.detail, user, "task not found");
     const preflight = await evaluateWebWorkItemRunPreflight({
+      executionBackend: execution.backend,
       repoPath: repository.path,
       workItem: snapshot.persisted ?? snapshot.detail,
       providerStore,
@@ -9218,7 +9642,7 @@ async function handleApiRequest(
       taskId,
       user,
     );
-    const providerStore = providerStoreForUser(input, repository.path, user);
+    const providerStore = providerStoreForUser(input, repository.path, user, { organizationId: detail.organizationId, repositoryId: repository.id, repositoryOrganizationId: repository.organizationId });
     const snapshot = await prepareManualWorkItemDetailSnapshot(
       repository.path,
       detail.id,
@@ -9228,6 +9652,7 @@ async function handleApiRequest(
     const persisted = snapshot.persisted;
     const starts = persisted
       ? await evaluateWorkItemRunStarts({
+            executionBackend: webExecutionBackendPolicyForInput(input, user.authMode).backend,
             repoPath: repository.path,
             repoId: repository.id,
             repoName: repository.name,
@@ -9246,6 +9671,7 @@ async function handleApiRequest(
     const preflight =
       eligibility?.checks.preflight ??
       (await evaluateWebWorkItemRunPreflight({
+      executionBackend: execution.backend,
         repoPath: repository.path,
         workItem: snapshot.detail,
         providerStore,
@@ -9409,7 +9835,7 @@ async function handleApiRequest(
       });
       return true;
     }
-    const providerStore = providerStoreForUser(input, repository.path, user);
+    const providerStore = providerStoreForUser(input, repository.path, user, { organizationId: task.organizationId, repositoryId: repository.id, repositoryOrganizationId: repository.organizationId });
     const outcome = await startConfirmedTaskReworkRun({
       serverInput: input,
       repository,
@@ -9635,7 +10061,7 @@ async function handleApiRequest(
       ...(task.ownerId ? { targetUserId: task.ownerId } : {}),
       ...(task.organizationId ? { organizationId: task.organizationId } : {}),
     }, {
-      providerStore: providerStoreForUser(input, repository.path, user),
+      providerStore: providerStoreForUser(input, repository.path, user, { organizationId: task.organizationId, repositoryId: repository.id, repositoryOrganizationId: repository.organizationId }),
     });
     sendJson(response, 200, {
       task: withRepository(updated, repository),
@@ -9672,7 +10098,7 @@ async function handleApiRequest(
       const result = await syncJiraTaskStatus({
         repoPath: repository.path,
         task,
-        providerStore: providerStoreForUser(input, repository.path, user),
+        providerStore: providerStoreForUser(input, repository.path, user, { organizationId: task.organizationId, repositoryId: repository.id, repositoryOrganizationId: repository.organizationId }),
         publisher: input.jiraStatusPublisher,
       });
       sendJson(response, 200, {
@@ -9757,7 +10183,7 @@ async function handleApiRequest(
       ...(task.ownerId ? { targetUserId: task.ownerId } : {}),
       ...(task.organizationId ? { organizationId: task.organizationId } : {}),
     }, {
-      providerStore: providerStoreForUser(input, repository.path, user),
+      providerStore: providerStoreForUser(input, repository.path, user, { organizationId: task.organizationId, repositoryId: repository.id, repositoryOrganizationId: repository.organizationId }),
     });
     sendJson(response, 200, {
       task: withRepository(updated, repository),
@@ -9778,6 +10204,7 @@ async function handleApiRequest(
   if (request.method === "POST" && runTaskId) {
     const user = await requireUserContext(request, input, homeRepoPath);
     const body = requireObject(await readRequestJson(request));
+    try { input = { ...input, providerConnectionBindings: validateProviderConnectionBindings(body.providerConnections) ?? input.providerConnectionBindings }; } catch { throw new WebInputError("invalid provider connection bindings"); }
     const runFacts = manualRunRequestFacts(url, body, user);
     const taskScope = taskScopeFromJson(body.taskScope);
     let currentTask: Awaited<ReturnType<typeof getTask>>;
@@ -9823,7 +10250,7 @@ async function handleApiRequest(
       requireRecordAccess(currentTask, user, "task not found");
       requireWriteAccessToRecord(user, currentTask, "runs:start");
     }
-    const taskProviderStore = providerStoreForUser(input, repository.path, user);
+    const taskProviderStore = bindProviderConnections(providerStoreForUser(input, repository.path, user, { organizationId: currentTask.organizationId, repositoryId: repository.id, repositoryOrganizationId: repository.organizationId }), input.providerConnectionBindings);
     const preparedCandidate = await prepareWorkItemRunCandidate(
       repository.path,
       currentTask,
@@ -9849,6 +10276,7 @@ async function handleApiRequest(
       ),
     };
     const starts = await evaluateWorkItemRunStarts({
+      executionBackend: webExecutionBackendPolicyForInput(input, user.authMode).backend,
       repoPath: repository.path,
       repoId: repository.id,
       repoName: repository.name,
@@ -9909,6 +10337,7 @@ async function handleApiRequest(
     );
     const runnerInput: RunFlowInput = {
       ...evaluatedInput,
+      ...(input.providerConnectionBindings ? { providerConnections: input.providerConnectionBindings } : {}),
       inputs: finalizedCandidate.workItem.inputs,
       ...(taskScope ? { taskScope } : {}),
     };
@@ -10288,6 +10717,7 @@ async function handleApiRequest(
   if (request.method === "POST" && workItemRunId) {
     const user = await requireUserContext(request, input, homeRepoPath);
     const body = requireObject(await readRequestJson(request));
+    try { input = { ...input, providerConnectionBindings: validateProviderConnectionBindings(body.providerConnections) ?? input.providerConnectionBindings }; } catch { throw new WebInputError("invalid provider connection bindings"); }
     const runFacts = manualRunRequestFacts(url, body, user);
     const taskScope = taskScopeFromJson(body.taskScope);
     const result = await runStoredWorkItemAcrossRepositories(
@@ -10321,13 +10751,14 @@ async function handleApiRequest(
     const persisted = snapshot.persisted;
     const starts = persisted
       ? await evaluateWorkItemRunStarts({
+          executionBackend: webExecutionBackendPolicyForInput(input, user.authMode).backend,
           repoPath: repository.path,
           repoId: repository.id,
           repoName: repository.name,
           workItems: snapshot.workItems,
           candidateIds: [persisted.id],
           intent: { kind: "manual" },
-          providerStore: providerStoreForUser(input, repository.path, user),
+          providerStore: providerStoreForUser(input, repository.path, user, { repositoryId: repository.id, repositoryOrganizationId: repository.organizationId }),
           ...(input.getChangeRequestStatus
             ? { getChangeRequestStatus: input.getChangeRequestStatus }
             : {}),
@@ -10429,6 +10860,47 @@ async function handleApiRequest(
       }
       throw new WebInputError(message);
     }
+  }
+
+  const resumeRunMatch = /^\/api\/runs\/([^/]+)\/resume$/.exec(url.pathname);
+  if (request.method === "POST" && resumeRunMatch) {
+    const user = await requireUserContext(request, input, homeRepoPath);
+    const runId = decodeURIComponent(resumeRunMatch[1]!);
+    const run = await getScopedRunDetail(repositories, homeRepoPath, input, runId, user);
+    requireWriteAccessToRecord(user, run, "runs:start");
+    if (run.status !== "blocked" && run.status !== "interrupted") {
+      throw new WebInputError("only blocked or interrupted runs can be resumed");
+    }
+    const repository = repositories.find((repo) => repo.path === run.repoPath)!;
+    // The scheduler's durable claim fences a double submit and the usage-limit
+    // recovery timer; the status check above happens before resume records anything.
+    await mkdir(join(repository.path, ".nitely"), { recursive: true });
+    const claimToken = randomUUID();
+    const withClaims = <T>(operation: (claims: ResumeClaimStore) => T): T => {
+      const claims = new ResumeClaimStore(resumeClaimStorePath(repository.path));
+      try { return operation(claims); } finally { claims.close(); }
+    };
+    if (!withClaims((claims) => claims.claim({ runId, token: claimToken, now: new Date() }))) {
+      throw new WebRunStartConflictError("run is already being resumed", runId);
+    }
+    const release = () => { withClaims((claims) => claims.release(runId, claimToken)); };
+    let prepared: Awaited<ReturnType<typeof prepareWebRunResume>>;
+    try {
+      // Re-validate under the claim: a resume that finished first leaves the run non-resumable.
+      prepared = await prepareWebRunResume(input, repository, runId, user);
+    } catch (error) {
+      release();
+      throw error;
+    }
+    void (input.resumeRun ?? resumeRun)(prepared.resumeInput, prepared.dependencies).then(async () => {
+      const tasks = await listUnifiedWorkItems(repository.path);
+      const task = tasks.find((item) => item.latestRunId === runId);
+      if (task) await reconcileTerminalWorkItemRun({ repoPath: repository.path, workItemId: task.id, runId });
+    }).catch((error: unknown) => {
+      console.error(`Nitely Web resume failed for ${runId}: ${error instanceof Error ? error.message : String(error)}`);
+    }).finally(release);
+    sendJson(response, 202, { runId });
+    return true;
   }
 
   const runQuestionAnswer = apiRunQuestionAnswerId(url.pathname);
@@ -10621,7 +11093,7 @@ async function handleApiRequest(
   }
   if (request.method === "GET" && url.pathname === "/api/providers") {
     const user = await requireUserContext(request, input, homeRepoPath);
-    const providerStore = providerStoreForUser(input, homeRepoPath, user);
+    const providerStore = providerStoreForUser(input, homeRepoPath, user, { repositoryId: null });
     sendJson(response, 200, {
       providers: await providerStore.listStatuses(),
     });
@@ -10634,13 +11106,8 @@ async function handleApiRequest(
   if (providerConnMatch) {
     const user = await requireUserContext(request, input, homeRepoPath);
     requireCurrentOrganizationPermission(user, "providers:write:personal");
-    const providerStore = providerStoreForUser(input, homeRepoPath, user);
+    const providerStore = providerStoreForUser(input, homeRepoPath, user, { repositoryId: null });
     const providerId = requireWritableProviderId(providerConnMatch[1]);
-    await requireExistingProviderCredentialWriteAccess(
-      providerStore,
-      providerId,
-      user,
-    );
 
     if (request.method === "POST") {
       const setConnection = requireSetConnection(providerStore);
@@ -10652,6 +11119,7 @@ async function handleApiRequest(
       }
       const authMethod = parsePastedProviderAuthMethod(providerId, body.authMethod);
       const connectionId = optionalMetadataString(body, "connectionId");
+      await requireExistingProviderCredentialWriteAccess(providerStore, providerId, user, connectionId);
       const label = optionalMetadataString(body, "label");
       const record = await setConnection({
         providerId,
@@ -10671,6 +11139,7 @@ async function handleApiRequest(
     if (request.method === "DELETE") {
       const clearConnection = requireClearConnection(providerStore);
       const connectionId = url.searchParams.get("connectionId") ?? undefined;
+      await requireExistingProviderCredentialWriteAccess(providerStore, providerId, user, connectionId);
       const authMethod = url.searchParams.get("authMethod") ?? undefined;
       if (connectionId || authMethod) {
         await clearConnection(providerId, {
@@ -10692,9 +11161,9 @@ async function handleApiRequest(
   if (providerDefaultMatch && request.method === "POST") {
     const user = await requireUserContext(request, input, homeRepoPath);
     requireCurrentOrganizationPermission(user, "providers:write:personal");
-    const providerStore = providerStoreForUser(input, homeRepoPath, user);
+    const providerStore = providerStoreForUser(input, homeRepoPath, user, { repositoryId: null });
     const providerId = requireWritableProviderId(providerDefaultMatch[1]);
-    await requireExistingProviderCredentialWriteAccess(providerStore, providerId, user);
+    await requireExistingProviderCredentialWriteAccess(providerStore, providerId, user, decodeURIComponent(providerDefaultMatch[2]));
     if (typeof providerStore.setDefaultConnection !== "function") {
       throw new WebInputError("provider connection store is read-only");
     }
@@ -10719,11 +11188,11 @@ async function handleApiRequest(
     const user = await requireUserContext(request, input, homeRepoPath);
     requireCurrentOrganizationPermission(user, "providers:write:personal");
     const providerId = requireWritableProviderId(providerOAuthStartMatch[1]);
-    const providerStore = providerStoreForUser(input, homeRepoPath, user);
-    await requireExistingProviderCredentialWriteAccess(providerStore, providerId, user);
+    const providerStore = providerStoreForUser(input, homeRepoPath, user, { repositoryId: null });
     const adapter = requireProviderOAuthAdapter(input, providerId);
     const body = requireObject(await readRequestJson(request));
     const connectionId = optionalMetadataString(body, "connectionId");
+    await requireExistingProviderCredentialWriteAccess(providerStore, providerId, user, connectionId);
     if (connectionId) {
       const existing = (await providerStore.listConnections?.(providerId))?.find(
         (record) => record.id === connectionId,
@@ -10765,8 +11234,8 @@ async function handleApiRequest(
     requireCurrentOrganizationPermission(user, "providers:write:personal");
     const providerId = requireWritableProviderId(providerConnectionActionMatch[1]);
     const connectionId = decodeURIComponent(providerConnectionActionMatch[2]);
-    const providerStore = providerStoreForUser(input, homeRepoPath, user);
-    await requireExistingProviderCredentialWriteAccess(providerStore, providerId, user);
+    const providerStore = providerStoreForUser(input, homeRepoPath, user, { repositoryId: null });
+    await requireExistingProviderCredentialWriteAccess(providerStore, providerId, user, connectionId);
     const record = (await providerStore.listConnections?.(providerId))?.find(
       (candidate) => candidate.id === connectionId,
     );
@@ -10913,7 +11382,7 @@ async function handleProviderOAuthCallback(
       codeVerifier: flow.codeVerifier,
     });
     const account = await adapter.fetchIdentity(tokens.accessToken);
-    const providerStore = providerStoreForUser(input, homeRepoPath, user);
+    const providerStore = providerStoreForUser(input, homeRepoPath, user, { repositoryId: null });
     const setConnection = requireSetConnection(providerStore);
     await setConnection({
       providerId: descriptor.id,
@@ -11125,6 +11594,11 @@ export async function startWebServer(
   input: StartWebServerInput,
 ): Promise<WebServer> {
   const OCI_REAPER_INTERVAL_MS = 60_000;
+  const recoveryIntervalValue = (input.authEnv ?? process.env).NITELY_WEB_SCHEDULER_INTERVAL_MS;
+  const recoveryInterval = recoveryIntervalValue === undefined ? undefined : Number(recoveryIntervalValue);
+  if (recoveryInterval !== undefined && (!Number.isInteger(recoveryInterval) || recoveryInterval < 1000 || recoveryInterval > 86400000)) {
+    throw new Error("NITELY_WEB_SCHEDULER_INTERVAL_MS must be an integer between 1000 and 86400000");
+  }
   const runtimeInput: RuntimeStartWebServerInput = {
     ...input,
     host: unbracketHost(input.host),
@@ -11300,8 +11774,9 @@ export async function startWebServer(
       windowMs: 15 * 60 * 1_000,
     },
   );
+  const requestTasks = new Set<Promise<void>>();
   const server = createServer((request, response) => {
-    void (async () => {
+    const task = (async () => {
       const requestUrl = new URL(request.url ?? "/", "http://localhost");
       if (request.method === "GET" && requestUrl.pathname === "/api/readiness") {
         sendJson(response, readiness.ready ? 200 : 503, readiness);
@@ -11312,6 +11787,9 @@ export async function startWebServer(
         requestUrl.pathname,
       );
       const credential = bearerCredential(request);
+      const session = parseCookies(request.headers.cookie).nitely_session;
+      const auditContext: SecurityAuditContext = { requestId: randomUUID(), ...(session ? { sessionHash: createHash("sha256").update(session).digest("hex") } : {}) };
+      requestAuditContexts.set(request, auditContext);
       let securityActor: SecurityAuditActor = { type: "anonymous" };
       let preparedApiToken: PreparedApiTokenRequest | undefined;
       try {
@@ -11359,6 +11837,7 @@ export async function startWebServer(
             credential,
             response.statusCode,
             response.statusCode < 400 ? "ok" : `http_${response.statusCode}`,
+            auditContext,
           );
           return;
         }
@@ -11390,8 +11869,12 @@ export async function startWebServer(
           credential,
           404,
           "not_found",
+          auditContext,
         );
       } catch (error) {
+        if (error instanceof ConnectionManagementDeniedError) error = new WebForbiddenError();
+        if (error instanceof MissingConnectionError) error = new WebNotFoundError("provider connection not found");
+        if (error instanceof ReconnectRequiredError) error = new WebInputError("provider connection requires reconnection");
         const details = errorStatusAndCode(error);
         if (preparedApiToken) {
           await auditApiTokenRequest(repoPath, preparedApiToken, {
@@ -11409,17 +11892,23 @@ export async function startWebServer(
           credential,
           details.status,
           preparedApiToken?.denialReasonCode ?? details.code,
+          auditContext,
         );
         sendError(response, error);
       } finally {
         authorizedApiTokenRequests.delete(request);
+        requestAuditContexts.delete(request);
       }
     })();
+    requestTasks.add(task);
+    void task.then(() => requestTasks.delete(task), () => requestTasks.delete(task));
   });
   const closed = new Promise<void>((resolvePromise) => {
     server.once("close", resolvePromise);
   });
   let ociReaperTimer: ReturnType<typeof setInterval> | undefined;
+  let recoveryTimer: ReturnType<typeof setInterval> | undefined;
+  let recoveryRunning = false;
 
   await new Promise<void>((resolvePromise, reject) => {
     server.once("error", reject);
@@ -11441,7 +11930,7 @@ export async function startWebServer(
     });
   }
 
-  if (readiness.execution.backend === "oci") {
+  if (readiness.execution.backend === "oci" && process.env.NITELY_SANDBOX !== "1") {
     // Same env resolution the execution-backend policy uses: an explicitly
     // supplied env wins, and otherwise the reaper needs the process env so it
     // reads the operator's DOCKER_HOST, engine command and PATH rather than
@@ -11464,6 +11953,19 @@ export async function startWebServer(
     ociReaperTimer.unref?.();
   }
 
+  if (recoveryInterval !== undefined && process.env.NITELY_SANDBOX !== "1") {
+    const recover = () => {
+      if (recoveryRunning) return;
+      recoveryRunning = true;
+      void runWebUsageLimitRecovery(runtimeInput).catch((error: unknown) => {
+        console.error(`Nitely Web usage-limit recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+      }).finally(() => { recoveryRunning = false; });
+    };
+    recoveryTimer = setInterval(recover, recoveryInterval);
+    recoveryTimer.unref?.();
+    recover();
+  }
+
   const address = server.address();
   const port =
     typeof address === "object" && address !== null
@@ -11475,10 +11977,12 @@ export async function startWebServer(
     closed,
     close: async () => {
       if (ociReaperTimer) clearInterval(ociReaperTimer);
+      if (recoveryTimer) clearInterval(recoveryTimer);
       await runtimeInput.previewManager?.stopAll();
       await new Promise<void>((resolvePromise, reject) => {
         server.close((error) => (error ? reject(error) : resolvePromise()));
       });
+      await Promise.allSettled(requestTasks);
     },
   };
 }

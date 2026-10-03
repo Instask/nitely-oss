@@ -360,7 +360,7 @@ function zonedClockTime(value: string, now: Date): Date | undefined {
   }
 }
 
-function parseRetryAfter(value: string | undefined, now: Date): Date | undefined {
+export function parseRetryAfter(value: string | undefined, now: Date): Date | undefined {
   const text = value?.trim();
   if (!text) return undefined;
 
@@ -425,7 +425,7 @@ function usageLimitCooldown(input: {
   };
 }
 
-function usageLimitBlockedRun(input: {
+export function usageLimitBlockedRun(input: {
   task: WorkItemRecord;
   eventStore: EventStore;
   now: Date;
@@ -935,6 +935,7 @@ export async function runSchedulerOnce(
       "automatic",
     );
     const starts = await evaluateWorkItemRunStarts({
+      executionBackend: input.executionBackend,
       repoPath,
       ...(input.repoId ? { repoId: input.repoId } : {}),
       ...(input.repoName ? { repoName: input.repoName } : {}),

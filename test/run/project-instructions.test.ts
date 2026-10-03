@@ -173,3 +173,12 @@ describe("selectProjectInstructions", () => {
     ).toEqual(["all", "review-generated"]);
   });
 });
+
+it("loads typed repository command configuration and rejects nested values", async () => {
+  const repoPath = await mkdtemp(join(tmpdir(), "nitely-command-config-"));
+  await mkdir(join(repoPath, ".nitely"));
+  await writeFile(join(repoPath, ".nitely/instructions.json"), JSON.stringify({ configuration: { verifyCommand: "pytest -q" } }));
+  expect(await loadProjectInstructions(repoPath)).toMatchObject({ loaded: true, configuration: { verifyCommand: "pytest -q" } });
+  await writeFile(join(repoPath, ".nitely/instructions.json"), JSON.stringify({ configuration: { verifyCommand: { command: "oops" } } }));
+  await expect(loadProjectInstructions(repoPath)).rejects.toThrow("configuration.verifyCommand");
+});

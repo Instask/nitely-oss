@@ -39,6 +39,7 @@ import type {
   SetConnectionInput as ProviderSetConnectionInput,
 } from "../../src/providers/types.js";
 import { FileProviderConnectionStore } from "../../src/providers/file-store.js";
+import * as ociExecution from "../../src/run/execution/oci.js";
 import { startWebServer, type WebServer } from "../../src/web/server.js";
 import {
   createTask,
@@ -51,6 +52,7 @@ import {
 } from "../../src/web/tasks.js";
 import { createUser } from "../../src/web/users.js";
 import {
+  changeOrganizationMember, listOrganizationMembers, createOrganizationInvitation, resolveOrganizationInvitation,
   addOrganizationMember,
   createOrganization,
   listPublicMemberships,
@@ -1053,7 +1055,7 @@ describe("web server API and HTML", () => {
       {
         authMode: "required",
         authEnv: {},
-        providerEnv: {},
+        providerEnv: { NITELY_EXECUTION_BACKEND: "local", NITELY_ALLOW_UNSAFE_LOCAL_EXECUTION: "true" },
       },
     );
     const authorization = `Bearer ${token.token}`;
@@ -3202,7 +3204,7 @@ describe("web server API and HTML", () => {
         };
       },
       undefined,
-      { authMode: "required", providerEnv: {} },
+      { authMode: "required", providerEnv: { NITELY_EXECUTION_BACKEND: "local", NITELY_ALLOW_UNSAFE_LOCAL_EXECUTION: "true" } },
     );
     const a = await login(server, "a@example.test", "password a long passphrase");
     const b = await login(server, "b@example.test", "password b long passphrase");
@@ -3621,7 +3623,7 @@ describe("web server API and HTML", () => {
         };
       },
       undefined,
-      { authMode: "required", providerEnv: {} },
+      { authMode: "required", providerEnv: { NITELY_EXECUTION_BACKEND: "local", NITELY_ALLOW_UNSAFE_LOCAL_EXECUTION: "true" } },
     );
     const ownerLogin = await login(server, "owner@example.test", "owner password passphrase");
     const memberLogin = await login(server, "member@example.test", "member password passphrase");
@@ -3798,7 +3800,7 @@ describe("web server API and HTML", () => {
         };
       },
       undefined,
-      { authMode: "required", providerEnv: {} },
+      { authMode: "required", providerEnv: { NITELY_EXECUTION_BACKEND: "local", NITELY_ALLOW_UNSAFE_LOCAL_EXECUTION: "true" } },
     );
     const signedIn = await login(server, "owner@example.test", "owner password passphrase");
 
@@ -3852,7 +3854,7 @@ describe("web server API and HTML", () => {
         };
       },
       undefined,
-      { authMode: "required", providerEnv: {} },
+      { authMode: "required", providerEnv: { NITELY_EXECUTION_BACKEND: "local", NITELY_ALLOW_UNSAFE_LOCAL_EXECUTION: "true" } },
     );
     const signedIn = await login(
       server,
@@ -4589,14 +4591,17 @@ describe("web server API and HTML", () => {
       body: JSON.stringify({ maxConcurrentTasks: 2 }),
     });
 
-    await expect(
-      Promise.race([
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await expect(Promise.race([
         bothStartedPromise.then(() => "both-started"),
-        new Promise((resolve) => setTimeout(() => resolve("timeout"), 1_000)),
-      ]),
-    ).resolves.toBe("both-started");
-
-    releaseRunner();
+        new Promise((resolve) => { timeout = setTimeout(() => resolve("timeout"), 5_000); }),
+      ])).resolves.toBe("both-started");
+    } finally {
+      clearTimeout(timeout);
+      releaseRunner();
+      await responsePromise;
+    }
     const response = await responsePromise;
 
     expect(response.status).toBe(200);
@@ -11798,7 +11803,7 @@ None.
 
   it("returns provider credential metadata without exposing secrets and gates org scope writes", async () => {
     const repoPath = await createRepo();
-    await createUser(repoPath, {
+    const adminUser = await createUser(repoPath, {
       email: "admin@example.test",
       password: "admin password passphrase",
       role: "admin",
@@ -11912,6 +11917,7 @@ None.
       organizationId: ownerTeam.organizationId,
     });
 
+    await addOrganizationMember(repoPath, ownerTeam.organizationId, { userId: adminUser.id, role: "owner" });
     await addOrganizationMember(repoPath, ownerTeam.organizationId, {
       userId: organizationOwner.id,
       role: "member",
@@ -12593,5 +12599,248 @@ None.
       },
     });
     expect(JSON.stringify(retryBody)).not.toContain(secret);
+  });
+});
+
+it("does not start a host OCI reaper inside an OCI workload", async () => {
+  const repo = await createRepo();
+  const reap = vi.spyOn(ociExecution, "reapExpiredOciContainers");
+  vi.stubEnv("NITELY_SANDBOX", "1");
+  try {
+    const server = await startTestServer(repo);
+    try { expect(reap).not.toHaveBeenCalled(); } finally {
+      await server.close();
+      servers.splice(servers.indexOf(server), 1);
+    }
+  } finally {
+    vi.unstubAllEnvs();
+    reap.mockRestore();
+  }
+});
+
+
+describe("Web usage-limit recovery", () => {
+  afterEach(async () => { await Promise.all(servers.splice(0).map((server) => server.close())); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+
+  it("resumes due runs with each owner's credentials and leaves future resets alone", async () => {
+    const repo = await createRepo();
+    const owner = await createUser(repo, { email: "resume-owner@example.test", password: "resume-owner-password", role: "user" });
+    const providerStore = new FileProviderConnectionStore({ path: join(repo, ".nitely", "users", owner.id, "connections.json"), env: {} });
+    await providerStore.setConnection({ providerId: "github", authMethod: "pat", value: "owner-resume-token" });
+    for (const [id, retryAfter] of [["due", "2020-01-01T00:00:00Z"], ["future", "2099-01-01T00:00:00Z"]]) {
+      await createTask(repo, { title: id!, spec: "spec", techDesign: "td" }, { createId: () => id!, ownerId: owner.id });
+      await updateTaskRunState(repo, id!, { status: "failed", latestRunId: `run-${id}` });
+      const events = new EventStore(join(repo, ".nitely", "events.db"));
+      try {
+        events.append({ runId: `run-${id}`, type: "run.created", payload: { ownerId: owner.id, taskId: id, flowName: "test", flowPath: "flows/implement-spec-bootstrap.json", inputs: {} } });
+        events.append({ runId: `run-${id}`, type: "run.blocked", payload: { reason: "agent_usage_limit", stageId: "implement", message: "quota", retryAfter, runtime: id === "due" ? "claude" : "codex" } });
+      } finally { events.close(); }
+    }
+    const resumed: string[] = [];
+    vi.stubEnv("NITELY_SANDBOX", "0");
+    vi.spyOn(ociExecution, "reapExpiredOciContainers").mockResolvedValue({ scanned: 0, removed: [], skipped: 0, errors: [], observedAt: new Date().toISOString() });
+    await startTestServer(repo, undefined, undefined, {
+      authMode: "required", authEnv: { NITELY_WEB_SCHEDULER_INTERVAL_MS: "1000" }, providerEnv: {}, providerCommandStatus: async () => false,
+      resumeRun: async (input, dependencies) => {
+        expect(input.executionBackend).toBe("oci");
+        expect(await (await dependencies!.providerStore!.getConnection("github")).getAccessToken()).toBe("owner-resume-token");
+        resumed.push(input.runId);
+        return { runId: input.runId, branchName: "test", worktreePath: repo };
+      },
+    });
+    await waitFor(() => getTask(repo, "due"), (task) => task.status === "completed");
+    expect(resumed).toEqual(["run-due"]);
+    expect((await getTask(repo, "due")).status).toBe("completed");
+    expect((await getTask(repo, "future")).status).toBe("failed");
+  });
+
+  it("resumes an interrupted run through the Console API and rejects completed runs", async () => {
+    const repo = await createRepo();
+    await mkdir(join(repo, ".nitely"), { recursive: true });
+    const events = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      for (const runId of ["interrupted", "completed"]) {
+        events.append({ runId, type: "run.created", payload: { ownerId: "local", flowName: "test", flowPath: "flows/implement-spec-bootstrap.json", inputs: {} } });
+        if (runId === "completed") events.append({ runId, type: "run.completed", payload: {} });
+        else events.append({ runId, stageId: "implement", attempt: 1, createdAt: "2020-01-01T00:00:00Z", type: "stage.started", payload: { runtime: "mock" } });
+      }
+    } finally { events.close(); }
+    const resumed: string[] = [];
+    const server = await startTestServer(repo, undefined, undefined, {
+      resumeRun: async (input) => { resumed.push(input.runId); return { runId: input.runId, branchName: "test", worktreePath: repo }; },
+    });
+    expect(await json(await fetch(`${server.url}/api/runs/interrupted`))).toMatchObject({ run: { canResume: true } });
+    expect((await fetch(`${server.url}/api/runs/interrupted/resume`, { method: "POST" })).status).toBe(202);
+    await waitFor(async () => resumed, (ids) => ids.length === 1);
+    expect(resumed).toEqual(["interrupted"]);
+    expect((await fetch(`${server.url}/api/runs/completed/resume`, { method: "POST" })).status).toBe(400);
+    expect(resumed).toHaveLength(1);
+  });
+
+  it("resumes a run once when submits race, and releases the claim afterwards", async () => {
+    const repo = await createRepo();
+    await mkdir(join(repo, ".nitely"), { recursive: true });
+    const events = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      events.append({ runId: "interrupted", type: "run.created", payload: { ownerId: "local", flowName: "test", flowPath: "flows/implement-spec-bootstrap.json", inputs: {} } });
+      events.append({ runId: "interrupted", stageId: "implement", attempt: 1, createdAt: "2020-01-01T00:00:00Z", type: "stage.started", payload: { runtime: "mock" } });
+    } finally { events.close(); }
+    let finish!: () => void;
+    const resumed: string[] = [];
+    const server = await startTestServer(repo, undefined, undefined, {
+      resumeRun: async (input) => {
+        resumed.push(input.runId);
+        await new Promise<void>((resolvePromise) => { finish = resolvePromise; });
+        return { runId: input.runId, branchName: "test", worktreePath: repo };
+      },
+    });
+    const submit = () => fetch(`${server.url}/api/runs/interrupted/resume`, { method: "POST" });
+    const statuses = (await Promise.all([submit(), submit()])).map((response) => response.status).sort();
+    expect(statuses).toEqual([202, 409]);
+    await waitFor(async () => resumed, (ids) => ids.length === 1);
+    expect((await submit()).status).toBe(409);
+    finish();
+    await waitFor(async () => (await submit()).status, (status) => status === 202);
+    expect(resumed).toEqual(["interrupted", "interrupted"]);
+    finish();
+  });
+});
+
+
+describe("Run list pagination", () => {
+  afterEach(async () => { await Promise.all(servers.splice(0).map((server) => server.close())); });
+
+  it("pages visible history with a stable cursor and updates only requested runs", async () => {
+    const repo = await createRepo();
+    const owner = await createUser(repo, { email: "page-owner@example.test", password: "page-owner-passphrase", role: "user" });
+    const events = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      for (const runId of ["run-1", "run-2", "run-3", "run-4", "run-hidden"]) {
+        events.append({ runId, type: "run.created", payload: { ownerId: runId === "run-hidden" ? "another-user" : owner.id, flowName: "test", inputs: {} } });
+        events.append({ runId, type: "run.completed", payload: {} });
+      }
+    } finally { events.close(); }
+    const server = await startTestServer(repo, undefined, undefined, { authMode: "required", authEnv: {} });
+    const session = await login(server, "page-owner@example.test", "page-owner-passphrase");
+    const request = async (query: string) => await fetch(`${server.url}/api/runs${query}`, { headers: { cookie: session.cookie } });
+    const first = await json(await request("?limit=2")) as { runs: Array<{ runId: string }>; nextCursor: string };
+    expect(first.runs.map((run) => run.runId)).toEqual(["run-4", "run-3"]);
+    expect(first.nextCursor).toBeTruthy();
+    const inserted = new EventStore(join(repo, ".nitely", "events.db"));
+    try { inserted.append({ runId: "run-new", type: "run.created", payload: { ownerId: owner.id, inputs: {} } }); } finally { inserted.close(); }
+    const second = await json(await request("?limit=2&cursor=" + encodeURIComponent(first.nextCursor))) as { runs: Array<{ runId: string }>; nextCursor?: string };
+    expect(second.runs.map((run) => run.runId)).toEqual(["run-2", "run-1"]);
+    expect(second.nextCursor).toBeUndefined();
+    const watched = await json(await request("?runId=run-1&runId=run-hidden")) as { runs: Array<{ runId: string }> };
+    expect(watched.runs.map((run) => run.runId)).toEqual(["run-1"]);
+    expect((await request("?limit=0")).status).toBe(400);
+    expect((await request("?cursor=garbage")).status).toBe(400);
+  });
+});
+
+it("refuses Web task admission when the selected OCI backend cannot launch", async () => {
+  const repoPath = await createRepo();
+  let called = false;
+  const server = await startTestServer(repoPath, async () => {
+    called = true;
+    throw new Error("runner must not be called");
+  }, undefined, { providerEnv: { NITELY_EXECUTION_BACKEND: "oci" } });
+  const created = await fetch(`${server.url}/api/tasks`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: "Unavailable image", spec: "Spec body", techDesign: "Design body" }),
+  });
+  const { task } = await created.json() as { task: { id: string } };
+  const preflight = await fetch(`${server.url}/api/tasks/${task.id}/preflight`);
+  expect(await preflight.json()).toMatchObject({ preflight: { status: "BLOCK", issues: [expect.objectContaining({ code: "oci.image.missing" })] } });
+  const response = await fetch(`${server.url}/api/tasks/${task.id}/runs?override=true`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ reason: "try anyway" }),
+  });
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({ error: { message: expect.stringContaining("NITELY_OCI_IMAGE") } });
+  expect(called).toBe(false);
+  const persisted = JSON.parse(await readFile(join(repoPath, ".nitely/tasks", task.id, "task.json"), "utf8"));
+  expect(persisted.latestRunId).toBeUndefined();
+});
+
+describe("Organization membership administration", () => {
+  afterEach(async () => { await Promise.all(servers.splice(0).map((server) => server.close())); });
+
+  it("persists single-use invitations and enforces recipient, organization, expiry and owner boundaries", async () => {
+    const repo = await createRepo();
+    const owner = await createUser(repo, { email: "org-owner@example.test", password: "organization-password", role: "admin" });
+    const recipient = await createUser(repo, { email: "org-recipient@example.test", password: "organization-password", role: "user" });
+    const outsider = await createUser(repo, { email: "org-outsider@example.test", password: "organization-password", role: "admin" });
+    const org = (await listPublicMemberships(repo, owner.id))[0].organizationId;
+    const other = (await listPublicMemberships(repo, outsider.id))[0].organizationId;
+    const server = await startTestServer(repo, undefined, undefined, { authMode: "required", authEnv: {} });
+    const ownerSession = await login(server, owner.email, "organization-password");
+    const recipientSession = await login(server, recipient.email, "organization-password");
+    const outsiderSession = await login(server, outsider.email, "organization-password");
+    const request = async (path: string, cookie: string, method = "GET", body?: unknown) => fetch(server.url + path, {
+      method, headers: { cookie, "content-type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    const root = `/api/organizations/${org}`;
+    const invite = async () => {
+      const response = await request(root + "/invitations", ownerSession.cookie, "POST", { email: recipient.email, role: "member" });
+      expect(response.status).toBe(201);
+      return await response.json() as { token: string; invitation: { id: string } };
+    };
+    const first = await invite();
+    const invitationPath = root + "/invitations/" + first.invitation.id;
+    const persisted = await readFile(join(repo, ".nitely/users/organizations.json"), "utf8");
+    expect(persisted).not.toContain(first.token);
+    expect((await request(root + "/members", outsiderSession.cookie)).status).toBe(404);
+    expect((await request(root + "/invitations", recipientSession.cookie)).status).toBe(404);
+    expect((await request(invitationPath + "/accept", outsiderSession.cookie, "POST", { token: first.token })).status).toBe(404);
+    expect((await request(`/api/organizations/${other}/invitations/${first.invitation.id}/accept`, recipientSession.cookie, "POST", { token: first.token })).status).toBe(404);
+    expect((await request(invitationPath + "/accept", recipientSession.cookie, "POST", { token: "x".repeat(43) })).status).toBe(404);
+    expect((await request(invitationPath + "/accept", recipientSession.cookie, "POST", { token: first.token })).status).toBe(200);
+    expect((await listPublicMemberships(repo, recipient.id)).find((m) => m.organizationId === org)?.role).toBe("member");
+    expect((await request(invitationPath + "/accept", recipientSession.cookie, "POST", { token: first.token })).status).toBe(404);
+    expect((await request(root + "/invitations", recipientSession.cookie)).status).toBe(403);
+    expect((await request(root + "/invitations", outsiderSession.cookie, "POST", { email: recipient.email, role: "owner" })).status).toBe(404);
+    expect(JSON.stringify(await (await request(root + "/invitations", ownerSession.cookie)).json())).not.toContain("tokenHash");
+    for (const action of ["decline", "revoke"] as const) {
+      const created = await invite();
+      const path = root + "/invitations/" + created.invitation.id;
+      expect((await request(path + "/" + action, action === "revoke" ? ownerSession.cookie : recipientSession.cookie, "POST", { token: created.token })).status).toBe(200);
+      expect((await request(path + "/accept", recipientSession.cookie, "POST", { token: created.token })).status).toBe(404);
+    }
+    const expired = await createOrganizationInvitation(repo, org, owner, { email: recipient.email, role: "member", expiresInSeconds: 1 }, new Date("2020-01-01"));
+    expect((await request(root + "/invitations/" + expired.invitation.id + "/accept", recipientSession.cookie, "POST", { token: expired.token })).status).toBe(404);
+    const membersPath = root + "/members/";
+    expect((await request(membersPath + recipient.id, recipientSession.cookie, "PATCH", { role: "owner" })).status).toBe(403);
+    expect((await request(membersPath + owner.id, ownerSession.cookie, "DELETE")).status).toBe(400);
+    expect((await request(membersPath + owner.id, ownerSession.cookie, "PATCH", { role: "member" })).status).toBe(400);
+    expect((await request(membersPath + recipient.id, ownerSession.cookie, "PATCH", { role: "viewer" })).status).toBe(200);
+    expect((await request(membersPath + recipient.id, ownerSession.cookie, "DELETE")).status).toBe(200);
+    expect((await request(root + "/members", recipientSession.cookie)).status).toBe(404);
+    const audit = await waitFor(async () => await listSecurityAuditEvents(repo, { limit: 100 }), (rows) => rows.some((row) => row.action === "organizations.members.remove" && row.outcome === "success"));
+    expect(audit).toEqual(expect.arrayContaining([expect.objectContaining({ action: "organizations.invitations.accept", outcome: "success", target: { type: "organization", id: org } })]));
+    expect(JSON.stringify(audit)).not.toContain(first.token);
+    expect(JSON.stringify(audit)).not.toContain(recipient.email);
+  });
+
+  it("serializes concurrent owner demotions and invitation consumption", async () => {
+    const repo = await createRepo();
+    const owner = { id: "owner", email: "owner@example.test" };
+    const second = { id: "second", email: "second@example.test" };
+    const org = await createOrganization(repo, { name: "Owners", members: { owner: "owner", second: "owner" } });
+    const result = await Promise.allSettled([
+      changeOrganizationMember(repo, org.id, owner, owner.id, "member"),
+      changeOrganizationMember(repo, org.id, second, second.id, "member"),
+    ]);
+    expect(result.filter((item) => item.status === "fulfilled")).toHaveLength(1);
+    const members = await listOrganizationMembers(repo, org.id, owner);
+    expect(members.filter((member) => member.role === "owner")).toHaveLength(1);
+    const remaining = members.find((member) => member.role === "owner")!;
+    const actor = remaining.userId === owner.id ? owner : second;
+    const recipient = { id: "recipient", email: "recipient@example.test" };
+    const invite = await createOrganizationInvitation(repo, org.id, actor, { email: recipient.email, role: "member" });
+    const acceptance = await Promise.allSettled([1, 2].map(() => resolveOrganizationInvitation(repo, org.id, invite.invitation.id, recipient, "accept", invite.token)));
+    expect(acceptance.filter((item) => item.status === "fulfilled")).toHaveLength(1);
+    expect((await listOrganizationMembers(repo, org.id, actor)).filter((member) => member.userId === recipient.id)).toHaveLength(1);
+    await expect(addOrganizationMember(repo, org.id, { userId: actor.id, role: "member" })).rejects.toThrow("retain an owner");
   });
 });

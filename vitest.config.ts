@@ -11,6 +11,7 @@ export default defineConfig({
       "**/.nitely/**",
       "**/.nightly/**",
       "**/.worktrees/**",
+      "**/.claude/worktrees/**",
       "**/.pnpm-store/**",
     ],
     restoreMocks: true,

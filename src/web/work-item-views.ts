@@ -1,3 +1,4 @@
+import { organizationSessionAccessAllowed } from "./session-policy.js";
 import { readFile, realpath } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 
@@ -47,6 +48,7 @@ function ownedRecordVisibleToUser(
   record: { ownerId?: string; organizationId?: string },
   user?: WebAccessContext,
 ): boolean {
+  if (!organizationSessionAccessAllowed(user, record.organizationId)) return false;
   if (!user || user.authMode === "local" || user.role === "admin") {
     return true;
   }

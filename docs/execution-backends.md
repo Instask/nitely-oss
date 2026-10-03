@@ -93,6 +93,21 @@ unsupported.
   (`api.openai.com`, `*.anthropic.com`, …), and/or
 - Set stage `capabilities.network` to `mode: "restricted"` with `domains: [...]`.
 
+**Worktree dependencies:** the `implement-spec-bootstrap*` flows run an explicit
+`setup` command after implementation and before verification. It runs
+the repository's configured `setupCommand` in that run's worktree, on local and OCI
+backends, and produces the `dependencies` artifact. Verification depends on
+that artifact, so it cannot accidentally rely on parent-checkout dependencies.
+Set `setupCommand` and `verifyCommand` in `.nitely/instructions.json`
+`configuration`, or supply the flow configurables on the task.
+
+A command stage may declare `networkDomains: ["registry.npmjs.org"]`. OCI
+uses the same internal-only network and allowlist gateway as agent stages,
+limited to those declared domains for that command. Omit `networkDomains` to
+keep command stages offline; a global agent allowlist does not enable command
+egress. Include any registry domains used by your lockfile. Setup failures,
+output and retries are recorded as ordinary stage evidence.
+
 When an allowlist is active, Nitely creates an **internal-only Docker network**
 (`docker network create --internal`) and a sidecar HTTP CONNECT gateway. The
 sidecar joins both that internal network and the external bridge; the workload

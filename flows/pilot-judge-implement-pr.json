@@ -2,6 +2,14 @@
   "apiVersion": "nitely.dev/v1alpha1",
   "kind": "Flow",
   "metadata": {
+    "configurables": [
+      {
+        "key": "verifyCommand",
+        "label": "Repository verification command",
+        "type": "text",
+        "required": true
+      }
+    ],
     "name": "pilot-judge-implement-pr",
     "workItemType": "dev.pr",
     "inputs": [{ "id": "spec" }]
@@ -28,7 +36,7 @@
         "id": "verify",
         "type": "command",
         "costClass": "cheap",
-        "command": "pnpm check",
+        "command": "{{config.verifyCommand}}",
         "timeoutMs": 600000,
         "inputs": ["implementation"],
         "outputs": ["static-report"]
@@ -37,7 +45,7 @@
         "id": "targeted-verify",
         "type": "command",
         "costClass": "moderate",
-        "command": "pnpm exec vitest run test/flow test/run",
+        "command": "{{config.verifyCommand}}",
         "timeoutMs": 600000,
         "inputs": ["implementation", "static-report"],
         "outputs": ["targeted-test-report"]
@@ -70,7 +78,7 @@
         "id": "full-ci",
         "type": "command",
         "costClass": "expensive",
-        "command": "pnpm test:run",
+        "command": "{{config.verifyCommand}}",
         "timeoutMs": 600000,
         "inputs": ["implementation", "judge-result"],
         "outputs": ["full-test-report"]

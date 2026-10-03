@@ -29,6 +29,7 @@ export type ProjectInstructions =
       path: typeof PROJECT_INSTRUCTIONS_PATH;
       hash: string;
       groups: ProjectInstructionGroup[];
+      configuration?: Record<string, string | number | boolean>;
     };
 
 export interface SelectedProjectInstruction extends ProjectInstructionGroup {
@@ -67,6 +68,7 @@ const instructionsDocumentSchema = z
   .object({
     version: z.literal(1).default(1),
     instructions: z.array(instructionGroupSchema).default([]),
+    configuration: z.record(z.string(), z.union([z.string(), z.number().finite(), z.boolean()])).optional(),
   })
   .superRefine((document, context) => {
     const seen = new Set<string>();
@@ -215,6 +217,7 @@ export async function loadProjectInstructions(
     path,
     hash: `sha256:${hash}`,
     groups: parsed.data.instructions,
+    ...(parsed.data.configuration ? { configuration: parsed.data.configuration } : {}),
   };
 }
 
