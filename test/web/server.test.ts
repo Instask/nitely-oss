@@ -403,12 +403,14 @@ async function waitFor<T>(
   read: () => Promise<T>,
   matches: (value: T) => boolean,
 ): Promise<T> {
+  const deadline = Date.now() + 5_000;
   let latest = await read();
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  while (Date.now() < deadline) {
     if (matches(latest)) return latest;
     await new Promise((resolve) => setTimeout(resolve, 10));
     latest = await read();
   }
+  expect(matches(latest), "Web API state did not reach its expected predicate within 5 seconds").toBe(true);
   return latest;
 }
 
@@ -4775,7 +4777,7 @@ describe("web server API and HTML", () => {
         };
       },
       undefined,
-      { authMode: "required", providerEnv: {} },
+      { authMode: "required", providerEnv: { NITELY_EXECUTION_BACKEND: "local", NITELY_ALLOW_UNSAFE_LOCAL_EXECUTION: "true" } },
     );
     const a = await login(server, "a@example.test", "password a long passphrase");
     const b = await login(server, "b@example.test", "password b long passphrase");
@@ -4819,15 +4821,26 @@ describe("web server API and HTML", () => {
         }),
       }),
     )) as { task: { id: string } };
-    await fetch(`${server.url}/api/tasks/${created.task.id}/runs`, {
+    const started = await fetch(`${server.url}/api/tasks/${created.task.id}/runs`, {
       method: "POST",
       headers: { cookie: a.cookie },
     });
+    expect(await json(started)).toMatchObject({ run: { taskId: created.task.id } });
+    expect(started.status).toBe(200);
 
     await waitFor(
       async () => resolvedEnv,
       (env) => env?.NITELY_GLM_API_KEY === "glm-user-a-secret",
     );
+    resolvedEnv = undefined;
+    const second = (await json(await fetch(`${server.url}/api/tasks`, {
+      method: "POST", headers: { "content-type": "application/json", cookie: b.cookie },
+      body: JSON.stringify({ title: "Second user's run", spec: "Spec body", techDesign: "Design body" }),
+    }))) as { task: { id: string } };
+    const secondStart = await fetch(`${server.url}/api/tasks/${second.task.id}/runs`, { method: "POST", headers: { cookie: b.cookie } });
+    expect(secondStart.status).toBe(200);
+    const secondEnv = await waitFor(async () => resolvedEnv, (env) => env !== undefined);
+    expect(secondEnv?.NITELY_GLM_API_KEY).toBeUndefined();
   });
 
   it("denies provider credential writes for organization viewers and audits no secret", async () => {

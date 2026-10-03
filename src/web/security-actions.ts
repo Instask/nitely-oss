@@ -67,6 +67,9 @@ export function webSecurityActionForRequest(
   if (method === "POST" && pathname === "/api/skills/execute") {
     return action("skills.execute", "runs:start", { type: "skill" });
   }
+  if (method === "POST" && ["/api/skills/approve", "/api/skills/revoke-approval"].includes(pathname)) {
+    return action(pathname === "/api/skills/approve" ? "skills.approve" : "skills.approval.revoke", "organizations:manage", { type: "skill" });
+  }
   if (method === "POST" && pathname === "/api/skills/import") {
     return action("skills.import", "skills:manage", { type: "skill" });
   }

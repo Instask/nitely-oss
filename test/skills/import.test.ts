@@ -2,6 +2,8 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  link,
+  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -44,6 +46,27 @@ async function writeSourceSkill(
 }
 
 describe("importLocalSkill", () => {
+  it("rejects hardlinked and oversized source files and symlinked installation roots", async () => {
+    const repo = await createDirectory("nitely-skill-import-repo-");
+    const sourceRoot = await createDirectory("nitely-skill-import-source-");
+    try {
+      const source = await writeSourceSkill(sourceRoot, "bounded");
+      await writeFile(join(sourceRoot, "outside.txt"), "outside");
+      await link(join(sourceRoot, "outside.txt"), join(source, "linked.txt"));
+      await expect(importLocalSkill({ sourcePath: source, repoPath: repo })).rejects.toThrow();
+      await rm(join(source, "linked.txt"));
+      await writeFile(join(source, "large.txt"), Buffer.alloc(4 * 1024 * 1024 + 1));
+      await expect(importLocalSkill({ sourcePath: source, repoPath: repo })).rejects.toThrow();
+      await rm(join(source, "large.txt"));
+      await mkdir(join(repo, ".nitely"));
+      await symlink(sourceRoot, join(repo, ".nitely/skills"));
+      await expect(importLocalSkill({ sourcePath: source, repoPath: repo })).rejects.toThrow();
+      await expect(readFile(join(sourceRoot, "outside.txt"), "utf8")).resolves.toBe("outside");
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+      await rm(sourceRoot, { recursive: true, force: true });
+    }
+  });
   it("previews a local skill without creating the target directory", async () => {
     const repo = await createDirectory("nitely-skill-import-repo-");
     const sourceRoot = await createDirectory("nitely-skill-import-source-");

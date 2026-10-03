@@ -286,6 +286,11 @@ export function createNitelyMcpServer(input: NitelyMcpServerInput): McpServer {
     }
   };
 
+  server.registerTool("inspect_skill", {
+    title: "Inspect repository Skill identity",
+    description: "Inspect bounded package identity, manifest and approval status. Requires runs:read. Approval requires an operator browser session and is not an MCP tool.",
+    inputSchema: z.object({ repoId: idSchema, skillId: idSchema }).strict(), annotations: readOnlyAnnotations,
+  }, async (request) => await execute(() => api.request("/api/skills/inspect", { method: "POST", body: request })));
   server.registerTool("execute_skill", {
     title: "Execute repository Skill",
     description: "Execute a repository-local Python Skill using a skill.yaml named entrypoint in a non-root, network-denied sandbox. Inputs/outputs must be declared by its manifest; outputs are archived with hashes. Requires runs:start.",

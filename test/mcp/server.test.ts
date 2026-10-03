@@ -90,6 +90,7 @@ describe("Nitely MCP server", () => {
     try {
       const tools = await connected.client.listTools();
       expect(tools.tools.map((tool) => tool.name)).toEqual([
+        "inspect_skill",
         "execute_skill",
         "list_tasks",
         "list_flows",

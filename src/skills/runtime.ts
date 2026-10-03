@@ -7,10 +7,11 @@ import { identifierSchema } from "../flow/schema.js";
 import type { OciExecutionBackendOptions } from "../run/execution/oci.js";
 import type { ExecutionBackendDescription } from "../run/execution/types.js";
 import { OciSkillSandboxProvider, selectSkillSandboxProvider, type SkillSandboxProvider } from "./sandbox.js";
-import { ensureRunOwnedDirectory, listRunOwnedDirectory, readRunOwnedFile, writeRunOwnedFileAtomically } from "../run/owned-file.js";
-import { validateSkillDirectory } from "./load.js";
+import { ensureRunOwnedDirectory, writeRunOwnedFileAtomically } from "../run/owned-file.js";
+import { snapshotSkillPackage } from "./package.js";
 import { withKnowledgeLease } from "../knowledge-repositories/lock.js";
-import { loadExecutionManifest, SkillManifestError, skillRelativePathSchema } from "./manifest.js";
+import { loadExecutionManifest, SkillManifestError, skillRelativePathSchema, type SkillManifest } from "./manifest.js";
+import { requireSkillApproval, SkillTrustError, skillHashSchema, type SkillApproval, type SkillApprovalScope } from "./trust.js";
 
 // Relative POSIX paths only: no shell syntax, hidden components or parent hops.
 const pathSchema = skillRelativePathSchema;
@@ -20,6 +21,7 @@ export const skillExecutionSchema = z.object({
   inputs: z.record(pathSchema, z.string().max(1024 * 1024)).default({}),
   outputs: z.array(pathSchema).max(16).default([]),
   timeoutMs: z.number().int().min(100).max(60_000).default(10_000),
+  expectedContentHash: skillHashSchema.optional(),
 }).strict();
 export type SkillExecutionRequest = z.input<typeof skillExecutionSchema>;
 export interface SkillExecutionResult {
@@ -34,7 +36,7 @@ export interface SkillExecutionResult {
   artifacts: { path: string; sha256: string; size: number }[];
 }
 export interface SkillRuntime {
-  execute(repoPath: string, request: SkillExecutionRequest): Promise<SkillExecutionResult>;
+  execute(repoPath: string, request: SkillExecutionRequest, scope?: SkillApprovalScope): Promise<SkillExecutionResult>;
 }
 
 const PYTHON_WRAPPER = `import base64, json, os, stat, subprocess, sys, tempfile
@@ -96,15 +98,15 @@ print(json.dumps(result))
 export class PythonSkillRuntime implements SkillRuntime {
   constructor(private readonly options: Pick<OciExecutionBackendOptions, "image" | "env" | "processRunner" | "engineSocketVerifier"> & { sandboxProviders?: readonly SkillSandboxProvider[] }) {}
 
-  async execute(repoPath: string, raw: SkillExecutionRequest): Promise<SkillExecutionResult> {
+  async execute(repoPath: string, raw: SkillExecutionRequest, scope?: SkillApprovalScope): Promise<SkillExecutionResult> {
     skillExecutionSchema.parse(raw);
     await ensureRunOwnedDirectory({ runDirectory: repoPath, path: ".nitely/skill-executions", subject: "Skill execution archive" });
     // ponytail: one active Skill per repository; per-tenant admission if throughput matters.
     return await withKnowledgeLease({ path: join(repoPath, ".nitely/skill-executions/execution.lock"), waitMs: 0 },
-      async () => await this.executeIsolated(repoPath, raw));
+      async () => await this.executeIsolated(repoPath, raw, scope));
   }
 
-  private async executeIsolated(repoPath: string, raw: SkillExecutionRequest): Promise<SkillExecutionResult> {
+  private async executeIsolated(repoPath: string, raw: SkillExecutionRequest, scope?: SkillApprovalScope): Promise<SkillExecutionResult> {
     const request = skillExecutionSchema.parse(raw);
     if (new Set(request.outputs).size !== request.outputs.length) throw new Error("duplicate Skill output paths");
     if (Object.keys(request.inputs).length > 16 || Object.values(request.inputs).reduce((size, value) => size + Buffer.byteLength(value), 0) > 1024 * 1024) {
@@ -114,40 +116,24 @@ export class PythonSkillRuntime implements SkillRuntime {
     const temporaryRoot = await mkdtemp(join(tmpdir(), "nitely-skill-"));
     const workspace = join(temporaryRoot, "workspace");
     const started = Date.now();
+    let contentHash: string | undefined;
+    let manifest: SkillManifest | undefined;
+    let approval: SkillApproval | undefined;
     try {
       await mkdir(workspace, { mode: 0o755 });
       const code = join(workspace, "code");
       await mkdir(code, { mode: 0o755 });
-      let fileCount = 0;
-      let totalBytes = 0;
-      const source = `.nitely/skills/${request.skillId}`;
-      const copy = async (path: string): Promise<void> => {
-        const entries = await listRunOwnedDirectory({ runDirectory: repoPath, path: join(source, path), subject: "Skill package" });
-        for (const entry of entries) {
-          const relative = path ? `${path}/${entry.name}` : entry.name;
-          pathSchema.parse(relative);
-          if (++fileCount > 128) throw new Error("Skill package exceeds 128 entries");
-          if (entry.isDirectory()) {
-            await mkdir(join(code, relative), { mode: 0o755 });
-            await copy(relative);
-          } else {
-            const file = await readRunOwnedFile({ runDirectory: repoPath, path: join(source, relative), subject: "Skill package", maximumBytes: 4 * 1024 * 1024 });
-            totalBytes += file.content.byteLength;
-            if (totalBytes > 8 * 1024 * 1024) throw new Error("Skill package exceeds 8 MiB");
-            await writeFile(join(code, relative), file.content, { flag: "wx", mode: 0o644 });
-          }
-        }
-      };
-      await copy("");
-      const skill = await validateSkillDirectory({ skillDirectory: code, skillId: request.skillId });
-      const manifest = await loadExecutionManifest(code, request.skillId);
+      const skill = await snapshotSkillPackage({ rootDirectory: repoPath, sourcePath: `.nitely/skills/${request.skillId}`, destination: code, skillId: request.skillId });
+      contentHash = skill.contentHash;
+      manifest = await loadExecutionManifest(code, request.skillId);
       const provider = selectSkillSandboxProvider(this.options.sandboxProviders ?? [new OciSkillSandboxProvider(this.options)], manifest);
       if (manifest.network.mode !== "none") throw new SkillManifestError("skill.yaml network: approved allowlist execution is unavailable; use mode none");
       if (manifest.secrets.length) throw new SkillManifestError("skill.yaml secrets: approved scoped-secret injection is unavailable");
       if (manifest.dependencies.mode !== "none") throw new SkillManifestError("skill.yaml dependencies: locked dependency installation is unavailable; use mode none");
       const entrypoint = Object.hasOwn(manifest.entrypoints, request.entrypoint) ? manifest.entrypoints[request.entrypoint] : Object.values(manifest.entrypoints).includes(request.entrypoint) ? request.entrypoint : undefined;
       if (!entrypoint || !skill.resources.some((file) => file.relativePath === entrypoint)) throw new SkillManifestError("skill.yaml must declare the requested package entrypoint");
-      if (Object.keys(request.inputs).some((path) => !manifest.filesystem.inputs.includes(path)) || request.outputs.some((path) => !manifest.filesystem.outputs.includes(path))) {
+      const filesystem = manifest.filesystem;
+      if (Object.keys(request.inputs).some((path) => !filesystem.inputs.includes(path)) || request.outputs.some((path) => !filesystem.outputs.includes(path))) {
         throw new SkillManifestError("skill.yaml does not grant the requested input/output paths");
       }
       const timeoutMs = Math.min(request.timeoutMs, manifest.resources.timeoutMs);
@@ -164,6 +150,7 @@ export class PythonSkillRuntime implements SkillRuntime {
       let captured: Array<{ path: string; content: string }> = [];
       let sandbox: ExecutionBackendDescription | undefined;
       try {
+        approval = await requireSkillApproval(repoPath, request.skillId, skill.contentHash, request.expectedContentHash, scope);
         const execution = await provider.execute({ workspace, outputDirectory: output, executionId, skillId: request.skillId, resources: manifest.resources, timeoutMs });
         sandbox = execution.evidence;
         const command = execution.command;
@@ -207,8 +194,19 @@ export class PythonSkillRuntime implements SkillRuntime {
       }
       result.durationMs = Date.now() - started;
       await writeRunOwnedFileAtomically({ runDirectory: repoPath, path: `${archive}/execution.json`, subject: "Skill execution evidence",
-        content: JSON.stringify({ ...result, manifest, resolvedEntrypoint: entrypoint, provider: { id: provider.id, capabilities: [...provider.capabilities] }, request: { ...request, inputs: Object.fromEntries(Object.entries(request.inputs).map(([path, content]) => [path, { sha256: createHash("sha256").update(content).digest("hex"), size: Buffer.byteLength(content) }])) }, createdAt: new Date().toISOString(), sandbox }) });
+        content: JSON.stringify({ ...result, manifest, approval, packageSource: "repository-local", packageVersion: manifest.version,
+          grantedAuthority: { ...manifest.filesystem, network: "none", secrets: [], dependencies: "none", resources: manifest.resources },
+          resolvedEntrypoint: entrypoint, provider: { id: provider.id, capabilities: [...provider.capabilities] }, request: { ...request, inputs: Object.fromEntries(Object.entries(request.inputs).map(([path, content]) => [path, { sha256: createHash("sha256").update(content).digest("hex"), size: Buffer.byteLength(content) }])) }, createdAt: new Date().toISOString(), sandbox }) });
       return result;
+    } catch (error) {
+      const archive = `.nitely/skill-executions/${executionId}`;
+      await ensureRunOwnedDirectory({ runDirectory: repoPath, path: archive, subject: "Skill denied-execution archive" });
+      await writeRunOwnedFileAtomically({ runDirectory: repoPath, path: `${archive}/execution.json`, subject: "Skill denied-execution evidence",
+        content: JSON.stringify({ executionId, skillId: request.skillId, contentHash, packageVersion: manifest?.version, manifest,
+          packageSource: "repository-local", outcome: "denied", reasonCode: error instanceof SkillTrustError ? error.code : error instanceof SkillManifestError ? "manifest-policy" : "package-validation",
+          grantedAuthority: null, provider: null, approval, durationMs: Date.now() - started, createdAt: new Date().toISOString() }) });
+      if (error instanceof Error) Object.assign(error, { executionId });
+      throw error;
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
     }

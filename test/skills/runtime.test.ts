@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { stringify } from "yaml";
 import { parseSkillManifest } from "../../src/skills/manifest.js";
 import { loadStageSkills } from "../../src/skills/load.js";
+import { approveRepositorySkill, inspectRepositorySkill } from "../../src/skills/trust.js";
 import { OciSkillSandboxProvider, selectSkillSandboxProvider, type SkillSandboxProvider } from "../../src/skills/sandbox.js";
 import { expect, it } from "vitest";
 import { PythonSkillRuntime } from "../../src/skills/runtime.js";
@@ -40,6 +41,7 @@ it("stages only declared inputs, archives hashed outputs, bounds OCI execution a
   await writeFile(join(packagePath, "SKILL.md"), "---\nname: example\ndescription: example skill\n---\nRun main.py.");
   await writeFile(join(packagePath, "main.py"), "print('example')");
   await writeFile(join(packagePath, "skill.yaml"), stringify(manifest));
+  await approveRepositorySkill(repo, { skillId: "example", contentHash: (await inspectRepositorySkill(repo, "example")).contentHash, actorId: "test-operator" });
   let policy = structuredClone(manifest);
   let workspace = "";
   let outcome = 0;
@@ -88,6 +90,7 @@ it("stages only declared inputs, archives hashed outputs, bounds OCI execution a
     outcome = 0;
     policy = { ...manifest, resources: { ...manifest.resources, cpus: 0.5, memoryBytes: 134217728, pids: 32, tmpfsBytes: 16777216, timeoutMs: 500 } };
     await writeFile(join(packagePath, "skill.yaml"), stringify(policy));
+    await approveRepositorySkill(repo, { skillId: "example", contentHash: (await inspectRepositorySkill(repo, "example")).contentHash, actorId: "test-operator" });
     const reduced = await runtime.execute(repo, { skillId: "example", entrypoint: "main", inputs: { "value.txt": "declared" }, outputs: ["result.txt"], timeoutMs: 60000 });
     expect(reduced.failure).toBeUndefined();
     const evidence = JSON.parse(await readFile(join(repo, ".nitely/skill-executions", reduced.executionId, "execution.json"), "utf8"));
