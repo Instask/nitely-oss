@@ -437,6 +437,7 @@ import {
   changeRequestIdentity,
 } from "./change-requests.js";
 import { organizationSessionAccessAllowed, type OrganizationSessionAccess } from "./session-policy.js";
+import { configureOrganizationSaml, getOrganizationSaml, startOrganizationSaml, finishOrganizationSaml, organizationSamlMetadata } from "./saml.js";
 import { configureOrganizationOidc, getOrganizationOidc, startOrganizationOidc, finishOrganizationOidc } from "./oidc.js";
 import {
   bootstrapInitialAdmin,
@@ -1095,14 +1096,14 @@ async function auditApiTokenRequest(
 
 async function readRequestBody(
   request: IncomingMessage,
-  options: { tooLargeError?: () => Error } = {},
+  options: { tooLargeError?: () => Error; maxBytes?: number } = {},
 ): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     size += buffer.byteLength;
-    if (size > maximumGitHubWebhookBodyBytes) {
+    if (size > (options.maxBytes ?? maximumGitHubWebhookBodyBytes)) {
       throw (
         options.tooLargeError?.() ??
         new WebInputError("request body is too large")
@@ -8093,21 +8094,25 @@ async function handleApiRequest(
     throw new WebNotFoundError("organization policy endpoint not found");
   }
 
-  const oidcRoute = /^\/api\/organizations\/([^/]+)\/sso\/oidc(?:\/(login|link|callback))?$/.exec(url.pathname);
-  if (oidcRoute) {
-    if (authMode !== "required") throw new WebNotFoundError("OIDC requires authenticated mode");
+  const ssoRoute = /^\/api\/organizations\/([^/]+)\/sso\/(oidc|saml)(?:\/(login|link|callback|acs|metadata))?$/.exec(url.pathname);
+  if (ssoRoute) {
+    if (authMode !== "required") throw new WebNotFoundError("SSO requires authenticated mode");
     let org: string;
-    try { org = decodeURIComponent(oidcRoute[1]); } catch { throw new WebInputError("invalid organization id"); }
-    const action = oidcRoute[2];
+    try { org = decodeURIComponent(ssoRoute[1]); } catch { throw new WebInputError("invalid organization id"); }
+    const protocol = ssoRoute[2] as "oidc" | "saml";
+    const action = ssoRoute[3];
     const env = input.authEnv ?? process.env;
     const cookies = parseCookies(request.headers.cookie);
-    const cookieName = "nitely_oidc_" + createHash("sha256").update(org).digest("hex").slice(0, 16);
-    const cookiePath = `/api/organizations/${encodeURIComponent(org)}/sso/oidc`;
+    const cookieName = "nitely_" + protocol + "_" + createHash("sha256").update(org).digest("hex").slice(0, 16);
+    const cookiePath = `/api/organizations/${encodeURIComponent(org)}/sso/${protocol}`;
+    if (protocol === "saml" && action === "metadata" && request.method === "GET") {
+      response.setHeader("content-type", "application/samlmetadata+xml; charset=utf-8"); response.end(await organizationSamlMetadata(homeRepoPath, org)); return true;
+    }
     if (!action && (request.method === "GET" || request.method === "PUT")) {
       const user = await requireUserContext(request, input, homeRepoPath);
       const configuration = request.method === "GET"
-        ? await getOrganizationOidc(homeRepoPath, org, user)
-        : await configureOrganizationOidc(homeRepoPath, org, user, requireObject(await readRequestJson(request)), env);
+        ? await (protocol === "oidc" ? getOrganizationOidc : getOrganizationSaml)(homeRepoPath, org, user)
+        : await (protocol === "oidc" ? configureOrganizationOidc : configureOrganizationSaml)(homeRepoPath, org, user, requireObject(await readRequestJson(request)), env);
       sendJson(response, 200, { configuration });
       return true;
     }
@@ -8120,17 +8125,18 @@ async function handleApiRequest(
         if (!verified || verified.id !== user.id || !cookies.nitely_session) throw new WebForbiddenError("password reauthentication is required for linking");
         link = { userId: user.id, sessionId: cookies.nitely_session };
       }
-      const started = await startOrganizationOidc(homeRepoPath, org, env, link);
+      const started = await (protocol === "oidc" ? startOrganizationOidc : startOrganizationSaml)(homeRepoPath, org, env, link);
       sendJsonWithHeaders(response, 302, { redirect: started.url }, { location: started.url,
-        "set-cookie": `${cookieName}=${started.browserToken}; Path=${cookiePath}; HttpOnly; SameSite=Lax; Secure; Max-Age=600` });
+        "set-cookie": `${cookieName}=${started.browserToken}; Path=${cookiePath}; HttpOnly; SameSite=${protocol === "saml" ? "None" : "Lax"}; Secure; Max-Age=600` });
       return true;
     }
-    if (request.method === "GET" && action === "callback") {
+    if (protocol === "oidc" && request.method === "GET" && action === "callback" || protocol === "saml" && request.method === "POST" && action === "acs") {
       const sessionUser = cookies.nitely_session ? await readSessionUser(homeRepoPath, cookies.nitely_session) : null;
-      const result = await finishOrganizationOidc(homeRepoPath, org, env, url.searchParams, cookies[cookieName],
-        sessionUser && cookies.nitely_session ? { userId: sessionUser.id, sessionId: cookies.nitely_session } : undefined);
-      const session = await createSession(homeRepoPath, result.userId, { authenticationMethod: "oidc", organizationId: org });
-      await appendSecurityAuditBestEffort(homeRepoPath, { action: result.linked ? "auth.oidc.link" : "auth.oidc.login",
+      if (protocol === "saml" && !requestHeader(request, "content-type").toLowerCase().startsWith("application/x-www-form-urlencoded")) throw new WebInputError("SAML ACS requires form encoding");
+      const result = protocol === "oidc" ? await finishOrganizationOidc(homeRepoPath, org, env, url.searchParams, cookies[cookieName],
+        sessionUser && cookies.nitely_session ? { userId: sessionUser.id, sessionId: cookies.nitely_session } : undefined) : await finishOrganizationSaml(homeRepoPath, org, new URLSearchParams((await readRequestBody(request, { maxBytes: 2 * 1024 * 1024 })).toString("utf8")), cookies[cookieName]);
+      const session = await createSession(homeRepoPath, result.userId, { authenticationMethod: protocol, organizationId: org });
+      await appendSecurityAuditBestEffort(homeRepoPath, { action: result.linked ? `auth.${protocol}.link` : `auth.${protocol}.login`,
         decision: "allow", outcome: "success", httpStatus: 200, reasonCode: result.created ? "jit_provisioned" : "ok",
         actor: { type: "user", id: result.userId, organizationId: org }, target: { type: "organization", id: org } });
       const browser = requestHeader(request, "accept").includes("text/html");
@@ -8139,7 +8145,7 @@ async function handleApiRequest(
         { "set-cookie": sessionCookie(session.id, true), ...(browser ? { location: "/" } : {}) });
       return true;
     }
-    throw new WebNotFoundError("OIDC endpoint not found");
+    throw new WebNotFoundError("SSO endpoint not found");
   }
 
   const organizationRoute = /^\/api\/organizations\/([^/]+)\/(members|invitations)(?:\/([^/]+))?(?:\/(accept|decline|revoke))?$/.exec(url.pathname);

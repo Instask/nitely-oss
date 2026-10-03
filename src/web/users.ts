@@ -22,6 +22,7 @@ import { WebForbiddenError } from "./errors.js";
 
 import {
   organizationSessionScopes,
+  addOrganizationMember,
   ensureDefaultOrganizationForUser,
   listPublicMemberships,
   type PublicOrganizationMembership,
@@ -38,7 +39,7 @@ export interface UserRecord {
   email: string;
   role: UserRole;
   createdAt: string;
-  externalIdentities?: Array<{ issuer: string; subject: string }>;
+  externalIdentities?: Array<{ issuer: string; subject: string; protocol?: "oidc" | "saml"; organizationId?: string }>;
   passwordHash: string;
   passwordSalt: string;
   passwordParams: { algorithm: "scrypt"; keyLength: number };
@@ -64,7 +65,7 @@ export interface SessionRecord {
   userId: string;
   createdAt: string;
   expiresAt: string;
-  authenticationMethod?: "password" | "oidc";
+  authenticationMethod?: "password" | "oidc" | "saml";
   organizationId?: string;
   organizationVersions?: Record<string, { organization: number; user: number }>;
   lastActivityAt?: string;
@@ -80,7 +81,7 @@ export interface CreateUserInput {
 }
 
 export interface SessionOptions {
-  authenticationMethod?: "password" | "oidc";
+  authenticationMethod?: "password" | "oidc" | "saml";
   organizationId?: string;
   now?: () => Date;
   createId?: () => string;
@@ -284,7 +285,7 @@ function parseUserRecord(
     return invalid("user email must be non-empty and normalized");
   }
   if (user.externalIdentities !== undefined && (!Array.isArray(user.externalIdentities) || user.externalIdentities.some((identity) =>
-    !identity || typeof identity !== "object" || typeof identity.issuer !== "string" || !identity.issuer || typeof identity.subject !== "string" || !identity.subject))) return invalid("external identities must contain issuer and subject");
+    !identity || typeof identity !== "object" || typeof identity.issuer !== "string" || !identity.issuer || typeof identity.subject !== "string" || !identity.subject || identity.protocol !== undefined && !["oidc", "saml"].includes(identity.protocol) || identity.protocol === "saml" && (typeof identity.organizationId !== "string" || !identity.organizationId)))) return invalid("external identities must contain issuer and subject");
   if (user.role !== "admin" && user.role !== "user") {
     return invalid("user role must be admin or user");
   }
@@ -984,7 +985,7 @@ export async function readSessionUser(
     }
     const user = await getPublicUser(repoPath, session.userId);
     if (!user) return null;
-    if (session.authenticationMethod === "oidc" && !user.memberships?.some((member) => member.organizationId === session.organizationId)) return null;
+    if ((session.authenticationMethod === "oidc" || session.authenticationMethod === "saml") && !user.memberships?.some((member) => member.organizationId === session.organizationId)) return null;
     const scopes = await organizationSessionScopes(repoPath, user.id, user.role === "admin");
     const requested = options.organizationId ?? session.organizationId ?? user.currentOrganizationId;
     const decisions = scopes.map((scope) => ({ ...scope, decision: evaluateOrganizationSession({ ...scope, session, now,
@@ -1052,15 +1053,16 @@ export async function invalidateUserSessions(
 
 
 /** Immutable issuer/subject matching never falls back to matching an email. */
-export async function resolveOidcUser(repoPath: string, input: {
-  issuer: string; subject: string; email?: string; allowCreate: boolean; linkUserId?: string;
+export async function resolveEnterpriseUser(repoPath: string, input: {
+  issuer: string; subject: string; email?: string; allowCreate: boolean; linkUserId?: string; protocol?: "oidc" | "saml"; organizationId?: string;
 }): Promise<{ user: UserRecord; created: boolean }> {
   return await withKnowledgeLease({ path: join(usersRoot(repoPath), "users.lock"), waitMs: 10_000 }, async () => {
+    if (input.protocol === "saml" && !input.organizationId) throw new WebForbiddenError();
     const file = await readUsers(repoPath);
-    const identity = { issuer: input.issuer, subject: input.subject };
-    const matched = Object.values(file.users).find((user) => user.externalIdentities?.some((id) => id.issuer === identity.issuer && id.subject === identity.subject));
+    const identity = { issuer: input.issuer, subject: input.subject, ...(input.protocol === "saml" ? { protocol: "saml" as const, organizationId: input.organizationId } : {}) };
+    const matched = Object.values(file.users).find((user) => user.externalIdentities?.some((id) => id.issuer === identity.issuer && id.subject === identity.subject && (id.protocol ?? "oidc") === (identity.protocol ?? "oidc") && (identity.protocol !== "saml" || id.organizationId === identity.organizationId)));
     if (matched) {
-      if (input.linkUserId && input.linkUserId !== matched.id) throw new WebForbiddenError("OIDC identity is already linked");
+      if (input.linkUserId && input.linkUserId !== matched.id) throw new WebForbiddenError("enterprise identity is already linked");
       return { user: matched, created: false };
     }
     let user: UserRecord;
@@ -1070,7 +1072,7 @@ export async function resolveOidcUser(repoPath: string, input: {
       user = file.users[input.linkUserId];
     } else {
       const email = input.email && normalizeEmail(input.email);
-      if (!input.allowCreate || !email || Object.values(file.users).some((user) => user.email === email)) throw new WebForbiddenError("OIDC identity requires explicit account linking");
+      if (!input.allowCreate || !email || Object.values(file.users).some((user) => user.email === email)) throw new WebForbiddenError("enterprise identity requires explicit account linking");
       user = { id: createUserId(), email, role: "user", createdAt: new Date().toISOString(), ...(await hashPassword(randomBytes(48).toString("base64url"))) };
       created = true;
     }
@@ -1079,4 +1081,14 @@ export async function resolveOidcUser(repoPath: string, input: {
     await writeJsonAtomic(usersPath(repoPath), file);
     return { user, created };
   });
+}
+
+export const resolveOidcUser = resolveEnterpriseUser;
+
+export async function resolveOrganizationEnterpriseIdentity(repoPath: string, organizationId: string, input: Parameters<typeof resolveEnterpriseUser>[1]) {
+  if (input.linkUserId && !(await listPublicMemberships(repoPath, input.linkUserId)).some((member) => member.organizationId === organizationId)) throw new WebForbiddenError();
+  const resolved = await resolveEnterpriseUser(repoPath, { ...input, ...(input.protocol === "saml" ? { organizationId } : {}) });
+  if (resolved.created) await addOrganizationMember(repoPath, organizationId, { userId: resolved.user.id, role: "member" });
+  if (!(await listPublicMemberships(repoPath, resolved.user.id)).some((member) => member.organizationId === organizationId)) throw new WebForbiddenError();
+  return { userId: resolved.user.id, linked: Boolean(input.linkUserId), created: resolved.created };
 }

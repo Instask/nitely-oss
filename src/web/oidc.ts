@@ -4,8 +4,8 @@ import { join, resolve } from "node:path";
 import * as client from "openid-client";
 import { withKnowledgeLease } from "../knowledge-repositories/lock.js";
 import { WebForbiddenError, WebInputError, WebNotFoundError } from "./errors.js";
-import { addOrganizationMember, listOrganizationMembers, listPublicMemberships, type OrganizationActor, writeJsonAtomic as writePrivateJson } from "./organizations.js";
-import { resolveOidcUser } from "./users.js";
+import { listOrganizationMembers, listPublicMemberships, type OrganizationActor, writeJsonAtomic as writePrivateJson } from "./organizations.js";
+import { resolveOrganizationEnterpriseIdentity } from "./users.js";
 
 export interface OrganizationOidcConfiguration {
   version: 1;
@@ -168,10 +168,7 @@ export async function finishOrganizationOidc(repo: string, org: string, env: Nod
     const allowCreate = configuration.jit.enabled && claims.email_verified === true && Boolean(email && email.length <= 254 && /^[^\s@]+@[^\s@]+$/.test(email) && configuration.jit.domains.includes(email.split("@")[1]));
     return await withKnowledgeLease({ path: root(repo, org) + ".lock", waitMs: 10_000 }, async () => {
       if (hash(JSON.stringify(await readConfiguration(repo, org))) !== grant.configurationHash) throw new Error();
-      const resolved = await resolveOidcUser(repo, { issuer: claims.iss, subject: claims.sub, email, allowCreate, linkUserId: grant.linkUserId });
-      if (resolved.created) await addOrganizationMember(repo, org, { userId: resolved.user.id, role: "member" });
-      if (!(await listPublicMemberships(repo, resolved.user.id)).some((member) => member.organizationId === org)) throw new Error();
-      return { userId: resolved.user.id, linked: Boolean(grant.linkUserId), created: resolved.created };
+      return await resolveOrganizationEnterpriseIdentity(repo, org, { issuer: claims.iss, subject: claims.sub, email, allowCreate, linkUserId: grant.linkUserId });
     });
   } catch { throw new WebForbiddenError("OIDC login failed"); }
 }

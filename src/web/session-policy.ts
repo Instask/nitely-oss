@@ -17,7 +17,7 @@ export function evaluateOrganizationSession(input: {
   session: {
     createdAt: string;
     expiresAt: string;
-    authenticationMethod?: "password" | "oidc";
+    authenticationMethod?: "password" | "oidc" | "saml";
     organizationId?: string;
     organizationVersions?: Record<string, { organization: number; user: number }>;
     lastActivityAt?: string;
@@ -35,7 +35,7 @@ export function evaluateOrganizationSession(input: {
   if ((version?.organization ?? 0) !== input.organizationVersion || (version?.user ?? 0) !== input.userVersion) return { allowed: false, reason: "session-revoked" };
   const activity = Date.parse(session.organizationActivity?.[organizationId] ?? session.lastActivityAt ?? session.createdAt);
   if (!Number.isFinite(activity) || activity > now || policy.idleTimeoutSeconds !== null && now >= activity + policy.idleTimeoutSeconds * 1000) return { allowed: false, reason: "idle-expired" };
-  if (policy.ssoRequired && (session.authenticationMethod !== "oidc" || session.organizationId !== organizationId)) {
+  if (policy.ssoRequired && (!["oidc", "saml"].includes(session.authenticationMethod ?? "password") || session.organizationId !== organizationId)) {
     return input.breakGlass ? { allowed: true, reason: "break-glass", breakGlass: true } : { allowed: false, reason: "sso-required" };
   }
   return { allowed: true, reason: "allowed" };

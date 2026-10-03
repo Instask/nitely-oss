@@ -63,6 +63,8 @@
   "dependencies": {
     "@babel/standalone": "7.26.4",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "@node-saml/node-saml": "5.1.0",
+    "@xmldom/xmldom": "^0.9.12",
     "openid-client": "6.8.8",
     "pixelmatch": "^7.2.0",
     "pngjs": "^7.0.0",
@@ -77,6 +79,7 @@
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vite": "^8.3.0",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.11",
+    "xml-crypto": "^6.3.2"
   }
 }

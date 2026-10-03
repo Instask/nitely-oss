@@ -447,3 +447,43 @@ file owners can edit it, there is no external signature chain, and retention
 intentionally rewrites it. Hosted deployments requiring immutable retention or
 multi-host writers must send audit metadata to an access-controlled external
 append-only store; the local file lease coordinates processes on one host only.
+
+### Organization SAML SSO
+
+SAML uses the same organization membership, explicit account linking, session
+revocation and SSO-required policy as OIDC. Enterprise identities distinguish
+protocol plus immutable issuer/subject; SAML identities also bind the organization
+because each organization pins its own IdP certificates. Email never automatically
+links accounts.
+SAML requires persistent NameIDs. JIT is off by default; when enabled, the signed
+IdP email attribute must match an explicitly allowed domain. Configure an IdP that
+attests that attribute as the user's verified email.
+
+Organization owners can `GET`/`PUT /api/organizations/:id/sso/saml` with `version:1`,
+`idpIssuer`, `entryPoint`, `certificates` (one to three public PEM RSA certificates),
+`entityId`, `acsUrl`, optional `emailAttribute` (default `email`), and
+`jit:{enabled,domains}`. Alternatively, provide manually trusted `metadataXml`
+instead of issuer/entry point/certificates; metadata is parsed locally, not fetched.
+Operator settings `NITELY_SAML_ALLOWED_HOSTS` and `NITELY_SAML_REDIRECT_ORIGINS`
+allowlist HTTPS IdP hosts and browser origins. ACS must be the exact organization's
+`.../sso/saml/acs` endpoint. SP metadata is public at `GET .../sso/saml/metadata`.
+
+`GET .../sso/saml/login` starts SP-initiated login. `POST .../sso/saml/link` requires
+the existing session and password reauthentication. The IdP posts URL-encoded
+`SAMLResponse` and `RelayState` to ACS. Browser state uses an organization-scoped
+HttpOnly `SameSite=None; Secure` cookie because ACS is a cross-site POST; TLS is
+required. Linking rechecks the originally verified session even when its Lax
+session cookie is absent from the IdP POST. State is browser-bound, single-use,
+expires after ten minutes, and is invalidated by configuration changes.
+
+Both response and assertion signatures are required, using SHA-256/SHA-512 with
+RSA keys of at least 2048 bits. Issuer, audience, destination, recipient, request
+correlation, status and finite time bounds are checked; assertion age is capped at
+five minutes with 30 seconds of clock skew. Unsolicited IdP-initiated responses,
+DTD/entities and encrypted assertions are rejected. Raw XML/assertions are absent
+from responses and audit records. A successful browser ACS redirects to `/`.
+
+Certificate rotation uses an explicit overlap: configure old and new valid
+certificates, start new requests, then remove the retired certificate. Validation
+continues throughout overlap; expired/not-yet-valid certificates cannot verify a
+login. Changing configuration invalidates pending requests, which must restart.
