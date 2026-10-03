@@ -17,7 +17,7 @@ it("stages only declared inputs, archives hashed outputs, bounds OCI execution a
   const processRunner = async (input: SandboxProcessInput) => {
     if (input.args[0] === "info") return { stdout: '["name=rootless"]\t"2"\t[]', stderr: "", exitCode: 0 };
     if (input.args[0] === "image") return { stdout: `"sha256:${"a".repeat(64)}"\t[]`, stderr: "", exitCode: 0 };
-    if (input.args[0] === "rm") { removed = true; return { stdout: "", stderr: "", exitCode: 0 }; }
+    if (input.args[0] === "rm") { removed = true; return { stdout: "", stderr: outcome === 4 ? "engine cleanup failed" : "", exitCode: outcome === 4 ? 1 : 0 }; }
     const mounts = input.args.filter((arg) => arg.startsWith("type=bind,"));
     workspace = /src=(.*),dst=\/workspace,readonly/.exec(mounts[0])![1];
     expect(mounts).toEqual([`type=bind,src=${workspace},dst=/workspace,readonly`]);
@@ -35,12 +35,12 @@ it("stages only declared inputs, archives hashed outputs, bounds OCI execution a
   };
   try {
     const runtime = new PythonSkillRuntime({ image: "skill-image:local", env: {}, processRunner });
-    for (outcome = 0; outcome < 4; outcome++) {
+    for (outcome = 0; outcome < 5; outcome++) {
       removed = false;
       const result = await runtime.execute(repo, { skillId: "example", entrypoint: "main.py", inputs: { "value.txt": "declared" }, outputs: ["result.txt"] });
       expect(removed).toBe(true);
       await expect(stat(workspace)).rejects.toMatchObject({ code: "ENOENT" });
-      expect(result.failure).toBe([undefined, "timeout", "output-limit", "artifact"][outcome]);
+      expect(result.failure).toBe([undefined, "timeout", "output-limit", "artifact", "cleanup"][outcome]);
       if (outcome === 0) {
         expect(result.artifacts[0]).toMatchObject({ sha256: expect.stringMatching(/^[0-9a-f]{64}$/), size: 8 });
         expect(await readFile(join(repo, result.artifacts[0].path), "utf8")).toBe("artifact");
