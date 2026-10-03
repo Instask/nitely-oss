@@ -24,7 +24,7 @@ import type {
 } from "../providers/types.js";
 import { normalizeFlowConfiguration } from "../flows/configurables.js";
 import { loadProjectInstructions } from "./project-instructions.js";
-import { checkOciReadiness, normalizeExecutionBackendName } from "./execution/backend.js";
+import { checkOciReadiness, normalizeExecutionBackendName, type ExecutionBackendName } from "./execution/backend.js";
 import type { OciReadinessIssue } from "./execution/oci.js";
 import type { WorkItemRecord } from "../work-items/types.js";
 
@@ -91,6 +91,24 @@ export interface EvaluateWorkItemRunPreflightInput {
   providerStore?: ProviderConnectionStore;
   executionBackend?: string;
   env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * Resolves the provider environment only when OCI readiness needs it.
+ * Resolving decrypts, possibly refreshes, and audits every stored credential,
+ * so an explicitly selected non-OCI backend never pays for it.
+ */
+export async function preflightExecutionEnv(
+  input: Pick<EvaluateRunPreflightInput, "executionBackend" | "env" | "providerStore">,
+): Promise<{ backend: ExecutionBackendName; env?: NodeJS.ProcessEnv }> {
+  if (input.env) {
+    return { backend: normalizeExecutionBackendName(input.executionBackend ?? input.env.NITELY_EXECUTION_BACKEND), env: input.env };
+  }
+  if (input.executionBackend !== undefined && normalizeExecutionBackendName(input.executionBackend) !== "oci") {
+    return { backend: normalizeExecutionBackendName(input.executionBackend) };
+  }
+  const env = input.providerStore ? await input.providerStore.resolveEnv() : process.env;
+  return { backend: normalizeExecutionBackendName(input.executionBackend ?? env.NITELY_EXECUTION_BACKEND), env };
 }
 
 function issue(
@@ -542,9 +560,7 @@ export async function evaluateRunPreflight(
     configurationIssues.push(issue("blocking", "flow-invalid", error instanceof Error ? error.message : String(error),
       "Set the required flow configuration in .nitely/instructions.json configuration or on the task."));
   }
-  const executionEnv = input.env ?? (input.providerStore
-    ? await input.providerStore.resolveEnv() : process.env);
-  const backend = normalizeExecutionBackendName(input.executionBackend ?? executionEnv.NITELY_EXECUTION_BACKEND);
+  const { backend, env: executionEnv } = await preflightExecutionEnv(input);
   const ociIssues = backend === "oci" ? await checkOciReadiness({
     env: executionEnv,
     stages: flow.spec.stages.filter(hasRuntimeCandidates).flatMap((stage) =>
