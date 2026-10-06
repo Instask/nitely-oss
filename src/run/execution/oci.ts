@@ -844,7 +844,8 @@ export class OciExecutionBackend implements ExecutionBackend {
       const probeName = this.containerName();
       try {
         const runtime = this.runtimeRegistry.resolve(stage.runtime);
-        const command = runtime.build({ worktreePath: "/worktree", prompt: "", env: this.env }).command;
+        // Runtimes such as openrouter refuse to build without the stage model.
+        const command = runtime.build({ worktreePath: "/worktree", prompt: "", model: stage.model, env: this.env }).command;
         const result = await this.processRunner({
           command: this.engineCommand,
           args: [

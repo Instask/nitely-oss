@@ -2969,4 +2969,23 @@ describe("OCI readiness probes", () => {
       expect(probe.args).not.toContain("--volume");
     }
   });
+
+  it.each(["openrouter", "together"])("probes the %s runtime command with the stage model", async (runtime) => {
+    const calls: SandboxProcessInput[] = [];
+    const backend = new OciExecutionBackend({
+      image: "runner:local",
+      env: { NITELY_PI_COMMAND: "pi-in-image", OPENROUTER_API_KEY: "sk-or-v1-probe", TOGETHER_API_KEY: "together-probe" },
+      secretAllowlist: ["OPENROUTER_API_KEY", "TOGETHER_API_KEY"],
+      networkAllowlist: ["openrouter.ai", "api.together.ai"],
+      processRunner: async (input) => {
+        calls.push(input);
+        if (input.args[0] === "info") return { exitCode: 0, stderr: "", stdout: `${JSON.stringify(["name=rootless"])}\t"2"\tnull` };
+        if (input.args[0] === "image") return { exitCode: 0, stderr: "", stdout: `"sha256:${"a".repeat(64)}"\t[]` };
+        return { exitCode: 0, stderr: "", stdout: "" };
+      },
+    });
+    const issues = await backend.checkReadiness({ type: "agent", id: "implement", runtime, model: "qwen/qwen3-coder-next", inputs: [], outputs: [], prompt: "test", skills: [], required_mcp_servers: [], required_connectors: [] });
+    expect(issues).toEqual([]);
+    expect(calls.find((call) => call.args[0] === "run")!.args.at(-1)).toBe("pi-in-image");
+  });
 });
