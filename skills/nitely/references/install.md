@@ -77,6 +77,7 @@ repo. `gh` is only needed for the legacy `provider: "github-cli"` publish path.
 | `glm` | `glm` | `NITELY_GLM_API_KEY`, `GLM_API_KEY`, or `ZHIPUAI_API_KEY` | `NITELY_GLM_COMMAND` |
 | `grok` | `grok` | `grok login` or `XAI_API_KEY` | `NITELY_GROK_COMMAND` |
 | `pi` | `pi` | Pi CLI model/provider config | `NITELY_PI_COMMAND` |
+| `together` | `pi` | `TOGETHER_API_KEY` or a Web Console Together AI connection | `NITELY_PI_COMMAND` |
 
 Either Claude credential satisfies the `claude` runtime: use
 `CLAUDE_CODE_OAUTH_TOKEN` (an `sk-ant-oat…` subscription token from

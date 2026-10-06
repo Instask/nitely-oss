@@ -25,6 +25,7 @@ import type {
 import { normalizeFlowConfiguration } from "../flows/configurables.js";
 import { loadProjectInstructions } from "./project-instructions.js";
 import { checkOciReadiness, normalizeExecutionBackendName, type ExecutionBackendName } from "./execution/backend.js";
+import { createDefaultAgentRuntimeRegistry } from "./execution/local.js";
 import type { OciReadinessIssue } from "./execution/oci.js";
 import type { WorkItemRecord } from "../work-items/types.js";
 
@@ -42,6 +43,7 @@ export interface RunPreflightIssue {
     | "unknown-mcp-server"
     | "runtime-unavailable"
     | "runtime-unchecked"
+    | "runtime-model-unsupported"
     | "provider-unchecked"
     | "missing-skill"
     | "output-directory-unwritable";
@@ -202,7 +204,41 @@ function runtimeProvider(runtime: string): ProviderId | undefined {
   if (normalized === "glm" || normalized === "zhipu") return "glm";
   if (normalized === "grok" || normalized === "xai") return "grok";
   if (normalized === "pi") return "pi";
+  if (normalized === "together") return "together";
   return undefined;
+}
+
+const runtimeRegistry = createDefaultAgentRuntimeRegistry();
+
+/**
+ * Flags candidates whose model the runtime itself rejects, such as a
+ * `together` stage without a Together model id. A lone candidate blocks; an
+ * ordered candidate only warns, because execution falls back past it.
+ */
+function runtimeModelIssues(
+  stageId: string,
+  candidates: Array<{ runtime: string; model?: string }>,
+): RunPreflightIssue[] {
+  const issues: RunPreflightIssue[] = [];
+  for (const candidate of candidates) {
+    let problem: string | undefined;
+    try {
+      problem = runtimeRegistry.resolve(candidate.runtime).validateModel?.(candidate.model);
+    } catch {
+      continue;
+    }
+    if (!problem) continue;
+    issues.push(
+      issue(
+        candidates.length > 1 ? "warning" : "blocking",
+        "runtime-model-unsupported",
+        `stage ${stageId}: ${problem}`,
+        "Set a model id the runtime supports in the stage's model field.",
+        { stageId, runtime: candidate.runtime },
+      ),
+    );
+  }
+  return issues;
 }
 
 function hasRuntimeCandidates(
@@ -461,6 +497,7 @@ async function stageIssues(input: {
 
     if (!hasRuntimeCandidates(stage)) continue;
     const candidates = stageRuntimeCandidates(stage);
+    issues.push(...runtimeModelIssues(stage.id, candidates));
     const mapped = candidates
       .map((candidate) => ({
         runtime: candidate.runtime,

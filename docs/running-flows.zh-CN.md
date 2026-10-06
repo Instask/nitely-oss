@@ -212,6 +212,11 @@ runtime registry 精确解析。当前支持：
   `NITELY_GROK_COMMAND` 可覆盖命令名。
 - `pi`：运行 `pi -p`，prompt 通过 stdin 传入。模型 provider 由本地 Pi CLI
   配置管理。`NITELY_PI_COMMAND` 可覆盖命令名。
+- `together`：通过 Pi CLI 运行 Together AI 模型，命令为
+  `pi -p --provider together --model <model>`，prompt 通过 stdin 传入。需要
+  `TOGETHER_API_KEY`（或在 Web Console 中添加 Together AI 连接），并且必须显式
+  指定 Together 模型 id，例如 `moonshotai/Kimi-K3`。`NITELY_PI_COMMAND` 可覆盖
+  命令名。详见 [Together AI Models](together-ai.md)。
 
 可选的 `model` 字段会作为 `-m <model>` 传给 Codex，作为 `--model <model>`
 传给 Claude、GLM、Grok Build 和 Pi。未知 runtime 会在启动任何命令前失败；已知

@@ -243,6 +243,8 @@ function defaultConfiguredMessage(id: ProviderId): string {
       return "xAI API key environment variable is configured.";
     case "pi":
       return "Pi CLI is installed. Model provider configuration is managed by Pi.";
+    case "together":
+      return "Together AI API key environment variable is configured.";
     case "google-drive":
       return "Google Drive connector environment is configured.";
     case "jira":
@@ -267,6 +269,8 @@ function defaultMissingMessage(
       return "Run grok login or set XAI_API_KEY for the Grok Build runtime.";
     case "pi":
       return "Install and configure the Pi CLI for the Pi agent runtime.";
+    case "together":
+      return "Set TOGETHER_API_KEY or add a Together AI connection in the Web Console, and install the Pi CLI, for the together agent runtime.";
     case "google-drive":
       return "Set NITELY_GOOGLE_ACCESS_TOKEN for the Google Drive connector.";
     case "jira":

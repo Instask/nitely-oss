@@ -24,9 +24,10 @@ import {
 } from "../../../src/run/execution/oci.js";
 import type { Stage } from "../../../src/flow/schema.js";
 import { createExecutionBackend, checkOciReadiness } from "../../../src/run/execution/backend.js";
-import type {
-  AgentRuntimeLauncher,
-  AgentRuntimeRegistry,
+import {
+  createDefaultAgentRuntimeRegistry,
+  type AgentRuntimeLauncher,
+  type AgentRuntimeRegistry,
 } from "../../../src/run/execution/local.js";
 
 type AgentStage = Extract<Stage, { type: "agent" }>;
@@ -76,6 +77,26 @@ function successfulRunner(calls: SandboxProcessInput[]) {
       return { stdout: "", stderr: "", exitCode: 0 };
     }
     return { stdout: "ok\n", stderr: "", exitCode: 0 };
+  };
+}
+
+/**
+ * The production `together` launcher, marked offline so a test exercises its
+ * credential, model, and failure handling without the allowlist gateway.
+ */
+function offlineTogetherRegistry(): AgentRuntimeRegistry {
+  const together: AgentRuntimeLauncher = {
+    ...createDefaultAgentRuntimeRegistry().resolve("together"),
+    networkAccess: "none",
+  };
+  return {
+    supportedIds: () => ["together"],
+    resolve: (candidate) => {
+      if (candidate !== "together") {
+        throw new Error(`unsupported agent runtime: ${candidate}`);
+      }
+      return together;
+    },
   };
 }
 
@@ -2070,6 +2091,116 @@ describe("OciExecutionBackend", () => {
     expect(args.join("\0")).not.toContain("openai-secret");
   });
 
+  it("preflights Together AI credentials and model selection inside the sandbox", async () => {
+    const fixture = await createFixture();
+    const calls: SandboxProcessInput[] = [];
+    const stage = (model?: string): AgentStage => ({
+      ...agentStage(sandboxCapabilities({ allowedRuntimes: ["together"] })),
+      runtime: "together",
+      ...(model ? { model } : {}),
+    });
+    const notAllowlisted = new OciExecutionBackend({
+      image: "nitely-runner:test",
+      env: { TOGETHER_API_KEY: "together-secret" },
+      processRunner: successfulRunner(calls),
+      runtimeRegistry: offlineTogetherRegistry(),
+    });
+    await expect(
+      notAllowlisted.preflightAgentRuntime(
+        { runId: "together-preflight", path: fixture.worktree },
+        { stage: stage("moonshotai/Kimi-K3"), attemptDirectory: fixture.attempt },
+      ),
+    ).resolves.toEqual({
+      available: false,
+      reason:
+        "agent runtime together is not configured in the OCI environment allowlists. Allow TOGETHER_API_KEY.",
+      missingConfig: ["TOGETHER_API_KEY"],
+    });
+
+    const allowlisted = new OciExecutionBackend({
+      image: "nitely-runner:test",
+      env: { TOGETHER_API_KEY: "together-secret" },
+      secretAllowlist: ["TOGETHER_API_KEY"],
+      processRunner: successfulRunner(calls),
+      runtimeRegistry: offlineTogetherRegistry(),
+    });
+    await expect(
+      allowlisted.preflightAgentRuntime(
+        { runId: "together-preflight", path: fixture.worktree },
+        { stage: stage(), attemptDirectory: fixture.attempt },
+      ),
+    ).resolves.toEqual({
+      available: false,
+      reason: expect.stringMatching(/agent runtime together requires a Together AI model id/),
+    });
+    await expect(
+      allowlisted.preflightAgentRuntime(
+        { runId: "together-preflight", path: fixture.worktree },
+        { stage: stage("moonshotai/Kimi-K3"), attemptDirectory: fixture.attempt },
+      ),
+    ).resolves.toEqual({ available: true });
+    await expect(
+      allowlisted.runAgent(
+        { runId: "together-run", path: fixture.worktree },
+        { stage: stage("Kimi K3"), prompt: "Implement.", attemptDirectory: fixture.attempt },
+      ),
+    ).rejects.toThrow(/does not support model "Kimi K3"/);
+    expect(calls.filter((call) => call.args[0] === "run")).toHaveLength(0);
+  });
+
+  it("runs Together AI through Pi with the key passed by name and explains a rejected key", async () => {
+    const fixture = await createFixture();
+    const calls: SandboxProcessInput[] = [];
+    const backend = new OciExecutionBackend({
+      image: "nitely-runner:test",
+      env: { TOGETHER_API_KEY: "together-secret", NITELY_PI_COMMAND: "pi-in-image" },
+      secretAllowlist: ["TOGETHER_API_KEY"],
+      processRunner: successfulRunner(calls),
+      runtimeRegistry: offlineTogetherRegistry(),
+    });
+    const stage: AgentStage = {
+      ...agentStage(sandboxCapabilities({ allowedRuntimes: ["together"] })),
+      runtime: "together",
+      model: "moonshotai/Kimi-K3",
+    };
+
+    await backend.runAgent(
+      { runId: "together-run", path: fixture.worktree },
+      { stage, prompt: "Implement with Together.", attemptDirectory: fixture.attempt },
+    );
+    const launch = calls.find((call) => call.args[0] === "run")!;
+    expect(launch.args.slice(-6)).toEqual([
+      "pi-in-image",
+      "-p",
+      "--provider",
+      "together",
+      "--model",
+      "moonshotai/Kimi-K3",
+    ]);
+    expect(launch.args).toContain("TOGETHER_API_KEY");
+    expect(launch.args.join("\0")).not.toContain("together-secret");
+    expect(launch.stdin).toBe("Implement with Together.");
+
+    const failing = new OciExecutionBackend({
+      image: "nitely-runner:test",
+      env: { TOGETHER_API_KEY: "together-secret" },
+      secretAllowlist: ["TOGETHER_API_KEY"],
+      processRunner: async (input) => {
+        if (input.args[0] === "run") {
+          return { stdout: "", stderr: "401 Invalid API key provided.\n", exitCode: 1 };
+        }
+        return await successfulRunner([])(input);
+      },
+      runtimeRegistry: offlineTogetherRegistry(),
+    });
+    await expect(
+      failing.runAgent(
+        { runId: "together-run", path: fixture.worktree },
+        { stage, prompt: "Implement.", attemptDirectory: fixture.attempt },
+      ),
+    ).rejects.toThrow(/^together exited with code 1: Together AI rejected the API key/);
+  });
+
   it("rejects a capability path whose symlink escapes the worktree", async () => {
     const fixture = await createFixture();
     const outside = await mkdtemp(join(tmpdir(), "nitely-oci-path-outside-"));
@@ -2274,7 +2405,7 @@ describe("OciExecutionBackend", () => {
       },
       limitations: [
         "backing linked-worktree Git metadata is never mounted; host-side workspace create/commit is the only Git write path; Codex uses --skip-git-repo-check and in-container Git commands may be unavailable",
-        "without NITELY_OCI_NETWORK_ALLOWLIST, agent runtimes must be offline or fail preflight; built-in Codex/Claude/GLM/Grok/Pi require the allowlist gateway",
+        "without NITELY_OCI_NETWORK_ALLOWLIST, agent runtimes must be offline or fail preflight; built-in Codex/Claude/GLM/Grok/Pi/Together require the allowlist gateway",
         "agent-spawned commands are not mediated inside the image; a stage that sets capabilities.commands.advisory false fails closed instead of running unmediated",
         "aggregate bind-mount disk quota (NITELY_OCI_DISK_BYTES) is not supported and will not be; setting it fails closed. Use per-file NITELY_OCI_MAX_FILE_BYTES and captured-output NITELY_OCI_MAX_CAPTURED_OUTPUT_BYTES",
       ],
