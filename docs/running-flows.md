@@ -133,9 +133,12 @@ nitely run flows/implement-spec-bootstrap-grok.json \
 ```
 
 To dogfood the same bootstrap path with Pi instead of Codex, use the Pi variant.
-A real run requires the local `pi` CLI (configure model/provider auth through
-the Pi CLI); the flow leaves `model` unset so the CLI default remains
-authoritative. Spec and tech-design inputs can be any local files:
+The Pi variant pins all agent stages to `qwen/qwen3-coder-next` through
+OpenRouter. A real run requires the `pi` CLI and an `OPENROUTER_API_KEY`
+configured through Nitely; the local Pi default does not select the model.
+See [OpenRouter setup](openrouter.md), including OCI requirements. The flow
+keeps its existing id for compatibility. Spec and tech-design inputs can be
+any local files:
 
 ```bash
 nitely run flows/implement-spec-bootstrap-pi.json \

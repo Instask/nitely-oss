@@ -1479,7 +1479,8 @@ describe("loadFlow", () => {
     const runtimeVariants: Array<{
       file: string;
       name: string;
-      runtime: "glm" | "grok" | "pi";
+      runtime: "glm" | "grok" | "openrouter";
+      model?: string;
     }> = [
       {
         file: "flows/implement-spec-bootstrap-grok.json",
@@ -1489,7 +1490,8 @@ describe("loadFlow", () => {
       {
         file: "flows/implement-spec-bootstrap-pi.json",
         name: "implement-spec-bootstrap-pi",
-        runtime: "pi",
+        runtime: "openrouter",
+        model: "qwen/qwen3-coder-next",
       },
     ];
 
@@ -1513,7 +1515,11 @@ describe("loadFlow", () => {
           expect(stage, `${variant.file}:${stage.id}`).toMatchObject({
             runtime: variant.runtime,
           });
-          expect(stage, `${variant.file}:${stage.id}`).not.toHaveProperty("model");
+          if (variant.model) {
+            expect(stage, `${variant.file}:${stage.id}`).toMatchObject({ model: variant.model });
+          } else {
+            expect(stage, `${variant.file}:${stage.id}`).not.toHaveProperty("model");
+          }
         } else {
           expect(stage, `${variant.file}:${stage.id}`).not.toHaveProperty("runtime");
           expect(stage, `${variant.file}:${stage.id}`).not.toHaveProperty("model");
