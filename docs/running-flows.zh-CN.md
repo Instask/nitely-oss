@@ -120,8 +120,10 @@ nitely run flows/implement-spec-bootstrap-grok.json \
 ```
 
 若要用 Pi 而不是 Codex 跑同一条 bootstrap 路径，使用 Pi 变体。真实运行需要本地
-`pi` CLI（通过 Pi CLI 配置 model/provider 鉴权）；该 flow 不设置 `model`，因此
-沿用本地 CLI 的默认模型。spec 与 tech-design 输入可以是任意本地文件：
+`pi` CLI 和通过 Nitely 配置的 `OPENROUTER_API_KEY`。所有 agent 阶段固定使用
+OpenRouter 的 `qwen/qwen3-coder-next`，不再沿用 Pi CLI 默认模型；保留原有 flow
+ID 以兼容已有配置。OCI 的额外要求见 [OpenRouter 配置](openrouter.md)。
+spec 与 tech-design 输入可以是任意本地文件：
 
 ```bash
 nitely run flows/implement-spec-bootstrap-pi.json \
