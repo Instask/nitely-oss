@@ -90,6 +90,11 @@ const runtimeRequirements: Record<string, RuntimeRequirement> = {
     commandEnv: "NITELY_PI_COMMAND",
     requiredEnvGroups: [],
   },
+  together: {
+    command: "pi",
+    commandEnv: "NITELY_PI_COMMAND",
+    requiredEnvGroups: [["TOGETHER_API_KEY"]],
+  },
 };
 
 const packageManagerLocks: Array<{ name: string; path: string }> = [
@@ -449,7 +454,7 @@ export async function generatePilotSetupReport(
         label: `Runtime ${runtime}`,
         status: "fail",
         detail: `Unsupported runtime: ${runtime}`,
-        remediation: "Use one of codex, claude, glm, grok, openrouter, or pi for pilot setup checks.",
+        remediation: "Use one of codex, claude, glm, grok, openrouter, pi, or together for pilot setup checks.",
       });
       continue;
     }

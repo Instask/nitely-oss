@@ -18,9 +18,6 @@ import { PassThrough, Writable } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { classifyAgentRuntimeBlocker } from "../../../src/run/blockers.js";
-import { createOpenRouterAgentArgs } from "../../../src/run/execution/openrouter.js";
-
 import {
   LocalExecutionBackend,
   claudeAdditionalDirectories,
@@ -33,6 +30,9 @@ import {
   createPiAgentArgs,
   runInputsDirectoryFromAttempt,
 } from "../../../src/run/execution/local.js";
+import { createOpenRouterAgentArgs } from "../../../src/run/execution/openrouter.js";
+import { createTogetherAgentArgs } from "../../../src/run/execution/together.js";
+import { classifyAgentRuntimeBlocker } from "../../../src/run/blockers.js";
 import type { Stage } from "../../../src/flow/schema.js";
 
 const execFileAsync = promisify(execFile);
@@ -634,8 +634,13 @@ describe("LocalExecutionBackend", () => {
       id: "pi",
       networkAccess: "required",
     });
+    expect(registry.resolve("together")).toMatchObject({
+      id: "together",
+      networkAccess: "required",
+      requiredEnv: [["TOGETHER_API_KEY"]],
+    });
     expect(() => registry.resolve("Codex")).toThrow(
-      /unsupported agent runtime: Codex.*codex.*claude.*glm.*grok.*pi/s,
+      /unsupported agent runtime: Codex.*codex.*claude.*glm.*grok.*pi.*together/s,
     );
   });
 
@@ -2118,6 +2123,147 @@ describe("LocalExecutionBackend", () => {
       stdin: "Implement with Pi.",
     });
     expect(calls[0].options.env?.NITELY_PI_COMMAND).toBe("pi-dev");
+  });
+
+  it("runs Together AI models through Pi with the key in the environment only", async () => {
+    const calls: SpawnCall[] = [];
+    const backend = new LocalExecutionBackend({
+      env: {
+        TOGETHER_API_KEY: "together-secret-value",
+        NITELY_PI_COMMAND: "pi-dev",
+      },
+      spawn: createSuccessfulSpawn(calls),
+    });
+
+    await backend.runAgent(
+      { runId: "run-agent", path: "/repo/worktree" },
+      {
+        stage: agentStage({ runtime: "together", model: "moonshotai/Kimi-K3" }),
+        prompt: "Implement with Together.",
+        attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
+      },
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      command: "pi-dev",
+      args: ["-p", "--provider", "together", "--model", "moonshotai/Kimi-K3"],
+      options: { cwd: "/repo/worktree", stdio: ["pipe", "pipe", "pipe"] },
+      stdin: "Implement with Together.",
+    });
+    expect(calls[0].args).toEqual(createTogetherAgentArgs("moonshotai/Kimi-K3"));
+    expect(calls[0].options.env?.TOGETHER_API_KEY).toBe("together-secret-value");
+    expect(JSON.stringify(calls[0].args)).not.toContain("together-secret-value");
+  });
+
+  it("fails Together AI stages without a key or a usable model before spawning", async () => {
+    const calls: SpawnCall[] = [];
+    const attempt = {
+      attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
+    };
+    const unconfigured = new LocalExecutionBackend({
+      env: {},
+      spawn: createSuccessfulSpawn(calls),
+    });
+    await expect(
+      unconfigured.preflightAgentRuntime(
+        { runId: "run-agent", path: "/repo/worktree" },
+        { stage: agentStage({ runtime: "together", model: "moonshotai/Kimi-K3" }), ...attempt },
+      ),
+    ).resolves.toEqual({
+      available: false,
+      reason: "agent runtime together is not configured. Set TOGETHER_API_KEY.",
+      missingConfig: ["TOGETHER_API_KEY"],
+    });
+    await expect(
+      unconfigured.runAgent(
+        { runId: "run-agent", path: "/repo/worktree" },
+        {
+          stage: agentStage({ runtime: "together", model: "moonshotai/Kimi-K3" }),
+          prompt: "Run.",
+          ...attempt,
+        },
+      ),
+    ).rejects.toThrow("agent runtime together is not configured. Set TOGETHER_API_KEY.");
+
+    const configured = new LocalExecutionBackend({
+      env: { TOGETHER_API_KEY: "together-secret-value" },
+      spawn: createSuccessfulSpawn(calls),
+    });
+    await expect(
+      configured.preflightAgentRuntime(
+        { runId: "run-agent", path: "/repo/worktree" },
+        { stage: agentStage({ runtime: "together" }), ...attempt },
+      ),
+    ).resolves.toEqual({
+      available: false,
+      reason: expect.stringMatching(
+        /agent runtime together requires a Together AI model id.*moonshotai\/Kimi-K3/s,
+      ),
+    });
+    await expect(
+      configured.runAgent(
+        { runId: "run-agent", path: "/repo/worktree" },
+        { stage: agentStage({ runtime: "together" }), prompt: "Run.", ...attempt },
+      ),
+    ).rejects.toThrow(/stage agent: agent runtime together requires a Together AI model id/);
+    await expect(
+      configured.runAgent(
+        { runId: "run-agent", path: "/repo/worktree" },
+        { stage: agentStage({ runtime: "together", model: "kimi-k3" }), prompt: "Run.", ...attempt },
+      ),
+    ).rejects.toThrow(/does not support model "kimi-k3".*<organization>\/<model>/s);
+    await expect(
+      configured.preflightAgentRuntime(
+        { runId: "run-agent", path: "/repo/worktree" },
+        { stage: agentStage({ runtime: "together", model: "moonshotai/Kimi-K3" }), ...attempt },
+      ),
+    ).resolves.toEqual({ available: true });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("turns Together AI credential and model failures into actionable errors", async () => {
+    const run = async (stderr: string, stdout = "") => {
+      const backend = new LocalExecutionBackend({
+        env: { TOGETHER_API_KEY: "together-secret-value" },
+        spawn: createOutputSpawn(stdout, stderr, 1),
+      });
+      return await backend
+        .runAgent(
+          { runId: "run-agent", path: "/repo/worktree" },
+          {
+            stage: agentStage({ runtime: "together", model: "moonshotai/Kimi-K9" }),
+            prompt: "Run.",
+            attemptDirectory: "",
+          },
+        )
+        .then(
+          () => {
+            throw new Error("expected the together runtime to fail");
+          },
+          (error: unknown) => error as Error & { stderr?: string },
+        );
+    };
+
+    const rejected = await run("401 Invalid API key provided.\n");
+    expect(rejected.message).toMatch(
+      /^together exited with code 1: Together AI rejected the API key.*Web Console or set TOGETHER_API_KEY/s,
+    );
+    expect(rejected.stderr).toBe("401 Invalid API key provided.\n");
+    expect(
+      classifyAgentRuntimeBlocker({ stageId: "agent", runtime: "together", error: rejected }),
+    ).toMatchObject({ reason: "agent_credentials_invalid" });
+
+    const unknownModel = await run(
+      "404 Unable to access model moonshotai/Kimi-K9. Please visit https://api.together.ai/models to view the list of supported models.\n",
+    );
+    expect(unknownModel.message).toMatch(
+      /^together exited with code 1: Together AI could not serve model "moonshotai\/Kimi-K9".*https:\/\/api\.together\.ai\/models/s,
+    );
+
+    // The agent's own answer on stdout is never read as a provider error.
+    const other = await run("boom\n", "Fixed the 401 unauthorized handler.\n");
+    expect(other.message).toBe("together exited with code 1");
   });
 
   it("fails unknown runtimes before spawning an unrelated command", async () => {

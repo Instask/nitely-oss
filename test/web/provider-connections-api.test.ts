@@ -95,6 +95,29 @@ describe("provider connections API", () => {
     expect(stored).not.toContain("sk-ant-oat-subscription");
   });
 
+  it("stores a Together AI API key from the Web Console without exposing it", async () => {
+    const repoPath = await createRepo();
+    const server = await start(repoPath);
+
+    const saved = await post(server, "/api/providers/together/connection", {
+      value: "together-console-key-0123456789",
+      authMethod: "api_key",
+      label: "Together AI",
+    });
+    expect(saved.status).toBe(200);
+    expect(JSON.stringify(await json(saved))).not.toContain("together-console-key-0123456789");
+
+    const statuses = await json(await fetch(`${server.url}/api/providers`));
+    const together = statuses.providers.find((p: { id: string }) => p.id === "together");
+    expect(together).toMatchObject({ name: "Together AI", configured: true });
+    expect(together.authMethods).toEqual([
+      expect.objectContaining({ method: "api_key", env: "TOGETHER_API_KEY", writable: true, configured: true }),
+    ]);
+    expect(JSON.stringify(statuses)).not.toContain("together-console-key-0123456789");
+    const stored = await readFile(join(repoPath, ".nitely", "connections.json"), "utf8");
+    expect(stored).not.toContain("together-console-key-0123456789");
+  });
+
   it("rejects an auth method the provider does not support or cannot paste", async () => {
     const repoPath = await createRepo();
     const server = await start(repoPath);

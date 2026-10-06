@@ -27,6 +27,7 @@ function providerStore(
     "grok",
     "openrouter",
     "pi",
+    "together",
     "google-drive",
   ];
   return {
@@ -377,6 +378,66 @@ describe("run preflight doctor", () => {
     expect(report.status).toBe("PASS");
     expect(report.requiredProviders).toEqual(["grok", "pi"]);
     expect(report.issues).toEqual([]);
+  });
+
+  it("maps Together AI stages to the together provider and checks the model", async () => {
+    const inputs = { spec: { connector: "local-file" as const, uri: "spec.md" } };
+    const configured = await evaluateRunPreflight({
+      repoPath: await repoWithFlow(flow({ runtime: "together", model: "moonshotai/Kimi-K3" })),
+      flowPath: "flows/preflight.json",
+      inputs,
+      providerStore: providerStore({ together: true }),
+    });
+    expect(configured.status).toBe("PASS");
+    expect(configured.requiredProviders).toEqual(["together"]);
+
+    const unconfigured = await evaluateRunPreflight({
+      repoPath: await repoWithFlow(flow({ runtime: "together", model: "moonshotai/Kimi-K3" })),
+      flowPath: "flows/preflight.json",
+      inputs,
+      providerStore: providerStore({ together: false }),
+    });
+    expect(unconfigured.status).toBe("BLOCK");
+    expect(unconfigured.issues).toEqual([
+      expect.objectContaining({ code: "runtime-unavailable", providerId: "together" }),
+    ]);
+
+    const withoutModel = await evaluateRunPreflight({
+      repoPath: await repoWithFlow(flow({ runtime: "together" })),
+      flowPath: "flows/preflight.json",
+      inputs,
+      providerStore: providerStore({ together: true }),
+    });
+    expect(withoutModel.status).toBe("BLOCK");
+    expect(withoutModel.issues).toEqual([
+      expect.objectContaining({
+        severity: "blocking",
+        code: "runtime-model-unsupported",
+        stageId: "implement",
+        runtime: "together",
+        message: expect.stringMatching(/requires a Together AI model id/),
+      }),
+    ]);
+
+    const fallback = await evaluateRunPreflight({
+      repoPath: await repoWithFlow(
+        flow({
+          runtime: undefined,
+          runtimes: [{ runtime: "together", model: "kimi-k3" }, { runtime: "codex" }],
+        }),
+      ),
+      flowPath: "flows/preflight.json",
+      inputs,
+      providerStore: providerStore({ together: true, codex: true }),
+    });
+    expect(fallback.status).toBe("WARN");
+    expect(fallback.issues).toEqual([
+      expect.objectContaining({
+        severity: "warning",
+        code: "runtime-model-unsupported",
+        message: expect.stringMatching(/does not support model "kimi-k3"/),
+      }),
+    ]);
   });
 
   it("blocks publish-change stages when the GitHub provider is unavailable", async () => {

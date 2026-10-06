@@ -60,6 +60,8 @@ Agent credentials are provided to local agent CLIs or local environment:
 - OpenRouter requires `OPENROUTER_API_KEY` or a Web Console OpenRouter
   connection; Nitely passes it to the Pi CLI only through the environment.
 - GLM requires one of `NITELY_GLM_API_KEY`, `GLM_API_KEY`, or `ZHIPUAI_API_KEY`.
+- Together AI requires `TOGETHER_API_KEY` or a Web Console Together AI
+  connection; Nitely passes it to the Pi CLI only through the environment.
 
 Nitely launches agent runtimes locally and sends prompts through stdin. Agent
 credential storage and provider-side retention are controlled by the configured

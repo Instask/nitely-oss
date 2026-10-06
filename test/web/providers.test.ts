@@ -125,6 +125,36 @@ describe("web provider statuses", () => {
     }
   });
 
+  it("reports Together AI from TOGETHER_API_KEY without exposing it", async () => {
+    const missing = await getProviderStatuses({ env: {}, commandStatus: async () => true });
+    expect(missing).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "together",
+          name: "Together AI",
+          configured: false,
+          message: expect.stringMatching(/Set TOGETHER_API_KEY or add a Together AI connection in the Web Console/),
+          hints: expect.arrayContaining(["TOGETHER_API_KEY", "NITELY_PI_COMMAND"]),
+        }),
+      ]),
+    );
+
+    const configured = await getProviderStatuses({
+      env: { TOGETHER_API_KEY: "together-secret" },
+      commandStatus: async () => false,
+    });
+    expect(JSON.stringify(configured)).not.toContain("together-secret");
+    expect(configured).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "together",
+          configured: true,
+          credential: expect.objectContaining({ scope: "env-only", source: "environment" }),
+        }),
+      ]),
+    );
+  });
+
   it("does not treat gh authentication as default GitHub API credentials", async () => {
     const statuses = await getProviderStatuses({
       env: {},

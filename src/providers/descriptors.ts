@@ -188,6 +188,23 @@ export const PROVIDER_DESCRIPTORS: ProviderDescriptor[] = [
     hints: ["pi --version", "NITELY_PI_COMMAND"],
   }),
   defineProvider({
+    // Consumed by the `together` agent runtime, which runs Together AI models
+    // through the Pi CLI's built-in Together provider.
+    id: "together",
+    name: "Together AI",
+    authMethods: [
+      {
+        method: "api_key",
+        label: "API key",
+        flow: "manual",
+        env: "TOGETHER_API_KEY",
+        readAliases: [],
+        writable: true,
+      },
+    ],
+    hints: ["TOGETHER_API_KEY", "pi --version", "NITELY_PI_COMMAND"],
+  }),
+  defineProvider({
     id: "google-drive",
     name: "Google Drive",
     authMethods: [

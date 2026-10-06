@@ -205,6 +205,7 @@ function runtimeProvider(runtime: string): ProviderId | undefined {
   if (normalized === "grok" || normalized === "xai") return "grok";
   if (normalized === "openrouter") return "openrouter";
   if (normalized === "pi") return "pi";
+  if (normalized === "together") return "together";
   return undefined;
 }
 
@@ -212,8 +213,8 @@ const runtimeRegistry = createDefaultAgentRuntimeRegistry();
 
 /**
  * Flags candidates whose model the runtime itself rejects, such as an
- * `openrouter` stage without an OpenRouter model id. A lone candidate blocks;
- * an ordered candidate only warns, because execution falls back past it.
+ * `openrouter` or `together` stage without a usable model id. A lone candidate
+ * blocks; an ordered candidate only warns, because execution falls back past it.
  */
 function runtimeModelIssues(
   stageId: string,

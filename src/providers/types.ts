@@ -6,6 +6,7 @@ export type ProviderId =
   | "grok"
   | "openrouter"
   | "pi"
+  | "together"
   | "google-drive"
   | "jira";
 

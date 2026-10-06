@@ -49,6 +49,12 @@ import {
   describeOpenRouterFailure,
   openRouterModelProblem,
 } from "./openrouter.js";
+import {
+  TOGETHER_API_KEY_ENV,
+  createTogetherAgentArgs,
+  describeTogetherFailure,
+  togetherModelProblem,
+} from "./together.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -654,6 +660,22 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
         runtime: "pi",
         command: env.NITELY_PI_COMMAND ?? "pi",
         args: createPiAgentArgs(model),
+        promptDelivery: "stdin",
+      }),
+    },
+    {
+      // Together AI models run through the Pi coding agent's built-in
+      // Together provider, so stages keep Pi's file and shell tools. The key
+      // reaches Pi only through the environment, never through argv.
+      id: "together",
+      requiredEnv: [[TOGETHER_API_KEY_ENV]],
+      networkAccess: "required",
+      validateModel: togetherModelProblem,
+      describeFailure: ({ model, stderr }) => describeTogetherFailure({ model, stderr }),
+      build: ({ model, env }) => ({
+        runtime: "together",
+        command: env.NITELY_PI_COMMAND ?? "pi",
+        args: createTogetherAgentArgs(model),
         promptDelivery: "stdin",
       }),
     },

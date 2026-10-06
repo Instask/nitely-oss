@@ -31,6 +31,7 @@ export const providerIdSchema = z.enum([
   "grok",
   "openrouter",
   "pi",
+  "together",
   "google-drive",
 ]);
 
