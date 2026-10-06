@@ -203,6 +203,7 @@ function runtimeProvider(runtime: string): ProviderId | undefined {
   if (normalized === "claude" || normalized === "anthropic") return "anthropic";
   if (normalized === "glm" || normalized === "zhipu") return "glm";
   if (normalized === "grok" || normalized === "xai") return "grok";
+  if (normalized === "openrouter") return "openrouter";
   if (normalized === "pi") return "pi";
   if (normalized === "together") return "together";
   return undefined;
@@ -211,9 +212,9 @@ function runtimeProvider(runtime: string): ProviderId | undefined {
 const runtimeRegistry = createDefaultAgentRuntimeRegistry();
 
 /**
- * Flags candidates whose model the runtime itself rejects, such as a
- * `together` stage without a Together model id. A lone candidate blocks; an
- * ordered candidate only warns, because execution falls back past it.
+ * Flags candidates whose model the runtime itself rejects, such as an
+ * `openrouter` or `together` stage without a usable model id. A lone candidate
+ * blocks; an ordered candidate only warns, because execution falls back past it.
  */
 function runtimeModelIssues(
   stageId: string,

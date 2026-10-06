@@ -85,8 +85,9 @@ nitely run flows/implement-spec-bootstrap.json --repo .
   host process actually has it set. Evidence records the names only.
 - Start from the runtime's `requiredEnv`. Codex needs its OpenAI credential,
   Claude needs `ANTHROPIC_API_KEY`, GLM accepts `NITELY_GLM_API_KEY`,
-  `GLM_API_KEY`, or `ZHIPUAI_API_KEY`, and Together AI (run through `pi`)
-  needs `TOGETHER_API_KEY`. A missing name fails preflight with the
+  `GLM_API_KEY`, or `ZHIPUAI_API_KEY`; OpenRouter (run through `pi`) needs
+  `OPENROUTER_API_KEY` and `openrouter.ai` in the network allowlist, and
+  Together AI (run through `pi`) needs `TOGETHER_API_KEY`. A missing name fails preflight with the
   names it wanted, so you can add exactly those.
 - Keep `LANG` and `CI` in the plain env allowlist and credentials in the secret
   allowlist. Only secret-allowlist values are redacted out of captured output.

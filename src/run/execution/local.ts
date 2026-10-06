@@ -44,6 +44,12 @@ import {
   type CodexSandboxMode,
 } from "./sandbox.js";
 import {
+  OPENROUTER_API_KEY_ENV,
+  createOpenRouterAgentArgs,
+  describeOpenRouterFailure,
+  openRouterModelProblem,
+} from "./openrouter.js";
+import {
   TOGETHER_API_KEY_ENV,
   createTogetherAgentArgs,
   describeTogetherFailure,
@@ -629,6 +635,22 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
         command: env.NITELY_GROK_COMMAND ?? "grok",
         args: createGrokBuildArgs(worktreePath, prompt, model),
         promptDelivery: "argument",
+      }),
+    },
+    {
+      // OpenRouter models run through the Pi coding agent's built-in
+      // openrouter provider, so stages keep Pi's file and shell tools on any
+      // model family. The key reaches Pi only through the environment.
+      id: "openrouter",
+      requiredEnv: [[OPENROUTER_API_KEY_ENV]],
+      networkAccess: "required",
+      validateModel: openRouterModelProblem,
+      describeFailure: ({ model, stderr }) => describeOpenRouterFailure({ model, stderr }),
+      build: ({ model, env }) => ({
+        runtime: "openrouter",
+        command: env.NITELY_PI_COMMAND ?? "pi",
+        args: createOpenRouterAgentArgs(model),
+        promptDelivery: "stdin",
       }),
     },
     {

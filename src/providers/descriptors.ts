@@ -165,6 +165,21 @@ export const PROVIDER_DESCRIPTORS: ProviderDescriptor[] = [
     hints: ["grok login", "XAI_API_KEY", "NITELY_GROK_COMMAND"],
   }),
   defineProvider({
+    id: "openrouter",
+    name: "OpenRouter",
+    authMethods: [
+      {
+        method: "api_key",
+        label: "API key",
+        flow: "manual",
+        env: "OPENROUTER_API_KEY",
+        readAliases: [],
+        writable: true,
+      },
+    ],
+    hints: ["OPENROUTER_API_KEY", "pi --version", "NITELY_PI_COMMAND"],
+  }),
+  defineProvider({
     id: "pi",
     name: "Pi Coding Agent",
     authMethods: [

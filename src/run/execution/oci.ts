@@ -757,7 +757,7 @@ export class OciExecutionBackend implements ExecutionBackend {
         "backing linked-worktree Git metadata is never mounted; host-side workspace create/commit is the only Git write path; Codex uses --skip-git-repo-check and in-container Git commands may be unavailable",
         this.networkPolicy.mode === "allowlist"
           ? "agent egress uses an internal-only workload network and an HTTP CONNECT allowlist gateway; direct sockets have no external route and non-allowlisted CONNECT is denied"
-          : "without NITELY_OCI_NETWORK_ALLOWLIST, agent runtimes must be offline or fail preflight; built-in Codex/Claude/GLM/Grok/Pi/Together require the allowlist gateway",
+          : "without NITELY_OCI_NETWORK_ALLOWLIST, agent runtimes must be offline or fail preflight; built-in Codex/Claude/GLM/Grok/OpenRouter/Pi/Together require the allowlist gateway",
         this.commandMediation
           ? `agent-spawned commands are mediated by ${this.commandMediation.id}`
           : "agent-spawned commands are not mediated inside the image; a stage that sets capabilities.commands.advisory false fails closed instead of running unmediated",

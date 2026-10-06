@@ -210,6 +210,11 @@ runtime registry 精确解析。当前支持：
 - `grok`：运行 `grok --no-auto-update --cwd <worktree> --always-approve`
   并用 `-p <prompt>` 传入 prompt。需要本地 `grok login` 或 `XAI_API_KEY`。
   `NITELY_GROK_COMMAND` 可覆盖命令名。
+- `openrouter`：通过 Pi CLI 运行 OpenRouter 模型，命令为
+  `pi -p --provider openrouter --model openrouter/<model>`，prompt 通过 stdin
+  传入。需要 `OPENROUTER_API_KEY`（或在 Web Console 中添加 OpenRouter 连接），
+  并且必须显式指定 OpenRouter 模型 id，例如 `qwen/qwen3-coder-next`。
+  `NITELY_PI_COMMAND` 可覆盖命令名。详见 [OpenRouter Models](openrouter.md)。
 - `pi`：运行 `pi -p`，prompt 通过 stdin 传入。模型 provider 由本地 Pi CLI
   配置管理。`NITELY_PI_COMMAND` 可覆盖命令名。
 - `together`：通过 Pi CLI 运行 Together AI 模型，命令为

@@ -26,6 +26,7 @@ describe("FileProviderConnectionStore", () => {
     "anthropic",
     "glm",
     "grok",
+    "openrouter",
     "together",
     "google-drive",
     "jira",
@@ -514,6 +515,25 @@ describe("FileProviderConnectionStore", () => {
       const env = await store.resolveEnv();
       expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-api03-metered");
       expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    });
+
+    it("a stored OpenRouter connection replaces OPENROUTER_API_KEY from the environment", async () => {
+      const store = new FileProviderConnectionStore({
+        path: storePath,
+        env: { OPENROUTER_API_KEY: "sk-or-v1-inherited" },
+        commandStatus: async () => false,
+      });
+      expect((await store.resolveEnv()).OPENROUTER_API_KEY).toBe("sk-or-v1-inherited");
+      await store.setConnection({
+        providerId: "openrouter",
+        authMethod: "api_key",
+        value: "sk-or-v1-stored",
+      });
+      expect((await store.resolveEnv()).OPENROUTER_API_KEY).toBe("sk-or-v1-stored");
+      const [status] = (await store.listStatuses()).filter((s) => s.id === "openrouter");
+      expect(status).toMatchObject({ configured: true, authMethod: "api_key" });
+      expect(JSON.stringify(status)).not.toContain("sk-or-v1-stored");
+      expect(await readFile(storePath, "utf8")).not.toContain("sk-or-v1-stored");
     });
 
     it("a stored credential clears the other Anthropic variable inherited from the environment", async () => {

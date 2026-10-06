@@ -87,7 +87,7 @@ unsupported.
 
 **Network policy (default deny-all):** command stages and offline agents keep
 `--network=none`. Built-in agent runtimes that require egress
-(Codex/Claude/GLM/Grok/Pi/Together) need an allowlist:
+(Codex/Claude/GLM/Grok/OpenRouter/Pi/Together) need an allowlist:
 
 - Set `NITELY_OCI_NETWORK_ALLOWLIST` to a comma-separated domain list
   (`api.openai.com`, `*.anthropic.com`, …), and/or
@@ -188,11 +188,11 @@ configured before the agent runtime starts:
 
 `required_mcp_servers` preserves MCP server/tool identifiers such as
 `google-drive`, `google-docs`, `google-sheets`, `google-slides`, `github`,
-`github-cli`, `claude`, `anthropic`, `glm`, `zhipu`, `grok`, `xai`, `pi`,
-`together`, `codex`, and `openai`.
+`github-cli`, `claude`, `anthropic`, `glm`, `zhipu`, `grok`, `xai`,
+`openrouter`, `pi`, `together`, `codex`, and `openai`.
 Known identifiers map to Nitely providers and fail fast when the corresponding
 provider is not configured. `required_connectors` names provider ids directly:
-`google-drive`, `github`, `anthropic`, `glm`, `grok`, `pi`, `together`, or `codex`. Missing-provider
+`google-drive`, `github`, `anthropic`, `glm`, `grok`, `openrouter`, `pi`, `together`, or `codex`. Missing-provider
 failures name the stage, provider id, and setup hints such as
 `NITELY_GOOGLE_ACCESS_TOKEN`. Unknown MCP ids are preserved in run events for
 observability but do not block execution. This first slice validates known

@@ -66,6 +66,36 @@ describe("web provider statuses", () => {
     );
   });
 
+  it("reports OpenRouter from OPENROUTER_API_KEY without exposing it", async () => {
+    const missing = await getProviderStatuses({ env: {}, commandStatus: async () => true });
+    expect(missing).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "openrouter",
+          name: "OpenRouter",
+          configured: false,
+          message: expect.stringMatching(/Set OPENROUTER_API_KEY or connect OpenRouter in the Web Console/),
+          hints: expect.arrayContaining(["OPENROUTER_API_KEY", "NITELY_PI_COMMAND"]),
+        }),
+      ]),
+    );
+
+    const configured = await getProviderStatuses({
+      env: { OPENROUTER_API_KEY: "sk-or-v1-status-secret" },
+      commandStatus: async () => false,
+    });
+    expect(JSON.stringify(configured)).not.toContain("sk-or-v1-status-secret");
+    expect(configured).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "openrouter",
+          configured: true,
+          credential: expect.objectContaining({ scope: "env-only", source: "environment" }),
+        }),
+      ]),
+    );
+  });
+
   it("reports GLM as configured when any supported credential is present", async () => {
     for (const credential of [
       "NITELY_GLM_API_KEY",

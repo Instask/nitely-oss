@@ -136,6 +136,29 @@ describe("provider connections API", () => {
     expect((await json(redirectOnly)).error.message).toMatch(/connect flow/i);
   });
 
+  it("stores an OpenRouter API key from the Web Console without exposing it", async () => {
+    const repoPath = await createRepo();
+    const server = await start(repoPath);
+
+    const saved = await post(server, "/api/providers/openrouter/connection", {
+      value: "sk-or-v1-console-key-0123456789",
+      authMethod: "api_key",
+      label: "OpenRouter",
+    });
+    expect(saved.status).toBe(200);
+    expect(JSON.stringify(await json(saved))).not.toContain("sk-or-v1-console-key-0123456789");
+
+    const statuses = await json(await fetch(`${server.url}/api/providers`));
+    const openrouter = statuses.providers.find((p: { id: string }) => p.id === "openrouter");
+    expect(openrouter).toMatchObject({ name: "OpenRouter", configured: true });
+    expect(openrouter.authMethods).toEqual([
+      expect.objectContaining({ method: "api_key", env: "OPENROUTER_API_KEY", writable: true, configured: true }),
+    ]);
+    expect(JSON.stringify(statuses)).not.toContain("sk-or-v1-console-key-0123456789");
+    const stored = await readFile(join(repoPath, ".nitely", "connections.json"), "utf8");
+    expect(stored).not.toContain("sk-or-v1-console-key-0123456789");
+  });
+
   it("keeps multiple connections, selects a default, and clears one by id", async () => {
     const repoPath = await createRepo();
     const server = await start(repoPath);
