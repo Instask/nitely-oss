@@ -4,6 +4,7 @@ export type ProviderId =
   | "anthropic"
   | "glm"
   | "grok"
+  | "openrouter"
   | "pi"
   | "google-drive"
   | "jira";

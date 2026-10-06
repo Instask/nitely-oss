@@ -12,7 +12,7 @@ each one requires. Nitely is an open, local-first governed spec-to-PR execution
 system. It turns approved engineering intent into evidence-backed, reviewable
 draft pull requests.
 
-Codex, Claude, GLM, Grok Build, Pi, and future coding agents are
+Codex, Claude, GLM, Grok Build, Pi, OpenRouter models, and future coding agents are
 interchangeable runtimes for Nitely Flows. Nitely is not an Agent workforce,
 chat/inbox, or project-management suite; it is the governed delivery and
 evidence layer between approved work and a PR.
@@ -62,7 +62,9 @@ and Android support boundary.
   uses the local `codex` CLI authentication, Claude requires
   `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`, GLM requires one of `NITELY_GLM_API_KEY`, `GLM_API_KEY`,
   or `ZHIPUAI_API_KEY`, Grok Build uses local `grok login` or `XAI_API_KEY`,
-  and Pi uses the local Pi CLI/model configuration.
+  OpenRouter models run through the Pi CLI with `OPENROUTER_API_KEY`
+  ([docs/openrouter.md](docs/openrouter.md)), and Pi uses the local Pi
+  CLI/model configuration.
 
 ## Install
 

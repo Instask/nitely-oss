@@ -25,6 +25,7 @@ function providerStore(
     "anthropic",
     "glm",
     "grok",
+    "openrouter",
     "pi",
     "google-drive",
   ];
@@ -305,6 +306,52 @@ describe("run preflight doctor", () => {
     expect(issue?.remediation).toBe(
       `Configure one of the stage runtime providers before starting a run. Credentials are read from ${ownerPath} then ${repositoryPath}.`,
     );
+  });
+
+  it("maps OpenRouter stages to the openrouter provider and checks the model", async () => {
+    const inputs = { spec: { connector: "local-file" as const, uri: "spec.md" } };
+    const evaluate = async (stage: Record<string, unknown>, configured: Partial<Record<ProviderId, boolean>>) =>
+      await evaluateRunPreflight({
+        repoPath: await repoWithFlow(flow(stage)),
+        flowPath: "flows/preflight.json",
+        inputs,
+        providerStore: providerStore(configured),
+      });
+
+    const ready = await evaluate({ runtime: "openrouter", model: "qwen/qwen3-coder-next" }, { openrouter: true });
+    expect(ready.status).toBe("PASS");
+    expect(ready.requiredProviders).toEqual(["openrouter"]);
+
+    const unconfigured = await evaluate({ runtime: "openrouter", model: "qwen/qwen3-coder-next" }, { openrouter: false });
+    expect(unconfigured.status).toBe("BLOCK");
+    expect(unconfigured.issues).toEqual([
+      expect.objectContaining({ code: "runtime-unavailable", providerId: "openrouter" }),
+    ]);
+
+    const withoutModel = await evaluate({ runtime: "openrouter" }, { openrouter: true });
+    expect(withoutModel.status).toBe("BLOCK");
+    expect(withoutModel.issues).toEqual([
+      expect.objectContaining({
+        severity: "blocking",
+        code: "runtime-model-unsupported",
+        stageId: "implement",
+        runtime: "openrouter",
+        message: expect.stringMatching(/runtime openrouter requires a model/),
+      }),
+    ]);
+
+    const fallback = await evaluate(
+      { runtime: undefined, runtimes: [{ runtime: "openrouter", model: "qwen3-coder" }, { runtime: "codex" }] },
+      { openrouter: true, codex: true },
+    );
+    expect(fallback.status).toBe("WARN");
+    expect(fallback.issues).toEqual([
+      expect.objectContaining({
+        severity: "warning",
+        code: "runtime-model-unsupported",
+        message: expect.stringMatching(/cannot use model "qwen3-coder"/),
+      }),
+    ]);
   });
 
   it("maps Grok Build and Pi runtime candidates to provider checks", async () => {

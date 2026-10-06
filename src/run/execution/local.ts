@@ -43,6 +43,12 @@ import {
   requireCodexSandboxMode,
   type CodexSandboxMode,
 } from "./sandbox.js";
+import {
+  OPENROUTER_API_KEY_ENV,
+  createOpenRouterAgentArgs,
+  describeOpenRouterFailure,
+  openRouterModelProblem,
+} from "./openrouter.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -125,6 +131,16 @@ export interface AgentRuntimeLauncher {
   globalSkillIsolation?: RuntimeHomeIsolation;
   /** Absent when this runtime cannot continue a previous session. */
   sessionReuse?: RuntimeSessionReuse;
+  /**
+   * Returns an actionable reason when the stage's model cannot run on this
+   * runtime. Checked by preflight and again before spawning.
+   */
+  validateModel?(model: string | undefined): string | undefined;
+  /**
+   * Explains a non-zero exit in operator terms when the runtime's output shows
+   * a recognisable cause, such as a rejected credential or unknown model.
+   */
+  describeFailure?(input: { model?: string; stdout: string; stderr: string }): string | undefined;
   build(input: AgentRuntimeLaunchInput): AgentRuntimeLaunchSpec;
 }
 
@@ -616,6 +632,22 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
       }),
     },
     {
+      // OpenRouter models run through the Pi coding agent's built-in
+      // openrouter provider, so stages keep Pi's file and shell tools on any
+      // model family. The key reaches Pi only through the environment.
+      id: "openrouter",
+      requiredEnv: [[OPENROUTER_API_KEY_ENV]],
+      networkAccess: "required",
+      validateModel: openRouterModelProblem,
+      describeFailure: ({ model, stderr }) => describeOpenRouterFailure({ model, stderr }),
+      build: ({ model, env }) => ({
+        runtime: "openrouter",
+        command: env.NITELY_PI_COMMAND ?? "pi",
+        args: createOpenRouterAgentArgs(model),
+        promptDelivery: "stdin",
+      }),
+    },
+    {
       id: "pi",
       networkAccess: "required",
       build: ({ model, env }) => ({
@@ -626,6 +658,24 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
       }),
     },
   ]);
+}
+
+/** Formats a runtime's non-zero exit, with its explanation when it has one. */
+export function agentRuntimeExitMessage(input: {
+  runtime: AgentRuntimeLauncher;
+  launchRuntime: string;
+  exitCode: number;
+  model?: string;
+  stdout: string;
+  stderr: string;
+}): string {
+  const base = `${input.launchRuntime} exited with code ${input.exitCode}`;
+  const explanation = input.runtime.describeFailure?.({
+    model: input.model,
+    stdout: input.stdout,
+    stderr: input.stderr,
+  });
+  return explanation ? `${base}: ${explanation}` : base;
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -1368,6 +1418,10 @@ export class LocalExecutionBackend implements ExecutionBackend {
       };
     }
     await assertRuntimeConfigured(runtime, runtimeEnv);
+    const modelProblem = runtime.validateModel?.(input.stage.model);
+    if (modelProblem) {
+      throw new Error(`stage ${input.stage.id}: ${modelProblem}`);
+    }
     let claudeLaunch: {
       permissionMode?: ClaudePermissionMode;
       additionalDirectories?: string[];
@@ -1592,7 +1646,14 @@ export class LocalExecutionBackend implements ExecutionBackend {
         }
         const message = code === 0
           ? `${launch.runtime} reported an error: ${envelopeError}`
-          : `${launch.runtime} exited with code ${code ?? 1}`;
+          : agentRuntimeExitMessage({
+            runtime,
+            launchRuntime: launch.runtime,
+            exitCode: code ?? 1,
+            model: input.stage.model,
+            stdout: result.stdout ?? "",
+            stderr: result.stderr ?? "",
+          });
         settle(() => reject(Object.assign(new Error(message), result)));
       });
     });
@@ -1628,14 +1689,18 @@ export class LocalExecutionBackend implements ExecutionBackend {
       NITELY_OUTPUT_DIR: input.attemptDirectory,
     };
     const missing = missingRuntimeEnv(runtime, runtimeEnv);
-    if (missing.length === 0) {
-      return { available: true };
+    if (missing.length > 0) {
+      return {
+        available: false,
+        reason: `agent runtime ${runtime.id} is not configured. Set ${formatMissingRuntimeEnv(missing)}.`,
+        missingConfig: missing.flat(),
+      };
     }
-    return {
-      available: false,
-      reason: `agent runtime ${runtime.id} is not configured. Set ${formatMissingRuntimeEnv(missing)}.`,
-      missingConfig: missing.flat(),
-    };
+    const modelProblem = runtime.validateModel?.(input.stage.model);
+    if (modelProblem) {
+      return { available: false, reason: modelProblem };
+    }
+    return { available: true };
   }
 
   async commitAll(

@@ -21,6 +21,7 @@ const MCP_PROVIDER_REQUIREMENTS = new Map<string, ProviderId>([
   ["zhipu", "glm"],
   ["grok", "grok"],
   ["xai", "grok"],
+  ["openrouter", "openrouter"],
   ["pi", "pi"],
   ["codex", "codex"],
   ["openai", "codex"],

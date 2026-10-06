@@ -16,6 +16,7 @@ import type {
   AgentRunnableStage,
 } from "./types.js";
 import {
+  agentRuntimeExitMessage,
   claudePermissionModeForPolicy,
   createDefaultAgentRuntimeRegistry,
   LocalExecutionBackend,
@@ -756,7 +757,7 @@ export class OciExecutionBackend implements ExecutionBackend {
         "backing linked-worktree Git metadata is never mounted; host-side workspace create/commit is the only Git write path; Codex uses --skip-git-repo-check and in-container Git commands may be unavailable",
         this.networkPolicy.mode === "allowlist"
           ? "agent egress uses an internal-only workload network and an HTTP CONNECT allowlist gateway; direct sockets have no external route and non-allowlisted CONNECT is denied"
-          : "without NITELY_OCI_NETWORK_ALLOWLIST, agent runtimes must be offline or fail preflight; built-in Codex/Claude/GLM/Grok/Pi require the allowlist gateway",
+          : "without NITELY_OCI_NETWORK_ALLOWLIST, agent runtimes must be offline or fail preflight; built-in Codex/Claude/GLM/Grok/OpenRouter/Pi require the allowlist gateway",
         this.commandMediation
           ? `agent-spawned commands are mediated by ${this.commandMediation.id}`
           : "agent-spawned commands are not mediated inside the image; a stage that sets capabilities.commands.advisory false fails closed instead of running unmediated",
@@ -1253,6 +1254,10 @@ export class OciExecutionBackend implements ExecutionBackend {
             .join("; ")}.`,
         );
       }
+      const modelProblem = runtime.validateModel?.(input.stage.model);
+      if (modelProblem) {
+        throw new Error(`stage ${input.stage.id}: ${modelProblem}`);
+      }
       const preparedPrompt = await this.prepareAgentPrompt({
         workspace: ws,
         attemptDirectory: input.attemptDirectory,
@@ -1370,7 +1375,14 @@ export class OciExecutionBackend implements ExecutionBackend {
           );
         }
         throw Object.assign(
-          new Error(`${launch.runtime} exited with code ${result.exitCode}`),
+          new Error(agentRuntimeExitMessage({
+            runtime,
+            launchRuntime: launch.runtime,
+            exitCode: result.exitCode,
+            model: input.stage.model,
+            stdout: result.stdout,
+            stderr: result.stderr,
+          })),
           { stdout: result.stdout, stderr: result.stderr },
         );
       }
@@ -1825,16 +1837,20 @@ export class OciExecutionBackend implements ExecutionBackend {
         (alternatives) =>
           !alternatives.some((name) => Boolean(runtimeEnv[name])),
       );
-      if (missing.length === 0) {
-        return { available: true };
+      if (missing.length > 0) {
+        return {
+          available: false,
+          reason: `agent runtime ${runtime.id} is not configured in the OCI environment allowlists. Allow ${missing
+            .map((alternatives) => alternatives.join(" or "))
+            .join("; ")}.`,
+          missingConfig: missing.flat(),
+        };
       }
-      return {
-        available: false,
-        reason: `agent runtime ${runtime.id} is not configured in the OCI environment allowlists. Allow ${missing
-          .map((alternatives) => alternatives.join(" or "))
-          .join("; ")}.`,
-        missingConfig: missing.flat(),
-      };
+      const modelProblem = runtime.validateModel?.(input.stage.model);
+      if (modelProblem) {
+        return { available: false, reason: modelProblem };
+      }
+      return { available: true };
     } catch (error) {
       return {
         available: false,

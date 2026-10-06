@@ -57,6 +57,8 @@ Agent credentials are provided to local agent CLIs or local environment:
 
 - Codex authentication is managed by the local `codex` CLI.
 - Claude requires `ANTHROPIC_API_KEY`.
+- OpenRouter requires `OPENROUTER_API_KEY` or a Web Console OpenRouter
+  connection; Nitely passes it to the Pi CLI only through the environment.
 - GLM requires one of `NITELY_GLM_API_KEY`, `GLM_API_KEY`, or `ZHIPUAI_API_KEY`.
 
 Nitely launches agent runtimes locally and sends prompts through stdin. Agent

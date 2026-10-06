@@ -241,6 +241,8 @@ function defaultConfiguredMessage(id: ProviderId): string {
       return "GLM credential environment variable is configured.";
     case "grok":
       return "xAI API key environment variable is configured.";
+    case "openrouter":
+      return "OpenRouter API key environment variable is configured. Stages run through the Pi CLI.";
     case "pi":
       return "Pi CLI is installed. Model provider configuration is managed by Pi.";
     case "google-drive":
@@ -265,6 +267,8 @@ function defaultMissingMessage(
       return "Set NITELY_GLM_API_KEY, GLM_API_KEY, or ZHIPUAI_API_KEY for the GLM agent runtime.";
     case "grok":
       return "Run grok login or set XAI_API_KEY for the Grok Build runtime.";
+    case "openrouter":
+      return "Set OPENROUTER_API_KEY or connect OpenRouter in the Web Console, and install the Pi CLI for the OpenRouter agent runtime.";
     case "pi":
       return "Install and configure the Pi CLI for the Pi agent runtime.";
     case "google-drive":

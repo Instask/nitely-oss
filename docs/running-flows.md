@@ -404,12 +404,19 @@ runtime registry. Supported runtimes are:
 - `grok`: runs `grok --no-auto-update --cwd <worktree> --always-approve`
   with `-p <prompt>`. Authenticate with local `grok login` or `XAI_API_KEY`.
   `NITELY_GROK_COMMAND` can override the command name.
+- `openrouter`: runs OpenRouter models through the Pi CLI as
+  `pi -p --provider openrouter --model openrouter/<model>` and sends the
+  prompt on stdin. Requires `OPENROUTER_API_KEY` (or an OpenRouter connection
+  in the Web Console) and an explicit OpenRouter model id such as
+  `qwen/qwen3-coder-next`. `NITELY_PI_COMMAND` can override the command name.
+  See [OpenRouter Models](openrouter.md).
 - `pi`: runs `pi -p` and sends the prompt on stdin. Configure Pi's model
   provider through the local Pi CLI configuration. `NITELY_PI_COMMAND` can
   override the command name.
 
 The optional `model` field is passed to Codex as `-m <model>` and to Claude,
-GLM, Grok Build, and Pi as `--model <model>`. Unknown runtimes fail before
+GLM, Grok Build, and Pi as `--model <model>`; the `openrouter` runtime
+requires it and passes it to Pi as `--model openrouter/<model>`. Unknown runtimes fail before
 spawning any command. Known runtimes with missing required credentials are
 preflighted before spawn: a
 single-runtime stage fails early, while an ordered `runtimes` stage records the

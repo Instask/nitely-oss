@@ -149,6 +149,47 @@ function sandboxCapabilities(
   };
 }
 
+const OPENROUTER_OCI_SECRET = "sk-or-v1-oci-openrouter-secret";
+
+/**
+ * Options for the production `openrouter` launcher behind a stand-in allowlist
+ * gateway that admits only openrouter.ai, as an operator would configure it.
+ */
+function openRouterOciOptions(calls: SandboxProcessInput[]): OciExecutionBackendOptions {
+  return {
+    image: "nitely-runner:test",
+    env: { OPENROUTER_API_KEY: OPENROUTER_OCI_SECRET, NITELY_PI_COMMAND: "pi-in-image" },
+    secretAllowlist: ["OPENROUTER_API_KEY"],
+    networkAllowlist: ["openrouter.ai"],
+    processRunner: successfulRunner(calls),
+    containerName: () => "nitely-openrouter-agent",
+    networkGatewayFactory: (domains) => ({
+      id: "http-connect-allowlist",
+      domains,
+      assertEnforceable: async () => undefined,
+      prepareContainerNetwork: async () => ({
+        dockerArgs: ["--network=bridge", "--add-host", "host.docker.internal:host-gateway"],
+        containerEnv: { HTTPS_PROXY: "http://host.docker.internal:18080" },
+        description: `allowlist(${domains.join(",")}) via http-connect-allowlist`,
+      }),
+      dispose: async () => undefined,
+    }),
+  };
+}
+
+function openRouterOciStage(model?: string): AgentStage {
+  return {
+    ...agentStage(
+      sandboxCapabilities({
+        allowedRuntimes: ["openrouter"],
+        network: { mode: "restricted", advisory: false, domains: ["openrouter.ai"] },
+      }),
+    ),
+    runtime: "openrouter",
+    ...(model ? { model } : {}),
+  };
+}
+
 function networkRequiredRuntimeRegistry(): AgentRuntimeRegistry {
   const runtime: AgentRuntimeLauncher = {
     id: "codex",
@@ -1586,6 +1627,122 @@ describe("OciExecutionBackend", () => {
     expect(backend.describeExecution().network).toContain("allowlist(api.openai.com)");
   });
 
+  it("preflights OpenRouter credentials and model selection on the production launcher", async () => {
+    const fixture = await createFixture();
+    const calls: SandboxProcessInput[] = [];
+    const ws = { runId: "openrouter-preflight", path: fixture.worktree };
+    const notAllowlisted = new OciExecutionBackend({
+      ...openRouterOciOptions(calls),
+      secretAllowlist: [],
+    });
+    await expect(
+      notAllowlisted.preflightAgentRuntime(ws, {
+        stage: openRouterOciStage("qwen/qwen3-coder-next"),
+        attemptDirectory: fixture.attempt,
+      }),
+    ).resolves.toEqual({
+      available: false,
+      reason:
+        "agent runtime openrouter is not configured in the OCI environment allowlists. Allow OPENROUTER_API_KEY.",
+      missingConfig: ["OPENROUTER_API_KEY"],
+    });
+
+    const allowlisted = new OciExecutionBackend(openRouterOciOptions(calls));
+    await expect(
+      allowlisted.preflightAgentRuntime(ws, {
+        stage: openRouterOciStage(),
+        attemptDirectory: fixture.attempt,
+      }),
+    ).resolves.toEqual({
+      available: false,
+      reason: expect.stringMatching(/runtime openrouter requires a model/),
+    });
+    await expect(
+      allowlisted.preflightAgentRuntime(ws, {
+        stage: openRouterOciStage("qwen/qwen3-coder-next"),
+        attemptDirectory: fixture.attempt,
+      }),
+    ).resolves.toEqual({ available: true });
+    await expect(
+      allowlisted.runAgent(ws, {
+        stage: openRouterOciStage("Qwen3 Coder"),
+        prompt: "Implement.",
+        attemptDirectory: fixture.attempt,
+      }),
+    ).rejects.toThrow(/runtime openrouter cannot use model "Qwen3 Coder"/);
+    expect(calls.filter((call) => call.args[0] === "run")).toHaveLength(0);
+  });
+
+  it("runs OpenRouter through Pi behind the allowlist gateway with the key passed by name", async () => {
+    const fixture = await createFixture();
+    const calls: SandboxProcessInput[] = [];
+    const backend = new OciExecutionBackend(openRouterOciOptions(calls));
+
+    await backend.runAgent(
+      { runId: "openrouter-run", path: fixture.worktree },
+      {
+        stage: openRouterOciStage("qwen/qwen3-coder-next"),
+        prompt: "Implement with OpenRouter.",
+        attemptDirectory: fixture.attempt,
+      },
+    );
+
+    const launch = calls.find((call) => call.args[0] === "run")!;
+    expect(launch.args.slice(-6)).toEqual([
+      "pi-in-image",
+      "-p",
+      "--provider",
+      "openrouter",
+      "--model",
+      "openrouter/qwen/qwen3-coder-next",
+    ]);
+    expect(launch.args).toEqual(
+      expect.arrayContaining(["--env", "OPENROUTER_API_KEY", "HTTPS_PROXY=http://host.docker.internal:18080"]),
+    );
+    expect(launch.args.some((arg, index) => arg === "--env" && launch.args[index + 1] === "OPENROUTER_API_KEY")).toBe(true);
+    expect(launch.env?.OPENROUTER_API_KEY).toBe(OPENROUTER_OCI_SECRET);
+    expect(launch.args).not.toContain("--network=none");
+    expect(launch.args.join("\0")).not.toContain(OPENROUTER_OCI_SECRET);
+    expect(launch.stdin).toBe("Implement with OpenRouter.");
+    expect(backend.describeExecution().network).toContain("allowlist(openrouter.ai)");
+  });
+
+  it("explains OpenRouter failures from inside the container without exposing the key", async () => {
+    const fixture = await createFixture();
+    const run = async (stderr: string) => {
+      const backend = new OciExecutionBackend({
+        ...openRouterOciOptions([]),
+        processRunner: async (input) => {
+          if (input.args[0] === "run") return { stdout: "", stderr, exitCode: 1 };
+          return await successfulRunner([])(input);
+        },
+      });
+      return await backend
+        .runAgent(
+          { runId: "openrouter-run", path: fixture.worktree },
+          {
+            stage: openRouterOciStage("qwen/qwen3-coder-next"),
+            prompt: "Implement.",
+            attemptDirectory: fixture.attempt,
+          },
+        )
+        .then(
+          () => {
+            throw new Error("expected the openrouter runtime to fail");
+          },
+          (error: unknown) => error as Error,
+        );
+    };
+
+    const rejected = await run('401: {"message":"User not found.","code":401}\n');
+    expect(rejected.message).toMatch(/^openrouter exited with code 1: OpenRouter rejected the API key \(401\)/);
+    expect(rejected.message).not.toContain(OPENROUTER_OCI_SECRET);
+    const rateLimited = await run('429: {"message":"Rate limit exceeded","code":429}\n');
+    expect(rateLimited.message).toMatch(/OpenRouter rate limit reached for model qwen\/qwen3-coder-next/);
+    const unavailable = await run('404: {"message":"No endpoints found for qwen/qwen3-coder-next.","code":404}\n');
+    expect(unavailable.message).toMatch(/OpenRouter has no available endpoint/);
+  });
+
   it("provisions an internal-only workload network and never attaches the agent to docker bridge", async () => {
     const fixture = await createFixture();
     const calls: SandboxProcessInput[] = [];
@@ -2274,7 +2431,7 @@ describe("OciExecutionBackend", () => {
       },
       limitations: [
         "backing linked-worktree Git metadata is never mounted; host-side workspace create/commit is the only Git write path; Codex uses --skip-git-repo-check and in-container Git commands may be unavailable",
-        "without NITELY_OCI_NETWORK_ALLOWLIST, agent runtimes must be offline or fail preflight; built-in Codex/Claude/GLM/Grok/Pi require the allowlist gateway",
+        "without NITELY_OCI_NETWORK_ALLOWLIST, agent runtimes must be offline or fail preflight; built-in Codex/Claude/GLM/Grok/OpenRouter/Pi require the allowlist gateway",
         "agent-spawned commands are not mediated inside the image; a stage that sets capabilities.commands.advisory false fails closed instead of running unmediated",
         "aggregate bind-mount disk quota (NITELY_OCI_DISK_BYTES) is not supported and will not be; setting it fails closed. Use per-file NITELY_OCI_MAX_FILE_BYTES and captured-output NITELY_OCI_MAX_CAPTURED_OUTPUT_BYTES",
       ],

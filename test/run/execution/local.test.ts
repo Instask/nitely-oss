@@ -18,6 +18,9 @@ import { PassThrough, Writable } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
 
+import { classifyAgentRuntimeBlocker } from "../../../src/run/blockers.js";
+import { createOpenRouterAgentArgs } from "../../../src/run/execution/openrouter.js";
+
 import {
   LocalExecutionBackend,
   claudeAdditionalDirectories,
@@ -1928,6 +1931,139 @@ describe("LocalExecutionBackend", () => {
     });
     expect(calls[0].options.env?.ZHIPUAI_API_KEY).toBe("glm-secret");
     expect(calls[0].options.env?.NITELY_GLM_COMMAND).toBe("glm-local");
+  });
+
+  it("registers openrouter as a Pi-backed runtime that needs OPENROUTER_API_KEY", () => {
+    expect(createDefaultAgentRuntimeRegistry().resolve("openrouter")).toMatchObject({
+      id: "openrouter",
+      networkAccess: "required",
+      requiredEnv: [["OPENROUTER_API_KEY"]],
+    });
+  });
+
+  it("runs OpenRouter models through Pi with the key in the environment only", async () => {
+    const calls: SpawnCall[] = [];
+    const backend = new LocalExecutionBackend({
+      env: {
+        OPENROUTER_API_KEY: "sk-or-v1-openrouter-secret-value",
+        NITELY_PI_COMMAND: "pi-dev",
+      },
+      spawn: createSuccessfulSpawn(calls),
+    });
+
+    await backend.runAgent(
+      { runId: "run-agent", path: "/repo/worktree" },
+      {
+        stage: agentStage({ runtime: "openrouter", model: "qwen/qwen3-coder-next" }),
+        prompt: "Implement with OpenRouter.",
+        attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
+      },
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      command: "pi-dev",
+      args: ["-p", "--provider", "openrouter", "--model", "openrouter/qwen/qwen3-coder-next"],
+      options: { cwd: "/repo/worktree", stdio: ["pipe", "pipe", "pipe"] },
+      stdin: "Implement with OpenRouter.",
+    });
+    expect(calls[0].args).toEqual(createOpenRouterAgentArgs("qwen/qwen3-coder-next"));
+    expect(calls[0].options.env?.OPENROUTER_API_KEY).toBe("sk-or-v1-openrouter-secret-value");
+    expect(JSON.stringify(calls[0].args)).not.toContain("sk-or-v1-openrouter-secret-value");
+    expect(calls[0].stdin).not.toContain("sk-or-v1-openrouter-secret-value");
+  });
+
+  it("fails OpenRouter stages without a key or a usable model before spawning", async () => {
+    const calls: SpawnCall[] = [];
+    const ws = { runId: "run-agent", path: "/repo/worktree" };
+    const attempt = { attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1" };
+    const unconfigured = new LocalExecutionBackend({ env: {}, spawn: createSuccessfulSpawn(calls) });
+    const stage = agentStage({ runtime: "openrouter", model: "qwen/qwen3-coder-next" });
+    await expect(unconfigured.preflightAgentRuntime(ws, { stage, ...attempt })).resolves.toEqual({
+      available: false,
+      reason: "agent runtime openrouter is not configured. Set OPENROUTER_API_KEY.",
+      missingConfig: ["OPENROUTER_API_KEY"],
+    });
+    await expect(unconfigured.runAgent(ws, { stage, prompt: "Run.", ...attempt })).rejects.toThrow(
+      "agent runtime openrouter is not configured. Set OPENROUTER_API_KEY.",
+    );
+
+    const configured = new LocalExecutionBackend({
+      env: { OPENROUTER_API_KEY: "sk-or-v1-openrouter-secret-value" },
+      spawn: createSuccessfulSpawn(calls),
+    });
+    const noModel = agentStage({ runtime: "openrouter" });
+    await expect(configured.preflightAgentRuntime(ws, { stage: noModel, ...attempt })).resolves.toEqual({
+      available: false,
+      reason: expect.stringMatching(/runtime openrouter requires a model\..*qwen\/qwen3-coder-next/),
+    });
+    await expect(
+      configured.runAgent(ws, { stage: noModel, prompt: "Run.", ...attempt }),
+    ).rejects.toThrow(/stage agent: runtime openrouter requires a model/);
+    await expect(
+      configured.runAgent(ws, {
+        stage: agentStage({ runtime: "openrouter", model: "qwen3-coder-next" }),
+        prompt: "Run.",
+        ...attempt,
+      }),
+    ).rejects.toThrow(/cannot use model "qwen3-coder-next".*<author>\/<model>/);
+    await expect(configured.preflightAgentRuntime(ws, { stage, ...attempt })).resolves.toEqual({
+      available: true,
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("turns OpenRouter failures into actionable errors the blocker classifier understands", async () => {
+    const run = async (stderr: string, stdout = "") => {
+      const backend = new LocalExecutionBackend({
+        env: { OPENROUTER_API_KEY: "sk-or-v1-openrouter-secret-value" },
+        spawn: createOutputSpawn(stdout, stderr, 1),
+      });
+      return await backend
+        .runAgent(
+          { runId: "run-agent", path: "/repo/worktree" },
+          {
+            stage: agentStage({ runtime: "openrouter", model: "qwen/qwen3-coder-next" }),
+            prompt: "Run.",
+            attemptDirectory: "",
+          },
+        )
+        .then(
+          () => {
+            throw new Error("expected the openrouter runtime to fail");
+          },
+          (error: unknown) => error as Error & { stderr?: string },
+        );
+    };
+    const classify = (error: Error) =>
+      classifyAgentRuntimeBlocker({ stageId: "agent", runtime: "openrouter", error })?.reason;
+
+    const rejected = await run('401: {"message":"User not found.","code":401}\n');
+    expect(rejected.message).toMatch(
+      /^openrouter exited with code 1: OpenRouter rejected the API key \(401\)\. Replace OPENROUTER_API_KEY/,
+    );
+    expect(rejected.stderr).toBe('401: {"message":"User not found.","code":401}\n');
+    expect(classify(rejected)).toBe("agent_credentials_invalid");
+
+    const rateLimited = await run('429: {"message":"Rate limit exceeded","code":429}\n');
+    expect(rateLimited.message).toMatch(/OpenRouter rate limit reached for model qwen\/qwen3-coder-next/);
+    expect(classify(rateLimited)).toBe("agent_usage_limit");
+
+    const noCredits = await run('402: {"message":"Insufficient credits","code":402}\n');
+    expect(noCredits.message).toMatch(/OpenRouter quota exceeded/);
+    expect(classify(noCredits)).toBe("agent_usage_limit");
+
+    const unavailable = await run('404: {"message":"No endpoints found for qwen/qwen3-coder-next.","code":404}\n');
+    expect(unavailable.message).toMatch(/OpenRouter has no available endpoint for model qwen\/qwen3-coder-next/);
+    expect(classify(unavailable)).toBeUndefined();
+
+    const upstream = await run('502: {"message":"Provider returned error","code":502}\n');
+    expect(upstream.message).toMatch(/upstream provider failed/);
+    expect(classify(upstream)).toBeUndefined();
+
+    // The agent's own answer on stdout is never read as a provider error.
+    const other = await run("boom\n", "Fixed the 401 unauthorized handler.\n");
+    expect(other.message).toBe("openrouter exited with code 1");
   });
 
   it("runs Grok Build with prompt argument delivery", async () => {

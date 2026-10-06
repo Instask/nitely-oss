@@ -80,8 +80,9 @@ Fallback happens only when a candidate cannot start or is externally blocked
 to completion and then fails validation — missing outputs, failing commands, a
 failed review gate — does **not** fall back.
 
-Supported runtimes: `codex`, `claude`, `glm`, `grok`, `pi`. Omit `model` to
-keep the CLI default authoritative.
+Supported runtimes: `codex`, `claude`, `glm`, `grok`, `openrouter`, `pi`. Omit
+`model` to keep the CLI default authoritative, except for `openrouter`, which
+requires an OpenRouter model id such as `qwen/qwen3-coder-next`.
 
 ## Outputs and artifacts
 
