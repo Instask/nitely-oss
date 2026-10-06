@@ -26,6 +26,7 @@ describe("FileProviderConnectionStore", () => {
     "anthropic",
     "glm",
     "grok",
+    "together",
     "google-drive",
     "jira",
   ];
@@ -442,6 +443,24 @@ describe("FileProviderConnectionStore", () => {
       const env = await store.resolveEnv();
       expect(env.NITELY_GLM_API_KEY).toBe("sk-glm");
       expect(env.SOME_OTHER_VAR).toBe("keep");
+    });
+
+    it("a stored Together AI connection replaces TOGETHER_API_KEY from the environment", async () => {
+      const store = new FileProviderConnectionStore({
+        path: storePath,
+        env: { TOGETHER_API_KEY: "inherited-together-key" },
+        commandStatus: async () => false,
+      });
+      expect((await store.resolveEnv()).TOGETHER_API_KEY).toBe("inherited-together-key");
+      await store.setConnection({
+        providerId: "together",
+        authMethod: "api_key",
+        value: "stored-together-key",
+      });
+      expect((await store.resolveEnv()).TOGETHER_API_KEY).toBe("stored-together-key");
+      const [status] = (await store.listStatuses()).filter((s) => s.id === "together");
+      expect(status).toMatchObject({ configured: true, authMethod: "api_key" });
+      expect(JSON.stringify(status)).not.toContain("stored-together-key");
     });
 
     it("an empty stored value never overwrites the inherited environment", async () => {

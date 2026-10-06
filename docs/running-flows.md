@@ -407,9 +407,16 @@ runtime registry. Supported runtimes are:
 - `pi`: runs `pi -p` and sends the prompt on stdin. Configure Pi's model
   provider through the local Pi CLI configuration. `NITELY_PI_COMMAND` can
   override the command name.
+- `together`: runs Together AI models through the Pi CLI as
+  `pi -p --provider together --model <model>` and sends the prompt on stdin.
+  Requires `TOGETHER_API_KEY` (or a Together AI connection in the Web
+  Console) and an explicit Together model id such as `moonshotai/Kimi-K3`.
+  `NITELY_PI_COMMAND` can override the command name. See
+  [Together AI Models](together-ai.md).
 
 The optional `model` field is passed to Codex as `-m <model>` and to Claude,
-GLM, Grok Build, and Pi as `--model <model>`. Unknown runtimes fail before
+GLM, Grok Build, Pi, and Together AI (through Pi) as `--model <model>`; the
+`together` runtime requires it. Unknown runtimes fail before
 spawning any command. Known runtimes with missing required credentials are
 preflighted before spawn: a
 single-runtime stage fails early, while an ordered `runtimes` stage records the

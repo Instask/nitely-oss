@@ -80,8 +80,9 @@ Fallback happens only when a candidate cannot start or is externally blocked
 to completion and then fails validation — missing outputs, failing commands, a
 failed review gate — does **not** fall back.
 
-Supported runtimes: `codex`, `claude`, `glm`, `grok`, `pi`. Omit `model` to
-keep the CLI default authoritative.
+Supported runtimes: `codex`, `claude`, `glm`, `grok`, `pi`, `together`. Omit
+`model` to keep the CLI default authoritative, except for `together`, which
+requires a Together AI model id such as `moonshotai/Kimi-K3`.
 
 ## Outputs and artifacts
 

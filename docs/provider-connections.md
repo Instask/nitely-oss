@@ -20,6 +20,7 @@ methods in precedence order and how each maps to runtime consumption:
 | `google-drive` | `oauth` (connect flow), `oauth_token` (paste) | `NITELY_GOOGLE_ACCESS_TOKEN` |
 | `glm`, `jira` | `api_key` | provider-specific |
 | `grok` | `api_key`, `cli_managed` | `XAI_API_KEY` |
+| `together` | `api_key` (paste) | `TOGETHER_API_KEY` ([Together AI](together-ai.md)) |
 | `codex`, `pi` | `cli_managed` | — |
 
 The mapping from method to variable belongs to the descriptor. Generic store
