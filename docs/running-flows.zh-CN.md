@@ -189,6 +189,30 @@ Run projection 会把这些 event 聚合到 attempt、stage 和 run context usag
 Web Console run detail 会在存在这些 event 时展示 per-stage context usage 和
 run-total context usage；旧 run 没有这些字段时会自然省略。
 
+## 操作员提问策略
+
+Agent stage 可以写 `question.json` 向人请求决定。提问策略决定之后的行为，可以设在 Flow 上
+（`spec.questions`），也可以设在单个 agent stage 上（`questions`），stage 的字段覆盖 Flow 的字段。
+
+```json
+"questions": {
+  "mode": "ask",
+  "timeoutMs": 1800000,
+  "onTimeout": "recommended"
+}
+```
+
+- `ask`（默认）：run 因提问进入 blocked。超过 `timeoutMs`（默认 30 分钟）无人回答时由调度器代答：
+  `onTimeout: "recommended"`（默认）且恰好有一个标记为 `recommended` 的选项时采用该选项；否则，
+  或设为 `onTimeout: "fail"` 时，恢复后的 attempt 直接失败，走该 stage 正常的重试/返工/升级策略。
+- `auto`：从不等待，立即采用唯一的推荐选项并继续；没有推荐选项的提问会让 stage 失败。
+- `deny`：agent prompt 中不再包含提问说明；如果仍写了 `question.json`，stage 失败。
+
+策略代答会记录为 actor 为 `nitely:question-policy` 的 `operator.answer`，并追加
+`operator.question.auto-answered` 事件（问题、所选选项、原因 `timeout` 或 `auto-policy`），
+同时写入 run evidence，并像人工回答一样传给下一次 attempt。超时由 `nitely scheduler` 和 Web
+服务器的后台恢复循环执行；只用 `nitely run` 启动且没有调度器的 run 会一直 blocked，直到它们之一或人工处理。
+
 ## Agent Runtime 配置
 
 每个 `agent` stage 都必须声明 `runtime`。Nitely 会 trim 该值，并通过本地

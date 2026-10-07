@@ -135,6 +135,7 @@ import {
   type HookDefinition,
   type ReadPolicy,
   type TimeoutControls,
+  type QuestionPolicy,
   type RuntimeCandidate,
   type Flow,
   type Stage,
@@ -186,6 +187,10 @@ import {
 } from "./project.js";
 import {
   questionIdForStageAttempt,
+  appendAutoAnswer,
+  resolveQuestionPolicy,
+  singleRecommendedOption,
+  type ResolvedQuestionPolicy,
   readAttemptQuestion,
   renderOperatorQuestionAnswer,
 } from "./questions.js";
@@ -1674,6 +1679,15 @@ class RunBlockedError extends Error {
     super(`run blocked by ${blocker.reason} on stage ${blocker.stageId}`);
     this.name = "RunBlockedError";
   }
+
+  /** Set when the question policy already answered this blocker. */
+  autoAnsweredRunId?: string;
+}
+
+const MAX_AUTO_ANSWER_RESUMES = 25;
+
+function autoAnsweredRunId(error: unknown): string | undefined {
+  return error instanceof RunBlockedError ? error.autoAnsweredRunId : undefined;
 }
 
 class ApprovalDeniedError extends Error {
@@ -4030,6 +4044,16 @@ async function applyAgentStageConvergence(input: {
   };
 }
 
+function stageQuestionPolicy(
+  flowQuestions: QuestionPolicy | undefined,
+  stage: { type: string; questions?: QuestionPolicy },
+): ResolvedQuestionPolicy {
+  return resolveQuestionPolicy(
+    flowQuestions,
+    stage.type === "agent" ? stage.questions : undefined,
+  );
+}
+
 async function executeAgentStage(input: {
   runId: string;
   stage: AgentRunnableStage;
@@ -4044,6 +4068,7 @@ async function executeAgentStage(input: {
   flowMaxInputTokens?: number;
   flowMaxAttempts?: number;
   flowTimeouts?: TimeoutControls;
+  flowQuestions?: QuestionPolicy;
   flowBudgets?: EffectiveBudgetControls;
   inputArtifacts: Map<string, InputArtifact>;
   configuration: FlowConfiguration;
@@ -4065,6 +4090,11 @@ async function executeAgentStage(input: {
   completeStage?: boolean;
   blockRunOnAgentBlocker?: boolean;
 }): Promise<{ selectedAttempt: number; selectedStage: AgentRunnableStage }> {
+  if (input.operatorQuestion?.answer?.failStage) {
+    throw new Error(
+      `operator question ${input.operatorQuestion.id} was not answered (${input.operatorQuestion.answer.reason ?? "policy"}); failing stage per question policy`,
+    );
+  }
   const candidates = stageRuntimeCandidates(input.stage);
   let selectedAttempt = input.attempt;
   let selectedAttemptDirectory = input.attemptDirectory;
@@ -4233,6 +4263,7 @@ async function executeAgentStage(input: {
           forced,
           input.operatorQuestion,
           input.readPolicy,
+          stageQuestionPolicy(input.flowQuestions, selectedStage).mode !== "deny",
         ),
     });
     appendContextUsageEvent({
@@ -4436,6 +4467,7 @@ async function executeAgentStage(input: {
       input.runDirectory,
       selectedAttemptDirectory,
     );
+    const questionPolicy = stageQuestionPolicy(input.flowQuestions, selectedStage);
     if (attemptQuestion) {
       const questionId = questionIdForStageAttempt(
         input.stage.id,
@@ -4473,11 +4505,25 @@ async function executeAgentStage(input: {
             questionId,
             question: attemptQuestion.question,
             artifactPath,
+            policy: questionPolicy,
           },
           input.context,
         ),
       });
       if (budgetFailure) throw budgetFailure;
+      if (questionPolicy.mode === "deny") {
+        throw new Error(
+          `stage ${input.stage.id} wrote question.json but its question policy is deny`,
+        );
+      }
+      if (questionPolicy.mode === "auto") {
+        const option = singleRecommendedOption(attemptQuestion.question.options);
+        if (!option) {
+          throw new Error(
+            `stage ${input.stage.id} asked a question without a single recommended option under question policy auto`,
+          );
+        }
+      }
       const blocker: RunBlocker = {
         reason: "awaiting_operator_answer",
         stageId: input.stage.id,
@@ -4504,7 +4550,17 @@ async function executeAgentStage(input: {
           context: input.context,
         });
       }
-      throw new RunBlockedError(blocker, true);
+      if (questionPolicy.mode === "auto") {
+        appendAutoAnswer({
+          store: input.eventStore,
+          runId: input.runId,
+          questionId,
+          reason: "auto-policy",
+        });
+      }
+      const blockedError = new RunBlockedError(blocker, true);
+      if (questionPolicy.mode === "auto") blockedError.autoAnsweredRunId = input.runId;
+      throw blockedError;
     }
     const validatedOutputs = await validateAttemptOutputs({
       runDirectory: input.runDirectory,
@@ -6664,6 +6720,7 @@ function renderPrompt(
   forcedPathOnlyIds?: Set<string>,
   operatorQuestion?: ProjectedOperatorQuestion,
   readPolicy?: ResolvedStageReadPolicy,
+  questionsAllowed = true,
 ): { prompt: string; contextUsage: ContextUsage } {
   const retryContext =
     !contextControls.previousFailures || previousFailures.length === 0
@@ -6746,7 +6803,7 @@ function renderPrompt(
     "Accepted filenames:",
     stage.outputs.map(renderAcceptedOutputFilename).join("\n"),
     "",
-    ...(stage.type === "agent" && !stage.alwaysRun
+    ...(stage.type === "agent" && !stage.alwaysRun && questionsAllowed
       ? [
           "## Structured Operator Question",
           "",
@@ -11484,6 +11541,12 @@ async function writeEvidence(input: {
               question.answer
                 ? `  Answered by: ${redactRuntimeText(question.answer.actor, input.context) ?? ""} at ${question.answer.answeredAt}`
                 : undefined,
+              question.answer?.reason
+                ? `  Auto-answered: ${question.answer.reason}${question.answer.failStage ? " (no adoptable option; stage failed)" : ""}`
+                : undefined,
+              question.status === "pending" && question.expiresAt
+                ? `  Answer timeout: ${question.expiresAt}`
+                : undefined,
             ]
               .filter((line): line is string => line !== undefined)
               .join("\n");
@@ -12579,6 +12642,26 @@ export async function runFlow(
   input: RunFlowInput,
   dependencies: RunFlowDependencies = {},
 ): Promise<RunFlowResult> {
+  try {
+    return await runFlowOnce(input, dependencies);
+  } catch (error) {
+    const runId = autoAnsweredRunId(error);
+    if (!runId) throw error;
+    return await resumeRun(
+      {
+        repoPath: input.repoPath,
+        runId,
+        ...(input.executionBackend ? { executionBackend: input.executionBackend } : {}),
+      },
+      dependencies,
+    );
+  }
+}
+
+async function runFlowOnce(
+  input: RunFlowInput,
+  dependencies: RunFlowDependencies = {},
+): Promise<RunFlowResult> {
   const repoPath = resolve(input.repoPath);
   if (
     input.evalReplayInvocationId !== undefined &&
@@ -13276,6 +13359,7 @@ export async function runFlow(
                   flowMaxInputTokens: loaded.flow.spec.maxInputTokens,
                   flowMaxAttempts: loaded.flow.spec.maxAttempts,
                   flowTimeouts: loaded.flow.spec.timeouts,
+                  flowQuestions: loaded.flow.spec.questions,
                   flowBudgets: effectiveFlowBudgets(loaded.flow),
                   inputArtifacts,
                   configuration,
@@ -13401,6 +13485,7 @@ export async function runFlow(
                   flowMaxInputTokens: loaded.flow.spec.maxInputTokens,
                   flowMaxAttempts: loaded.flow.spec.maxAttempts,
                   flowTimeouts: loaded.flow.spec.timeouts,
+                  flowQuestions: loaded.flow.spec.questions,
                   flowBudgets: effectiveFlowBudgets(loaded.flow),
                   inputArtifacts,
                   configuration,
@@ -14584,7 +14669,32 @@ function appendResumeSelectionEvent(input: {
   });
 }
 
+/**
+ * Resumes a run. When the question policy answers a new question without a
+ * human (`auto`), the run continues immediately with that answer instead of
+ * staying blocked.
+ */
 export async function resumeRun(
+  input: ResumeRunInput,
+  dependencies: RunFlowDependencies = {},
+): Promise<RunFlowResult> {
+  let current: ResumeRunInput = input;
+  for (let resumes = 0; ; resumes += 1) {
+    try {
+      return await resumeRunOnce(current, dependencies);
+    } catch (error) {
+      const runId = autoAnsweredRunId(error);
+      if (!runId || resumes >= MAX_AUTO_ANSWER_RESUMES) throw error;
+      current = {
+        repoPath: input.repoPath,
+        runId,
+        ...(input.executionBackend ? { executionBackend: input.executionBackend } : {}),
+      };
+    }
+  }
+}
+
+async function resumeRunOnce(
   input: ResumeRunInput,
   dependencies: RunFlowDependencies = {},
 ): Promise<RunFlowResult> {
@@ -14922,7 +15032,7 @@ export async function resumeRun(
       resumableStages,
       fallbackStageId: budgetResumeStageId,
     });
-    const answeredOperatorQuestion =
+    let answeredOperatorQuestion =
       projection.blocker?.reason === "awaiting_operator_answer"
         ? (projection.questions ?? []).find(
             (question) => question.id === projection.blocker?.questionId,
@@ -15451,6 +15561,7 @@ export async function resumeRun(
                     flowMaxInputTokens: loaded.flow.spec.maxInputTokens,
                     flowMaxAttempts: loaded.flow.spec.maxAttempts,
                     flowTimeouts: loaded.flow.spec.timeouts,
+                    flowQuestions: loaded.flow.spec.questions,
                     flowBudgets: effectiveFlowBudgets(loaded.flow),
                     inputArtifacts,
                     configuration,
@@ -15552,6 +15663,10 @@ export async function resumeRun(
               if (stage.type === "agent") {
                 const contextControls = resolveStageContextControls(loaded.flow, stage);
               const readPolicy = resolveStageReadPolicy(loaded.flow.spec.reads, stage);
+                const operatorQuestion = answeredOperatorQuestion?.stageId === stage.id
+                  ? answeredOperatorQuestion : undefined;
+                // A timeout failure is one continuation failure, not a persistent retry veto.
+                if (operatorQuestion?.answer?.failStage) answeredOperatorQuestion = undefined;
                 const result = await withStageInstructionFiles({
                   stage,
                   controls: contextControls,
@@ -15572,6 +15687,7 @@ export async function resumeRun(
                     flowMaxInputTokens: loaded.flow.spec.maxInputTokens,
                     flowMaxAttempts: loaded.flow.spec.maxAttempts,
                     flowTimeouts: loaded.flow.spec.timeouts,
+                    flowQuestions: loaded.flow.spec.questions,
                     flowBudgets: effectiveFlowBudgets(loaded.flow),
                     inputArtifacts,
                     configuration,
@@ -15583,10 +15699,7 @@ export async function resumeRun(
                     readPolicy,
                     contextKnowledge,
                     previousFailures,
-                    operatorQuestion:
-                      answeredOperatorQuestion?.stageId === stage.id
-                        ? answeredOperatorQuestion
-                        : undefined,
+                    operatorQuestion,
                     taskPlanPrompt: preparedTaskPlan?.promptContext,
                     agentSessions,
                     completedStages,

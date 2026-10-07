@@ -5,6 +5,12 @@ import { resolve } from "node:path";
 import { materializeDueSchedules } from "../schedules/materialize.js";
 
 import { EventStore } from "../events/store.js";
+import {
+  AUTO_ANSWER_ACTOR,
+  answerExpiredQuestions,
+  questionPolicyResumeRunIds,
+  questionPolicyResumeDue,
+} from "../run/questions.js";
 import { createScmProvider } from "../scm/registry.js";
 import type { ChangeRequestStatus, ScmProvider } from "../scm/types.js";
 import type { ProviderConnectionStore } from "../providers/types.js";
@@ -442,6 +448,43 @@ export function usageLimitBlockedRun(input: {
   };
 }
 
+/**
+ * A run blocked on an operator question that the question policy has already
+ * answered (for example after an `ask` timeout) is ready to resume.
+ */
+export function policyAnsweredQuestionRun(input: {
+  task: WorkItemRecord;
+  eventStore: EventStore;
+}): { runId: string; retryAt: Date; runtime?: string } | undefined {
+  const runId = input.task.latestRunId;
+  if (!runId) return undefined;
+  const events = input.eventStore.list(runId);
+  if (events.length === 0) return undefined;
+  const projection = projectRun(events);
+  if (
+    projection.status !== "blocked" ||
+    projection.blocker?.reason !== "awaiting_operator_answer"
+  ) {
+    return undefined;
+  }
+  const question = (projection.questions ?? []).find(
+    (candidate) => candidate.id === projection.blocker?.questionId,
+  );
+  if (question?.status !== "answered" || question.answer?.actor !== AUTO_ANSWER_ACTOR) {
+    return undefined;
+  }
+  return { runId, retryAt: new Date(question.answer.answeredAt) };
+}
+
+function resumableBlockedRun(input: {
+  task: WorkItemRecord;
+  eventStore: EventStore;
+  now: Date;
+  persisted?: ReadonlyMap<string, Date>;
+}): { runId: string; retryAt: Date; runtime?: string } | undefined {
+  return usageLimitBlockedRun(input) ?? policyAnsweredQuestionRun(input);
+}
+
 function activeUsageLimitCooldowns(
   repoPath: string,
   tasks: readonly WorkItemRecord[],
@@ -719,7 +762,7 @@ async function resumeDueUsageLimitRuns(input: {
       return input.tasks
         .map((task) => ({
           task,
-          blocked: usageLimitBlockedRun({
+          blocked: resumableBlockedRun({
             task,
             eventStore,
             now: input.now,
@@ -767,7 +810,7 @@ async function resumeDueUsageLimitRuns(input: {
       const validationEvents = new EventStore(eventStorePath(input.repoPath));
       const currentBlocked = (() => {
         try {
-          return usageLimitBlockedRun({
+          return resumableBlockedRun({
             task: currentTask,
             eventStore: validationEvents,
             now: input.now,
@@ -843,6 +886,50 @@ async function resumeDueUsageLimitRuns(input: {
   return resumed;
 }
 
+async function resumeStandaloneQuestionRuns(input: {
+  repoPath: string;
+  tasks: WorkItemRecord[];
+  now: Date;
+  attempted: Set<string>;
+  resumeRun: (input: ResumeRunInput) => Promise<RunFlowResult>;
+  executionBackend?: string;
+}): Promise<void> {
+  const attached = new Set(input.tasks.map((task) => task.latestRunId));
+  for (const runId of questionPolicyResumeRunIds(input.repoPath, input.now)) {
+    if (attached.has(runId) || input.attempted.has(runId)) continue;
+    const claims = new ResumeClaimStore(resumeClaimStorePath(input.repoPath));
+    const token = randomUUID();
+    try {
+      if (!claims.claim({ runId, token, now: new Date() })) continue;
+      const events = new EventStore(eventStorePath(input.repoPath));
+      let due: boolean;
+      try {
+        due = questionPolicyResumeDue(projectRun(events.list(runId)), input.now);
+      } finally {
+        events.close();
+      }
+      if (!due) continue;
+      input.attempted.add(runId);
+      const afterSequence = latestRunEventSequence(input.repoPath, runId);
+      try {
+        await input.resumeRun({
+          repoPath: input.repoPath,
+          runId,
+          ...(input.executionBackend ? { executionBackend: input.executionBackend } : {}),
+        });
+      } catch (error) {
+        terminalProjectionAfterRunnerError(input.repoPath, runId, error, afterSequence);
+      }
+    } finally {
+      try {
+        claims.release(runId, token);
+      } finally {
+        claims.close();
+      }
+    }
+  }
+}
+
 export async function runSchedulerOnce(
   input: RunSchedulerOnceInput,
 ): Promise<SchedulerRunSummary> {
@@ -878,6 +965,7 @@ export async function runSchedulerOnce(
   }
 
   const attempted = new Set<string>();
+  const attemptedStandaloneRuns = new Set<string>();
   while (true) {
     const { tasks, getStatus } = await loadSchedulerWorkItems({
       ...input,
@@ -904,6 +992,15 @@ export async function runSchedulerOnce(
       now,
       usageLimitCooldownMs,
     );
+    answerExpiredQuestions({ repoPath, now });
+    await resumeStandaloneQuestionRuns({
+      repoPath,
+      tasks,
+      now,
+      attempted: attemptedStandaloneRuns,
+      resumeRun: resumer,
+      ...(input.executionBackend ? { executionBackend: input.executionBackend } : {}),
+    });
     const resumed = await resumeDueUsageLimitRuns({
       repoPath,
       tasks,

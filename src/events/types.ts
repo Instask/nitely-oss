@@ -57,6 +57,7 @@ export type RunEventType =
   | "stage.blocked"
   | "stage.question"
   | "operator.answer"
+  | "operator.question.auto-answered"
   | "operator.review.submitted"
   | "operator.review.resolved"
   | "verification.failure.diagnosed"
