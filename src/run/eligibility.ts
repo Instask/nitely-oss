@@ -20,7 +20,7 @@ import {
   isFlowSeedKey,
   resolveCatalogFlow,
 } from "../flows/catalog.js";
-import { getFlowTemplate } from "../flows/templates.js";
+import { flowTemplateEntry } from "../flows/templates.js";
 import { resolveRepositoryFlowPath } from "../flows/paths.js";
 import type { RunFlowInput } from "./run-flow.js";
 import {
@@ -118,11 +118,13 @@ async function resolveWorkItemRunFlow(
       flowDocument = (await resolveCatalogFlow(repoPath, workItem.flowId)).document;
       flowPath = workItem.flowId;
     } else if (workItem.template) {
-      const template = getFlowTemplate(workItem.template.templateId);
-      if (!template) {
+      // Template work items read the built-in Flow the template points at,
+      // from the store, and keep their `template:<id>` run label.
+      const entry = flowTemplateEntry(workItem.template.templateId);
+      if (!entry) {
         throw new Error(`flow template not found: ${workItem.template.templateId}`);
       }
-      flowDocument = template.document;
+      flowDocument = (await resolveCatalogFlow(repoPath, entry.flowPath)).document;
     } else if (isFlowSeedKey(workItem.flowPath)) {
       // Catalog Flows run the stored document, so a customized or upgraded
       // system Flow takes effect without a file change.

@@ -80,7 +80,29 @@ Flows (built-in + user)
   -> Run: create a task from the flow, filling its declared inputs
 ```
 
-Templates: Dev PR, Rework PR, Approval pipeline, Research pipeline.
+Templates are named starting points over built-in Flows, not separate
+documents. Each template id points at a `flows/<name>.json` built-in Flow, and
+its document is read from the Flow store, so an edited built-in Flow is what the
+template copies and runs, and a disabled one is not offered (work items created
+from it are blocked like any other disabled Flow). Template ids stored on
+existing work items (`template:<id>`) keep resolving the same way.
+
+| Template id | Built-in Flow |
+| --- | --- |
+| `plan-approve-implement` | `flows/plan-approve-implement-bootstrap.json` |
+| `dev-pr` | `flows/implement-spec-bootstrap.json` |
+| `rework-pr` | `flows/rework-pr-bootstrap.json` |
+| `converge-feature-artifacts` | `flows/converge-feature-artifacts.json` |
+| `pilot-approved-spec-pr` | `flows/pilot-approved-spec-pr.json` |
+| `pilot-issue-to-production` | `flows/pilot-issue-to-production.json` |
+| `pilot-bug-ticket-fix-pr` | `flows/pilot-bug-ticket-fix-pr.json` |
+| `pilot-pr-review-rework` | `flows/pilot-pr-review-rework.json` |
+| `approval-pipeline` | `flows/approval-pipeline.json` |
+| `research-pipeline` | `flows/research-pipeline.json` |
+
+`GET /api/flows/templates` returns each template with `flowPath` (the built-in
+Flow), `edited`, and `documentHash` (digest of the stored document) alongside
+the existing fields; `version` stays `1.0.0`.
 
 ## Validation
 

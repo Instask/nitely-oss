@@ -5,7 +5,15 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { validateFlowDocument } from "../../src/flows/validate.js";
-import { flowTemplates } from "../../src/flows/templates.js";
+import { listFlowTemplates } from "../../src/flows/templates.js";
+import { mkdtemp as mkdtempForTemplates } from "node:fs/promises";
+import { tmpdir as tmpdirForTemplates } from "node:os";
+import { join as joinForTemplates } from "node:path";
+
+// Templates read the seeded built-in Flows from a (fresh) Flow store.
+const flowTemplates = await listFlowTemplates(
+  await mkdtempForTemplates(joinForTemplates(tmpdirForTemplates(), "nitely-templates-")),
+);
 
 async function createRepo(policy?: string[] | Record<string, unknown>) {
   const repo = await mkdtemp(join(tmpdir(), "nitely-flow-validate-"));

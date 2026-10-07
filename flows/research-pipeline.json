@@ -1,0 +1,39 @@
+{
+  "apiVersion": "nitely.dev/v1alpha1",
+  "kind": "Flow",
+  "metadata": {
+    "name": "research-pipeline",
+    "inputs": [
+      {
+        "id": "research-task"
+      }
+    ]
+  },
+  "spec": {
+    "stages": [
+      {
+        "id": "research",
+        "type": "agent",
+        "runtime": "codex",
+        "prompt": "Research the task and cite evidence.",
+        "inputs": [
+          "research-task"
+        ],
+        "outputs": [
+          "research-report"
+        ]
+      },
+      {
+        "id": "summarize",
+        "type": "command",
+        "command": "true",
+        "inputs": [
+          "research-report"
+        ],
+        "outputs": [
+          "signal"
+        ]
+      }
+    ]
+  }
+}

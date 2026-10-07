@@ -20,7 +20,7 @@ import {
   resolveCatalogFlow,
   type ResolvedCatalogFlow,
 } from "../flows/catalog.js";
-import { getFlowTemplate } from "../flows/templates.js";
+import { flowTemplateEntry } from "../flows/templates.js";
 import { resolveRepositoryFlowPath } from "../flows/paths.js";
 import { resolveProviderStore } from "../providers/index.js";
 import type {
@@ -646,7 +646,11 @@ export async function evaluateRunPreflight(
 export async function evaluateWorkItemRunPreflight(
   input: EvaluateWorkItemRunPreflightInput,
 ): Promise<RunPreflightReport> {
+  const templateEntry = !input.workItem.flowId && input.workItem.template
+    ? flowTemplateEntry(input.workItem.template.templateId)
+    : undefined;
   const catalogReference = input.workItem.flowId
+    ?? templateEntry?.flowPath
     ?? (isFlowSeedKey(input.workItem.flowPath) ? input.workItem.flowPath : undefined);
   if (catalogReference !== undefined) {
     let resolved: ResolvedCatalogFlow | undefined;
@@ -657,7 +661,7 @@ export async function evaluateWorkItemRunPreflight(
     } catch (error) {
       // A missing built-in key falls through to the file check below, which
       // reports the same error it always has; a missing stored Flow throws.
-      if (!(error instanceof CatalogFlowNotFoundError) || input.workItem.flowId) {
+      if (!(error instanceof CatalogFlowNotFoundError) || input.workItem.flowId || templateEntry) {
         throw error;
       }
     }
@@ -666,7 +670,9 @@ export async function evaluateWorkItemRunPreflight(
         repoPath: input.repoPath,
         flowPath: input.workItem.flowId
           ? input.workItem.flowId
-          : await catalogFlowRunLabel(input.repoPath, resolved),
+          : templateEntry
+            ? input.workItem.flowPath
+            : await catalogFlowRunLabel(input.repoPath, resolved),
         flowDocument: resolved.document,
         inputs: input.workItem.inputs,
         configuration: input.workItem.configuration,
@@ -688,21 +694,6 @@ export async function evaluateWorkItemRunPreflight(
           ),
           ...report.issues,
         ],
-      });
-    }
-  }
-  if (input.workItem.template) {
-    const template = getFlowTemplate(input.workItem.template.templateId);
-    if (template) {
-      return evaluateRunPreflight({
-        repoPath: input.repoPath,
-        flowPath: input.workItem.flowPath,
-        flowDocument: template.document,
-        inputs: input.workItem.inputs,
-        configuration: input.workItem.configuration,
-        providerStore: input.providerStore,
-        executionBackend: input.executionBackend,
-        env: input.env,
       });
     }
   }

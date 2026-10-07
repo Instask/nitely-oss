@@ -374,9 +374,10 @@ import { validateFlowDocument } from "../flows/validate.js";
 import {
   flowTemplateDocumentForCopy,
   flowTemplateLineage,
-  flowTemplates,
   getFlowTemplate,
+  listFlowTemplates,
 } from "../flows/templates.js";
+import { CatalogFlowDisabledError } from "../flows/catalog.js";
 import { listFlowViews, getFlowView } from "./flows.js";
 import {
   assignNotification,
@@ -2648,25 +2649,28 @@ function replaceSpecInputFromJson(value: unknown): { spec: string } {
   return { spec: record.spec };
 }
 
-function taskTemplateSelection(templateId: string | undefined):
+async function getTemplateForWeb(repoPath: string, templateId: string) {
+  try {
+    const template = await getFlowTemplate(repoPath, templateId);
+    if (!template) throw new WebInputError("flow template not found");
+    return template;
+  } catch (error) {
+    if (error instanceof CatalogFlowDisabledError) throw new WebInputError(error.message);
+    throw error;
+  }
+}
+
+async function taskTemplateSelection(repoPath: string, templateId: string | undefined): Promise<
   | {
       flowPath: string;
       template: ReturnType<typeof flowTemplateLineage>;
     }
-  | undefined {
+  | undefined> {
   const trimmed = templateId?.trim();
   if (!trimmed) {
     return undefined;
   }
-  const template = getFlowTemplate(trimmed);
-  if (!template) {
-    throw new WebInputError("flow template not found");
-  }
-  if (!template.flowPath) {
-    throw new WebInputError(
-      "flow template cannot create a legacy task because it has no repository flow path",
-    );
-  }
+  const template = await getTemplateForWeb(repoPath, trimmed);
   const unsupportedInputs = template.inputs
     .filter((input) => input.required)
     .map((input) => input.id)
@@ -9108,7 +9112,7 @@ async function handleApiRequest(
       user,
       organizationId,
     );
-    const templateSelection = taskTemplateSelection(taskInput.templateId);
+    const templateSelection = await taskTemplateSelection(repository.path, taskInput.templateId);
     const task = await createTask(
       repository.path,
       {
@@ -9397,7 +9401,7 @@ async function handleApiRequest(
         ...(conversationTurns ? { conversation: conversationTurns } : {}),
       };
     }
-    const templateSelection = taskTemplateSelection(draftInput.templateId);
+    const templateSelection = await taskTemplateSelection(repository.path, draftInput.templateId);
     const selectedFlowPath = templateSelection?.flowPath ?? draftInput.flowPath;
     const draftContextKnowledge = await selectDraftSpecContextKnowledge({
       repoPath: repository.path,
@@ -10586,7 +10590,7 @@ async function handleApiRequest(
 
   if (request.method === "GET" && url.pathname === "/api/flows/templates") {
     await requireUserContext(request, input, homeRepoPath);
-    sendJson(response, 200, { templates: flowTemplates });
+    sendJson(response, 200, { templates: await listFlowTemplates(homeRepoPath) });
     return true;
   }
 
@@ -10598,10 +10602,7 @@ async function handleApiRequest(
         : undefined;
     const body = requireObject(await readRequestJson(request));
     const templateId = typeof body.templateId === "string" ? body.templateId.trim() : "";
-    const template = getFlowTemplate(templateId);
-    if (!template) {
-      throw new WebInputError("flow template not found");
-    }
+    const template = await getTemplateForWeb(homeRepoPath, templateId);
     const reviewStagePrompt =
       typeof body.reviewStagePrompt === "string"
         ? body.reviewStagePrompt

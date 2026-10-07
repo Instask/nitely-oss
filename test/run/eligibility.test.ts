@@ -232,7 +232,7 @@ describe("run eligibility", () => {
   it("uses one template Flow snapshot for preflight and runner input", async () => {
     const repoPath = await createRepo();
     await writeFile(join(repoPath, "research.md"), "Research Nitely.", "utf8");
-    const template = getFlowTemplate("research-pipeline")!;
+    const template = (await getFlowTemplate(repoPath, "research-pipeline"))!;
     const providerStore: ProviderConnectionStore = {
       getConnection: async (providerId) => ({
         providerId,

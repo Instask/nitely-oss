@@ -965,7 +965,7 @@ describe("scheduler runner", () => {
   it("runs template-backed work items with the evaluated Flow snapshot", async () => {
     const repoPath = await createRepo();
     await writeFile(join(repoPath, "research.md"), "Research Nitely.", "utf8");
-    const template = getFlowTemplate("research-pipeline")!;
+    const template = (await getFlowTemplate(repoPath, "research-pipeline"))!;
     await createWorkItem(
       repoPath,
       {
