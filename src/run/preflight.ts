@@ -183,7 +183,7 @@ async function loadPreflightFlow(
   try {
     const document = input.flowDocument !== undefined
       ? input.flowDocument
-      : (await resolveRunFlowSource(input.repoPath, input.flowPath, { cwd: input.repoPath }))
+      : (await resolveRunFlowSource(input.repoPath, input.flowPath))
           .flowDocument;
     // External inputs come from the Flow itself (declared + unproduced stage
     // inputs), so a valid Flow is never reported invalid because the run did

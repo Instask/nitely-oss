@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -33,6 +33,7 @@ import {
 } from "../../src/flows/catalog.js";
 import { flowDocumentHash } from "../../src/flows/store.js";
 import { runFlow } from "../../src/run/run-flow.js";
+import { runCli } from "../../src/cli.js";
 import { evaluateRunPreflight } from "../../src/run/preflight.js";
 import type { ExecutionBackend } from "../../src/run/execution/types.js";
 
@@ -173,5 +174,125 @@ describe("CLI/runtime Flow references resolve through the repository Flow catalo
     await expect(dependencies.applySamePullRequestRepair({ observation } as never))
       .rejects.toBeInstanceOf(CatalogFlowDisabledError);
     expect(runFlowCalls).toHaveLength(0);
+  });
+
+  describe("relative references are anchored to repoPath, not process.cwd()", () => {
+    async function outsideCwd(): Promise<string> {
+      const elsewhere = await realpath(await mkdtemp(join(tmpdir(), "nitely-elsewhere-")));
+      // A decoy shipped file at the cwd-relative location must never be used.
+      await mkdir(join(elsewhere, "flows"), { recursive: true });
+      await writeFile(join(elsewhere, "flows/foo.json"), flow("foo", "printf decoy"), "utf8");
+      await writeFile(join(elsewhere, "custom.json"), flow("custom", "printf decoy"), "utf8");
+      vi.spyOn(process, "cwd").mockReturnValue(elsewhere);
+      return elsewhere;
+    }
+
+    it("preflight and run both use the edited stored Flow for ./flows/foo.json", async () => {
+      const repo = await createRepo();
+      const edited = flow("foo", "printf edited");
+      await updateCatalogFlowDocument(repo, "flows/foo.json", edited);
+      await outsideCwd();
+      try {
+        const source = await resolveRunFlowSource(repo, "./flows/foo.json");
+        expect(source).toMatchObject({ flowDocument: edited, catalogId: expect.any(String) });
+        const report = await evaluateRunPreflight({ repoPath: repo, flowPath: "./flows/foo.json", inputs: {} });
+        expect(report.issues.map((issue) => issue.code)).not.toContain("flow-invalid");
+        await setCatalogFlowEnabled(repo, "flows/foo.json", false);
+        const blocked = await evaluateRunPreflight({ repoPath: repo, flowPath: "./flows/foo.json", inputs: {} });
+        expect(blocked.issues.map((issue) => issue.code)).toContain("flow-disabled");
+        await setCatalogFlowEnabled(repo, "flows/foo.json", true);
+
+        await expect(runFlow(
+          { repoPath: repo, flowPath: "./flows/foo.json", inputs: {}, __real: true } as never,
+          { createRunId: () => "run-rel", backend: stopBackend },
+        )).rejects.toThrow("stop after run.created");
+        expect(runCreated(repo, "run-rel")).toMatchObject({
+          flowPath: "./flows/foo.json",
+          flowDocument: edited,
+          flowDocumentSha256: flowDocumentHash(edited),
+        });
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+
+    it("preflight and run both read repoPath/custom.json for ./custom.json", async () => {
+      const repo = await createRepo();
+      await outsideCwd();
+      try {
+        const custom = flow("custom", "printf custom");
+        expect(catalogSeedKeyForFlowReference(repo, "./custom.json")).toBeUndefined();
+        expect(await resolveRunFlowSource(repo, "./custom.json")).toEqual({
+          flowPath: "./custom.json",
+          flowDocument: custom,
+        });
+        const report = await evaluateRunPreflight({ repoPath: repo, flowPath: "./custom.json", inputs: {} });
+        expect(report.issues.map((issue) => issue.code)).not.toContain("flow-invalid");
+        await expect(runFlow(
+          { repoPath: repo, flowPath: "./custom.json", inputs: {}, __real: true } as never,
+          { createRunId: () => "run-rel-custom", backend: stopBackend },
+        )).rejects.toThrow("stop after run.created");
+        expect(runCreated(repo, "run-rel-custom")).toMatchObject({
+          flowDocumentSha256: flowDocumentHash(custom),
+        });
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+  });
+
+  describe("run-stage resolves through the catalog", () => {
+    async function runStage(repo: string, reference: string) {
+      const calls: Array<Record<string, unknown>> = [];
+      const stderr: string[] = [];
+      const code = await runCli(
+        ["run-stage", reference, "verify", "--repo", repo],
+        { stdout: () => undefined, stderr: (line) => stderr.push(line) },
+        {
+          runFlow: (async (input: Record<string, unknown>) => {
+            calls.push(input);
+            return { runId: "run-stage", branchName: "b", worktreePath: "/w" };
+          }) as never,
+        },
+      );
+      return { code, calls, stderr };
+    }
+    const command = (call: Record<string, unknown> | undefined) =>
+      (JSON.parse(String(call?.flowDocument)) as { spec: { stages: Array<{ command: string }> } })
+        .spec.stages[0]?.command;
+
+    it("extracts the stage from the edited stored built-in", async () => {
+      const repo = await createRepo();
+      await updateCatalogFlowDocument(repo, "flows/foo.json", flow("foo", "printf edited"));
+      await (async () => {
+        const elsewhere = await realpath(await mkdtemp(join(tmpdir(), "nitely-elsewhere-")));
+        vi.spyOn(process, "cwd").mockReturnValue(elsewhere);
+      })();
+      try {
+        const { code, calls, stderr } = await runStage(repo, "./flows/foo.json");
+        expect(stderr).toEqual([]);
+        expect(code).toBe(0);
+        expect(command(calls[0])).toBe("printf edited");
+        expect(calls[0]?.flowPath).toBe("./flows/foo.json");
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+
+    it("refuses a disabled built-in without executing the stage", async () => {
+      const repo = await createRepo();
+      await setCatalogFlowEnabled(repo, "flows/foo.json", false);
+      const { code, calls } = await runStage(repo, "flows/foo.json");
+      expect(code).not.toBe(0);
+      expect(calls).toHaveLength(0);
+    });
+
+    it("keeps explicit file behavior", async () => {
+      const repo = await createRepo();
+      const { code, calls } = await runStage(repo, join(repo, "custom.json"));
+      expect(code).toBe(0);
+      expect(command(calls[0])).toBe("printf custom");
+      expect(calls[0]?.flowPath).toBe(join(repo, "custom.json"));
+    });
   });
 });

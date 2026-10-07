@@ -430,7 +430,7 @@ export interface RunFlowSource {
 /**
  * The catalog seed key a Flow file reference names, if any. A reference is a
  * catalog Flow when it is `flows/<name>.json` relative to the repository, or
- * an absolute/cwd-relative path to the repository's or this installation's
+ * an absolute or repoPath-relative path to the repository's or this installation's
  * `flows/<name>.json`. Anything else is an explicit Flow file.
  */
 export function catalogSeedKeyForFlowReference(
@@ -439,7 +439,7 @@ export function catalogSeedKeyForFlowReference(
   options: { cwd?: string; bundledRoot?: string } = {},
 ): string | undefined {
   if (isFlowSeedKey(reference)) return reference;
-  const absolute = resolve(options.cwd ?? process.cwd(), reference);
+  const absolute = resolve(options.cwd ?? repoPath, reference);
   for (const root of [repoPath, options.bundledRoot ?? bundledFlowsRoot()]) {
     const fromRoot = relative(resolve(root), absolute).replaceAll("\\", "/");
     if (isFlowSeedKey(fromRoot)) return fromRoot;
@@ -450,7 +450,9 @@ export function catalogSeedKeyForFlowReference(
 /**
  * Resolve the Flow a CLI/runtime entry point runs against `repoPath`. Catalog
  * references read the stored document (edited built-ins honored, disabled
- * Flows refused); explicit non-catalog files are read as given. The label
+ * Flows refused); explicit non-catalog files are read as given. Relative
+ * references are anchored to `repoPath` (never `process.cwd()`), absolute
+ * references stay absolute, so every entry point agrees. The label
  * stays the caller's reference so run labels are unchanged.
  */
 export async function resolveRunFlowSource(
@@ -465,6 +467,6 @@ export async function resolveRunFlowSource(
   }
   return {
     flowPath: reference,
-    flowDocument: await readFile(resolve(options.cwd ?? process.cwd(), reference), "utf8"),
+    flowDocument: await readFile(resolve(options.cwd ?? repoPath, reference), "utf8"),
   };
 }
