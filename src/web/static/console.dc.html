@@ -1502,20 +1502,30 @@
             <h1 style="margin:0 0 5px;font-size:25px;font-weight:600;letter-spacing:-.02em;color:var(--ink);">Flows</h1>
             <p style="margin:0;font-size:13.5px;color:var(--muted);">Built-in repository flows and your custom flows. Create a flow type, then run a work item from it.</p>
           </div>
+          <div class="mobile-actions" style="display:flex;gap:8px;align-items:center;">
+          <label style="display:flex;gap:6px;align-items:center;font-size:12px;color:var(--muted);">Repository
+            <select data-flow-repo-select="true" value="{{ flowRepoId }}" onChange="{{ selectFlowRepository }}" style="{{ inputStyle }}">
+              <option value="">Home (default)</option>
+              <sc-for list="{{ flowRepositoryOptions }}" as="r" hint-placeholder-count="2"><option value="{{ r.id }}">{{ r.name }}</option></sc-for>
+            </select>
+          </label>
           <button onClick="{{ newFlow }}" style="display:inline-flex;align-items:center;gap:7px;border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:8px;padding:9px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;box-shadow:0 1px 2px rgba(0,0,0,.12);">
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>
             New flow
           </button>
+          </div>
         </div>
+        <sc-if value="{{ flowManageError }}" hint-placeholder-val="{{ false }}"><div role="alert" style="margin:-12px 0 14px;font-size:12.5px;color:#b91c1c;overflow-wrap:anywhere;">{{ flowManageError }}</div></sc-if>
         <div class="mobile-card-list" style="background:var(--panel);border:1px solid var(--line);border-radius:13px;overflow:hidden;">
-          <div class="mobile-grid-head" style="display:grid;grid-template-columns:minmax(0,2fr) 150px 90px 110px;gap:14px;padding:11px 18px;border-bottom:1px solid var(--line);background:var(--panel-2);">
+          <div class="mobile-grid-head" style="display:grid;grid-template-columns:minmax(0,2fr) 150px 90px 110px 190px;gap:14px;padding:11px 18px;border-bottom:1px solid var(--line);background:var(--panel-2);">
             <span style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Flow</span>
             <span style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Type</span>
             <span style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Stages</span>
             <span style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Source</span>
+            <span style="font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);">Status</span>
           </div>
           <sc-for list="{{ flows }}" as="f" hint-placeholder-count="4">
-            <div class="mobile-grid-row" data-id="{{ f.id }}" onClick="{{ openFlow }}" style="display:grid;grid-template-columns:minmax(0,2fr) 150px 90px 110px;gap:14px;padding:var(--rpad) 18px;border-bottom:1px solid var(--line-soft);align-items:center;cursor:pointer;" style-hover="background:var(--panel-2);">
+            <div class="mobile-grid-row" data-id="{{ f.id }}" onClick="{{ openFlow }}" style="display:grid;grid-template-columns:minmax(0,2fr) 150px 90px 110px 190px;gap:14px;padding:var(--rpad) 18px;border-bottom:1px solid var(--line-soft);align-items:center;cursor:pointer;" style-hover="background:var(--panel-2);">
               <div style="min-width:0;">
                 <div style="font-size:14px;font-weight:600;color:var(--ink);letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ f.name }}</div>
                 <div style="font-family:'Geist Mono',monospace;font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;">{{ f.id }}</div>
@@ -1523,6 +1533,10 @@
               <div><span style="font-family:'Geist Mono',monospace;font-size:12px;color:var(--ink);background:var(--panel-2);border:1px solid var(--line);border-radius:6px;padding:2px 7px;">{{ f.workItemTypeLabel }}</span></div>
               <div style="font-family:'Geist Mono',monospace;font-size:13px;color:var(--muted);">{{ f.stageCount }}</div>
               <div><span style="{{ f.sourceBadge.style }}">{{ f.sourceBadge.label }}</span></div>
+              <div style="display:flex;flex-wrap:wrap;gap:5px;align-items:center;">
+                <sc-for list="{{ f.statusBadges }}" as="b" hint-placeholder-count="1"><span data-flow-badge="{{ b.key }}" style="{{ b.style }}">{{ b.label }}</span></sc-for>
+                <sc-if value="{{ f.canToggle }}" hint-placeholder-val="{{ false }}"><button data-id="{{ f.id }}" data-enabled="{{ f.nextEnabled }}" onClick="{{ toggleFlowEnabled }}" style="border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:6px;padding:2px 8px;font:inherit;font-size:11px;cursor:pointer;">{{ f.toggleLabel }}</button></sc-if>
+              </div>
             </div>
           </sc-for>
         </div>
@@ -1542,6 +1556,9 @@
           </div>
           <div class="mobile-actions" style="display:flex;gap:8px;align-items:center;">
             <span style="font-size:12px;color:var(--muted);">{{ flowDraftStatus }}</span>
+            <sc-for list="{{ selectedFlowStatusBadges }}" as="b" hint-placeholder-count="1"><span data-flow-badge="{{ b.key }}" style="{{ b.style }}">{{ b.label }}</span></sc-for>
+            <sc-if value="{{ selectedFlowCanToggle }}" hint-placeholder-val="{{ false }}"><button data-id="{{ selectedFlowId }}" data-enabled="{{ selectedFlowNextEnabled }}" onClick="{{ toggleFlowEnabled }}" style="border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:8px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;">{{ selectedFlowToggleLabel }}</button></sc-if>
+            <sc-if value="{{ selectedFlowCanReset }}" hint-placeholder-val="{{ false }}"><button data-id="{{ selectedFlowId }}" onClick="{{ resetFlow }}" style="border:1px solid #fca5a5;background:var(--panel);color:#b91c1c;border-radius:8px;padding:8px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;">Reset to built-in</button></sc-if>
             <sc-if value="{{ flowEditorEditable }}" hint-placeholder-val="{{ true }}"><button onClick="{{ saveFlow }}" style="border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:8px;padding:8px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;">Save flow</button></sc-if>
             <sc-if value="{{ flowEditorRunnableWithoutConfigurables }}" hint-placeholder-val="{{ false }}"><button data-id="{{ selectedFlowId }}" onClick="{{ runFromFlow }}" style="border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:8px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;">Run</button></sc-if>
           </div>
@@ -2941,6 +2958,8 @@ class Component extends DCLogic {
       scheduler: null,
       flows: [],
       flowTemplates: [],
+      flowRepoId: "",
+      flowManageError: "",
       selectedFlowId: null,
       selectedFlowStageId: null,
       flowDraftDocument: "",
@@ -3085,8 +3104,8 @@ class Component extends DCLogic {
           this.api("/api/agent-stability"),
           this.api("/api/scheduler"),
           this.api("/api/factory-queue"),
-          this.api("/api/flows"),
-          this.api("/api/flows/templates"),
+          this.api(this.flowApiPath("/api/flows")),
+          this.api(this.flowApiPath("/api/flows/templates")),
           this.api("/api/runs"),
           this.api("/api/providers"),
           this.api("/api/notifications"),
@@ -3501,8 +3520,82 @@ class Component extends DCLogic {
     });
   }
 
+  // Flow APIs are repository-scoped: every Flow request carries the selected
+  // repoId (empty = the server's home repository).
+  flowApiPath(path) {
+    const repoId = this.state.flowRepoId || "";
+    return repoId ? path + (path.includes("?") ? "&" : "?") + "repoId=" + encodeURIComponent(repoId) : path;
+  }
+
+  flowRepoBody(body) {
+    const repoId = this.state.flowRepoId || "";
+    return repoId ? Object.assign({}, body, { repoId }) : body;
+  }
+
+  async flowErrorMessage(res, fallback) {
+    const body = await res.json().catch(() => ({}));
+    return (body && (body.error || body.message)) || (fallback + " (" + res.status + ")");
+  }
+
+  async fetchFlowCatalog() {
+    const [flowsRes, templatesRes] = await Promise.all([
+      this.api(this.flowApiPath("/api/flows")),
+      this.api(this.flowApiPath("/api/flows/templates")),
+    ]);
+    this.setState({ flows: flowsRes?.flows ?? [], flowTemplates: templatesRes?.templates ?? [] });
+  }
+
+  selectFlowRepository = async (e) => {
+    const repoId = e.currentTarget.value || "";
+    this.setState({ flowRepoId: repoId, flowDetails: {}, flowManageError: "", flows: [], flowTemplates: [] });
+    await this.fetchFlowCatalog();
+    if (this.state.selectedFlowId && this.state.view === "flow-detail") {
+      await this.fetchFlowDetail(this.state.selectedFlowId);
+    }
+  };
+
+  toggleFlowEnabled = async (e) => {
+    if (e?.stopPropagation) e.stopPropagation();
+    const flowId = e.currentTarget.dataset.id;
+    const enabled = e.currentTarget.dataset.enabled === "true";
+    this.setState({ flowManageError: "" });
+    const res = await fetch("/api/flows/" + encodeURIComponent(flowId), {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(this.flowRepoBody({ enabled })),
+    });
+    if (!res.ok) {
+      this.setState({ flowManageError: await this.flowErrorMessage(res, enabled ? "Enable failed" : "Disable failed") });
+      return;
+    }
+    await this.fetchFlowCatalog();
+    if (this.state.flowDetails[flowId]) await this.fetchFlowDetail(flowId);
+  };
+
+  resetFlow = async (e) => {
+    const flowId = e.currentTarget.dataset.id;
+    const detail = this.state.flowDetails[flowId];
+    const message = "Reset \"" + (detail?.name || flowId) + "\" to the shipped built-in version? Your edits to this flow are discarded; enabled/disabled is kept.";
+    if (!window.confirm(message)) return;
+    this.setState({ flowManageError: "", flowDraftStatus: "Resetting..." });
+    const res = await fetch(this.flowApiPath("/api/flows/" + encodeURIComponent(flowId) + "/reset"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(this.flowRepoBody({})),
+    });
+    if (!res.ok) {
+      const error = await this.flowErrorMessage(res, "Reset failed");
+      this.setState({ flowManageError: error, flowDraftStatus: error });
+      return;
+    }
+    await this.fetchFlowCatalog();
+    await this.fetchFlowDetail(flowId);
+  };
+
   async fetchFlowDetail(flowId) {
-    const res = await this.api("/api/flows/" + encodeURIComponent(flowId));
+    const res = await this.api(this.flowApiPath("/api/flows/" + encodeURIComponent(flowId)));
     if (res?.flow) {
       this.setState((s) => ({
         flowDetails: Object.assign({}, s.flowDetails, { [flowId]: res.flow }),
@@ -3551,7 +3644,7 @@ class Component extends DCLogic {
     const res = await this.api("/api/flows/validate", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ document }),
+      body: JSON.stringify(this.flowRepoBody({ document })),
     });
     if (res?.report) this.setState({ flowDraftReport: res.report });
   }
@@ -3559,14 +3652,17 @@ class Component extends DCLogic {
   saveFlow = async () => {
     const document = this.state.flowDraftDocument;
     const editingId = this.state.selectedFlowId;
-    const isUserEdit = editingId && !editingId.startsWith("flows/");
+    // Editing an existing catalog Flow (custom, or a built-in the user may
+    // manage) replaces its stored document; a new flow is created.
+    const editingDetail = editingId ? this.state.flowDetails[editingId] : null;
+    const isEdit = !!editingId && editingDetail?.editable === true;
     this.setState({ flowDraftStatus: "Saving..." });
-    const path = isUserEdit ? "/api/flows/" + encodeURIComponent(editingId) : "/api/flows";
+    const path = isEdit ? "/api/flows/" + encodeURIComponent(editingId) : "/api/flows";
     const res = await fetch(path, {
-      method: isUserEdit ? "PUT" : "POST",
+      method: isEdit ? "PUT" : "POST",
       headers: { "content-type": "application/json" },
       credentials: "same-origin",
-      body: JSON.stringify({ document }),
+      body: JSON.stringify(this.flowRepoBody({ document })),
     });
     if (res.status === 422) {
       const body = await res.json().catch(() => ({}));
@@ -3574,12 +3670,14 @@ class Component extends DCLogic {
       return;
     }
     if (!res.ok) {
-      this.setState({ flowDraftStatus: "Save failed" });
+      this.setState({ flowDraftStatus: await this.flowErrorMessage(res, "Save failed") });
       return;
     }
     const body = await res.json();
     await this.fetchData();
-    this.navigate({ view: "flow-detail", flowId: body.flow.id });
+    const savedId = isEdit ? editingId : body.flow.id;
+    if (isEdit) await this.fetchFlowDetail(savedId);
+    this.navigate({ view: "flow-detail", flowId: savedId });
   };
 
   flowConfigStateKey(flowId, key) {
@@ -3731,9 +3829,9 @@ class Component extends DCLogic {
       inputs[input.id] = { connector: "local-file", uri: "" };
     }
     const configuration = this.flowRunConfiguration(flowId, detail);
-    const body = flowId.startsWith("flows/")
+    const body = this.flowRepoBody(flowId.startsWith("flows/")
       ? { title: detail?.name || flowId, flowPath: flowId, inputs, ...(Object.keys(configuration).length > 0 ? { configuration } : {}) }
-      : { title: detail?.name || flowId, flowId, inputs, ...(Object.keys(configuration).length > 0 ? { configuration } : {}) };
+      : { title: detail?.name || flowId, flowId, inputs, ...(Object.keys(configuration).length > 0 ? { configuration } : {}) });
     this.setState({ flowDraftStatus: "Starting..." });
     const res = await fetch("/api/work-items", {
       method: "POST",
@@ -7164,7 +7262,17 @@ class Component extends DCLogic {
     const dataLoadingClass = hasDataLoadError ? "is-error" : (isDataSyncing ? "is-syncing" : "");
     const canShowMainContent = !showInitialLoading;
 
+    const flowBadge = (key, label, color, background) => ({ key, label, style: { fontFamily: "'Geist Mono', monospace", fontSize: "11px", color, background, borderRadius: "6px", padding: "2px 8px", whiteSpace: "nowrap" } });
+    const flowStatusBadges = (f) => [
+      f.enabled === false ? flowBadge("disabled", "Disabled", "var(--muted)", "var(--panel-2)") : null,
+      f.customized ? flowBadge("edited", "Edited", "#92400e", "#fef3c7") : null,
+      f.upstreamUpdateAvailable ? flowBadge("update", "Newer version", "#1d4ed8", "#dbeafe") : null,
+    ].filter(Boolean);
     const flows = this.state.flows.map((f) => ({
+      statusBadges: flowStatusBadges(f),
+      canToggle: f.editable === true,
+      nextEnabled: f.enabled === false ? "true" : "false",
+      toggleLabel: f.enabled === false ? "Enable" : "Disable",
       id: f.id,
       name: f.name,
       stageCount: f.stageCount,
@@ -7177,7 +7285,10 @@ class Component extends DCLogic {
     const selectedFlow = selectedFlowId ? this.state.flowDetails[selectedFlowId] : null;
     const isFlowEditor = view === "flow-new" || view === "flow-detail";
     const flowEditorEditable = view === "flow-new" || (!!selectedFlow && selectedFlow.editable === true);
-    const flowEditorRunnable = view === "flow-detail" && !!selectedFlow;
+    const flowEditorRunnable = view === "flow-detail" && !!selectedFlow && selectedFlow.enabled !== false;
+    const selectedFlowStatusBadges = view === "flow-detail" && selectedFlow ? flowStatusBadges(selectedFlow) : [];
+    const selectedFlowCanToggle = view === "flow-detail" && !!selectedFlow && selectedFlow.editable === true;
+    const selectedFlowCanReset = selectedFlowCanToggle && selectedFlow.source === "builtin" && (selectedFlow.customized === true || selectedFlow.upstreamUpdateAvailable === true);
     const selectedFlowConfigurables = (selectedFlow?.configurables || []).map((configurable) => {
       const type = configurable.type || "text";
       const currentValue = this.flowConfigCurrentValue(selectedFlowId || "", configurable);
@@ -7402,6 +7513,12 @@ class Component extends DCLogic {
       isTaskDetail: canShowMainContent && view === "task-detail",
       isRunDetail: canShowMainContent && view === "run-detail",
       flows, selectedFlowId,
+      flowRepoId: this.state.flowRepoId || "",
+      flowRepositoryOptions: (this.state.repositories || []).map((r) => ({ id: r.id, name: r.name || r.id })),
+      flowManageError: this.state.flowManageError || "",
+      selectedFlowStatusBadges, selectedFlowCanToggle, selectedFlowCanReset,
+      selectedFlowNextEnabled: selectedFlow?.enabled === false ? "true" : "false",
+      selectedFlowToggleLabel: selectedFlow?.enabled === false ? "Enable" : "Disable",
       flowTemplates: this.state.flowTemplates,
       taskFlowTemplates,
       flowEditorTitle: view === "flow-new" ? "New flow" : (selectedFlow?.name || selectedFlowId || "Flow"),
@@ -7432,6 +7549,7 @@ class Component extends DCLogic {
       hasDemoResult: !!demoResult,
       newFlow: this.newFlow, openFlow: this.openFlow, pickTemplate: this.pickTemplate,
       editFlowDraft: this.editFlowDraft, editFlowConfig: this.editFlowConfig, saveFlow: this.saveFlow, runFromFlow: this.runFromFlow,
+      selectFlowRepository: this.selectFlowRepository, toggleFlowEnabled: this.toggleFlowEnabled, resetFlow: this.resetFlow,
       previewSkillImport: this.previewSkillImport, confirmSkillImport: this.confirmSkillImport,
       addSkillToFlowStage: this.addSkillToFlowStage,
       refreshPreviewSessions: this.refreshPreviewSessions,
