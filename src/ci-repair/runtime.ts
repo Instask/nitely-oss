@@ -18,6 +18,7 @@ import {
 import { redactText } from "../context/redaction.js";
 import { EventStore } from "../events/store.js";
 import { eventStorePath } from "../run/project.js";
+import { resolveRunFlowSource } from "../flows/catalog.js";
 import { runFlow, type RunFlowInput } from "../run/run-flow.js";
 import type { ResourceReference } from "../connectors/types.js";
 import {
@@ -400,7 +401,11 @@ export function defaultCiRepairDependencies(input: {
       );
       await mkdir(dirname(failurePath), { recursive: true });
       await writeFile(failurePath, `${JSON.stringify(repairInput.observation, null, 2)}\n`, "utf8");
-      const flowDocument = JSON.parse(await readFile(input.flowPath, "utf8")) as {
+      // Resolve through the repository's Flow catalog: a built-in reference
+      // runs the stored (possibly edited) document and a disabled Flow is
+      // refused; an explicit non-catalog file is read as given.
+      const source = await resolveRunFlowSource(input.repoPath, input.flowPath);
+      const flowDocument = JSON.parse(source.flowDocument) as {
         spec?: { stages?: Array<{ type?: string; inputs?: string[] }> };
       };
       for (const stage of flowDocument.spec?.stages ?? []) {
@@ -408,7 +413,7 @@ export function defaultCiRepairDependencies(input: {
         stage.inputs = [...new Set([...(stage.inputs ?? []), "ci-failure"])];
       }
       const result = await runFlow({
-        flowPath: input.flowPath,
+        flowPath: source.flowPath,
         repoPath: input.repoPath,
         flowDocument: JSON.stringify(flowDocument),
         inputs: {

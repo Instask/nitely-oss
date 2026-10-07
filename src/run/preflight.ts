@@ -15,7 +15,9 @@ import {
 } from "../flow/schema.js";
 import {
   CatalogFlowNotFoundError,
+  CatalogFlowDisabledError,
   catalogFlowRunLabel,
+  resolveRunFlowSource,
   isFlowSeedKey,
   resolveCatalogFlow,
   type ResolvedCatalogFlow,
@@ -181,7 +183,8 @@ async function loadPreflightFlow(
   try {
     const document = input.flowDocument !== undefined
       ? input.flowDocument
-      : await readFile(resolve(input.repoPath, input.flowPath), "utf8");
+      : (await resolveRunFlowSource(input.repoPath, input.flowPath, { cwd: input.repoPath }))
+          .flowDocument;
     // External inputs come from the Flow itself (declared + unproduced stage
     // inputs), so a valid Flow is never reported invalid because the run did
     // not supply an input; checkInputFiles reports those as missing-input.
@@ -193,6 +196,15 @@ async function loadPreflightFlow(
         "flow-invalid",
         error.errors[0] ?? error.message,
         "Fix the flow JSON/schema/DAG before starting a run.",
+        { path: input.flowPath },
+      );
+    }
+    if (error instanceof CatalogFlowDisabledError) {
+      return issue(
+        "blocking",
+        "flow-disabled",
+        error.message,
+        "Enable the Flow in the Flow catalog, or choose another Flow.",
         { path: input.flowPath },
       );
     }

@@ -1,3 +1,4 @@
+import { resolveRunFlowSource } from "../flows/catalog.js";
 import { execFile } from "node:child_process";
 import {
   mkdir,
@@ -12667,8 +12668,12 @@ export async function runFlow(
   }
   const runDirectory = join(repoPath, ".nitely", "runs", runId);
   const worktreePath = join(runDirectory, "worktree");
+  // A catalog reference (`flows/<name>.json`) runs the repository's stored
+  // Flow: edited built-ins are honored and disabled Flows refused. Explicit
+  // non-catalog files are read as given. The label stays `input.flowPath`.
   const loadedFlowDocument =
-    input.flowDocument ?? (await readFile(input.flowPath, "utf8"));
+    input.flowDocument ??
+    (await resolveRunFlowSource(repoPath, input.flowPath)).flowDocument;
   const loaded = parseFlowDocument(loadedFlowDocument, {
     externalInputs: Object.keys(input.inputs),
   });
