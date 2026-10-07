@@ -1,0 +1,48 @@
+{
+  "apiVersion": "nitely.dev/v1alpha1",
+  "kind": "Flow",
+  "metadata": {
+    "name": "approval-pipeline",
+    "inputs": [
+      {
+        "id": "brief"
+      }
+    ]
+  },
+  "spec": {
+    "stages": [
+      {
+        "id": "plan",
+        "type": "agent",
+        "runtime": "codex",
+        "prompt": "Produce a plan from the brief.",
+        "inputs": [
+          "brief"
+        ],
+        "outputs": [
+          "plan"
+        ]
+      },
+      {
+        "id": "approve-plan",
+        "type": "approval",
+        "prompt": "Approve the plan before generation.",
+        "inputs": [
+          "plan"
+        ],
+        "outputs": []
+      },
+      {
+        "id": "generate",
+        "type": "command",
+        "command": "true",
+        "inputs": [
+          "plan"
+        ],
+        "outputs": [
+          "result"
+        ]
+      }
+    ]
+  }
+}

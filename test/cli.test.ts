@@ -5351,7 +5351,7 @@ None.
 
     expect(code).toBe(1);
     expect(stderr).toEqual([
-      "Usage: nitely flow list|show|enable|disable|update|reset|delete [<id>] [--repo <path> | --server <url>] [--json]",
+      "Usage: nitely flow list|show|enable|disable|update|reset|delete [<id>] [--repo <path> | [--server <url>] [--repo-id <id>]] [--json]",
     ]);
   });
 

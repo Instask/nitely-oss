@@ -80,7 +80,29 @@ Flows (built-in + user)
   -> Run: create a task from the flow, filling its declared inputs
 ```
 
-Templates: Dev PR, Rework PR, Approval pipeline, Research pipeline.
+Templates are named starting points over built-in Flows, not separate
+documents. Each template id points at a `flows/<name>.json` built-in Flow, and
+its document is read from the Flow store, so an edited built-in Flow is what the
+template copies and runs, and a disabled one is not offered (work items created
+from it are blocked like any other disabled Flow). Template ids stored on
+existing work items (`template:<id>`) keep resolving the same way.
+
+| Template id | Built-in Flow |
+| --- | --- |
+| `plan-approve-implement` | `flows/plan-approve-implement-bootstrap.json` |
+| `dev-pr` | `flows/implement-spec-bootstrap.json` |
+| `rework-pr` | `flows/rework-pr-bootstrap.json` |
+| `converge-feature-artifacts` | `flows/converge-feature-artifacts.json` |
+| `pilot-approved-spec-pr` | `flows/pilot-approved-spec-pr.json` |
+| `pilot-issue-to-production` | `flows/pilot-issue-to-production.json` |
+| `pilot-bug-ticket-fix-pr` | `flows/pilot-bug-ticket-fix-pr.json` |
+| `pilot-pr-review-rework` | `flows/pilot-pr-review-rework.json` |
+| `approval-pipeline` | `flows/approval-pipeline.json` |
+| `research-pipeline` | `flows/research-pipeline.json` |
+
+`GET /api/flows/templates` returns each template with `flowPath` (the built-in
+Flow), `edited`, and `documentHash` (digest of the stored document) alongside
+the existing fields; `version` stays `1.0.0`.
 
 ## Validation
 
@@ -178,6 +200,20 @@ run time. A flow with any validation error is not saveable or runnable.
 
 ## API
 
+Flow stores are per repository. Every Flow endpoint below takes an optional
+`repoId` (query string, or the JSON body for `POST`/`PUT`) naming the
+repository it works on; without it the server's home repository is used. The
+repository is resolved and access-checked first, and the catalog, templates,
+validation, and writes all use that repository only. `POST /api/work-items`
+likewise authorizes `flowId` against the Flow store of the `repoId` it creates
+the work item in.
+
+Replacing a document (`PUT` with `document`, or `nitely flow update`) stores
+the metadata derived from the new document: `name`, and `workItemType`, which
+is cleared when the new document no longer declares it (new work then uses the
+default `dev.pr`). Enabling or disabling leaves the document and its metadata
+alone.
+
 - `GET /api/flows`, `GET /api/flows/:id`
 - `POST /api/flows/validate` — validate a document without persisting.
 - `POST /api/flows`, `DELETE /api/flows/:id` — user flows.
@@ -185,7 +221,9 @@ run time. A flow with any validation error is not saveable or runnable.
   `enabled`, for user and built-in flows.
 - `POST /api/flows/:id/reset` — replace a built-in flow with its shipped
   version (encode the id, e.g. `flows%2Fimplement-small.json`).
-- `GET /api/flows/templates`
+- `GET /api/flows/templates`, `POST /api/flows/from-template` — templates
+  read the built-in Flows of the selected repository, so a built-in Flow
+  disabled or edited in one repository changes its template only there.
 - Running a flow currently reuses the compatibility `POST /api/work-items`
   endpoint, which persists an internal generic work item and surfaces it through
   `/tasks`. The endpoint accepts a built-in `flowPath` such as
@@ -195,16 +233,19 @@ run time. A flow with any validation error is not saveable or runnable.
 
 `nitely flow` manages the same catalog. With `--repo <path>` it works on that
 repository's Flow store directly; without it, it calls the API of the server
-from `--server`, `NITELY_SERVER_URL`, or `nitely connect`.
+from `--server`, `NITELY_SERVER_URL`, or `nitely connect`. Remote commands
+take `--repo-id <id>` to target one of the server's repositories (the home
+repository by default); every subcommand honors it, so `list`, `show`,
+`update`, and the rest operate on the same store.
 
 ```sh
-nitely flow list [--repo <path>] [--json]        # id, origin, enabled, edited, newer shipped version
-nitely flow show <id> [--repo <path>] [--json]   # print the Flow document
-nitely flow enable <id> [--repo <path>]
-nitely flow disable <id> [--repo <path>]
-nitely flow update <id> --file <path> [--repo <path>]   # validated before it is stored
-nitely flow reset <id> [--repo <path>]           # built-in only: take the shipped version
-nitely flow delete <id> [--repo <path>]          # user flows only
+nitely flow list [--repo <path> | --repo-id <id>] [--json]        # id, origin, enabled, edited, newer shipped version
+nitely flow show <id> [--repo <path> | --repo-id <id>] [--json]   # print the Flow document
+nitely flow enable <id> [--repo <path> | --repo-id <id>]
+nitely flow disable <id> [--repo <path> | --repo-id <id>]
+nitely flow update <id> --file <path> [--repo <path> | --repo-id <id>]   # validated before it is stored
+nitely flow reset <id> [--repo <path> | --repo-id <id>]           # built-in only: take the shipped version
+nitely flow delete <id> [--repo <path> | --repo-id <id>]          # user flows only
 ```
 
 `reset` both discards your edits and accepts a newer shipped version, since

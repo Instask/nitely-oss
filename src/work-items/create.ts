@@ -79,7 +79,15 @@ export async function createFlowWorkItem(
   let flowId: string | undefined;
   let template: FlowTemplateLineage | undefined;
   if (input.templateId) {
-    const selectedTemplate = getFlowTemplate(input.templateId.trim());
+    let selectedTemplate: Awaited<ReturnType<typeof getFlowTemplate>>;
+    try {
+      selectedTemplate = await getFlowTemplate(repoPath, input.templateId.trim());
+    } catch (error) {
+      if (error instanceof CatalogFlowDisabledError) {
+        throw new WebInputError(error.message);
+      }
+      throw error;
+    }
     if (!selectedTemplate) {
       throw new WebInputError("flow template not found");
     }

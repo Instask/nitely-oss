@@ -197,7 +197,11 @@ CLI 会在 stderr 打印一个 URL 和一个短码，尝试打开浏览器并开
 ```bash
 nitely flow list
 nitely flow list --server http://192.0.2.10:4173 --json
+nitely flow list --server http://192.0.2.10:4173 --repo-id <repo-id>
 ```
+
+Flow 目录按 repository 区分：`--repo-id` 指定所有 `nitely flow` 子命令操作的
+repository（默认 home）。
 
 `flow list` 每次调用都会请求 `GET /api/flows`，所以实例上新增、改名或删除的
 Flow 会立刻反映出来。每行输出 Flow id、来源（`builtin` 或 `user`）、是否可运行

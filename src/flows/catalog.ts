@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import {
+  BuiltinFlowPathError,
   bundledFlowsRoot,
   resolveBuiltinFlowPath,
   resolveRepositoryFlowPath,
@@ -15,6 +16,7 @@ import {
   type FlowStore,
 } from "./store.js";
 import { validateFlowDocument, type FlowValidationReport } from "./validate.js";
+import { DEFAULT_WORK_ITEM_TYPE } from "../flow/schema.js";
 import { WebInputError, WebNotFoundError } from "../web/errors.js";
 
 /**
@@ -61,22 +63,52 @@ async function flowEntries(root: string): Promise<string[]> {
   }
 }
 
-function seedMetadata(document: string, key: string): { name: string; workItemType?: string } {
+/** Metadata the store keeps beside a Flow document, derived from it. */
+export interface FlowStoredMetadata {
+  name: string;
+  /** `null` when the document declares none, so a replacement clears it. */
+  workItemType: string | null;
+}
+
+/**
+ * The one derivation of stored Flow metadata from a Flow document. The
+ * document is the canonical source: every write that replaces a document
+ * stores exactly this, so a value removed from the document is removed from
+ * the record too.
+ */
+export function flowStoredMetadata(document: string, fallbackName: string): FlowStoredMetadata {
+  let metadata: { name?: unknown; workItemType?: unknown } | undefined;
   try {
-    const parsed = JSON.parse(document) as {
-      metadata?: { name?: unknown; workItemType?: unknown };
-    };
-    return {
-      name: typeof parsed.metadata?.name === "string" && parsed.metadata.name.trim()
-        ? parsed.metadata.name
-        : key,
-      ...(typeof parsed.metadata?.workItemType === "string"
-        ? { workItemType: parsed.metadata.workItemType }
-        : {}),
-    };
+    metadata = (JSON.parse(document) as { metadata?: typeof metadata }).metadata;
   } catch {
-    return { name: key };
+    metadata = undefined;
   }
+  return {
+    name: typeof metadata?.name === "string" && metadata.name.trim() ? metadata.name : fallbackName,
+    workItemType:
+      typeof metadata?.workItemType === "string" && metadata.workItemType.trim()
+        ? metadata.workItemType
+        : null,
+  };
+}
+
+function seedMetadata(document: string, key: string): { name: string; workItemType?: string } {
+  const meta = flowStoredMetadata(document, key);
+  return { name: meta.name, ...(meta.workItemType ? { workItemType: meta.workItemType } : {}) };
+}
+
+/**
+ * Validate a Flow document against `repoPath` and derive what the store keeps
+ * for it. Throws {@link CatalogFlowInvalidError} with the validator's report.
+ */
+export async function prepareCatalogFlowDocument(
+  repoPath: string,
+  document: string,
+  fallbackName: string,
+): Promise<{ document: string } & FlowStoredMetadata> {
+  const report = await validateFlowDocument(repoPath, document);
+  if (!report.valid) throw new CatalogFlowInvalidError(report);
+  return { document, ...flowStoredMetadata(document, fallbackName) };
 }
 
 /**
@@ -97,16 +129,28 @@ export async function readFlowSeeds(
   const seeds = await Promise.all(
     entries.map(async (entry): Promise<FlowSeed | undefined> => {
       const key = `flows/${entry}`;
+      let resolved;
       try {
-        const resolved = await resolveBuiltinFlowPath(repositoryRoot, key, bundledRoot);
-        const document = await readFile(resolved.absolutePath, "utf8");
-        const source = resolved.absolutePath === resolve(repositoryRoot, key) ? "repository" : "bundled";
-        return { key, document, source, ...seedMetadata(document, key) };
-      } catch {
-        // An unreadable or escaping entry is not a seed, as it was never a
-        // listed built-in Flow before the catalog.
-        return undefined;
+        resolved = await resolveBuiltinFlowPath(repositoryRoot, key, bundledRoot);
+      } catch (error) {
+        // An entry that escapes the flows directory (a traversal or symlink
+        // the path resolver rejects) is not a seed, as it was never a listed
+        // built-in Flow before the catalog.
+        if (error instanceof BuiltinFlowPathError) return undefined;
+        throw error;
       }
+      let document: string;
+      try {
+        document = await readFile(resolved.absolutePath, "utf8");
+      } catch (error) {
+        // The file vanished between listing and reading: it is not shipped.
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        // Any other failure (permissions, I/O) must fail the sync instead of
+        // looking like a removed seed and retiring an untouched built-in Flow.
+        throw error;
+      }
+      const source = resolved.absolutePath === resolve(repositoryRoot, key) ? "repository" : "bundled";
+      return { key, document, source, ...seedMetadata(document, key) };
     }),
   );
   return seeds.filter((seed): seed is FlowSeed => seed !== undefined);
@@ -237,7 +281,8 @@ export interface CatalogFlowSummary {
   newerShippedVersion: boolean;
   /** The shipped file is gone; the edited record is kept. */
   shippedVersionRemoved: boolean;
-  workItemType?: string;
+  /** The work item type new work gets: the document's, else the runtime default. */
+  workItemType: string;
   updatedAt: string;
 }
 
@@ -252,7 +297,7 @@ export function catalogFlowSummary(record: FlowRecord): CatalogFlowSummary {
     edited: record.origin === "system" && flowRecordCustomized(record),
     newerShippedVersion: Boolean(record.seed?.availableHash),
     shippedVersionRemoved: Boolean(record.seed?.removedAt),
-    ...(record.workItemType ? { workItemType: record.workItemType } : {}),
+    workItemType: record.workItemType ?? DEFAULT_WORK_ITEM_TYPE,
     updatedAt: record.updatedAt,
   };
 }
@@ -303,14 +348,26 @@ export async function updateCatalogFlowDocument(
     ...options,
     requireEnabled: false,
   });
-  const report = await validateFlowDocument(repoPath, document);
-  if (!report.valid) throw new CatalogFlowInvalidError(report);
-  const meta = seedMetadata(document, record.name);
+  return await replaceCatalogFlowDocument(repoPath, record, document);
+}
+
+/**
+ * Replace `record`'s document in `repoPath`'s store: validate it there, then
+ * write the document together with the metadata derived from it (clearing
+ * metadata the new document no longer declares). The enabled flag and
+ * ownership are untouched. Shared by `nitely flow update` and the Web API.
+ */
+export async function replaceCatalogFlowDocument(
+  repoPath: string,
+  record: FlowRecord,
+  document: string,
+): Promise<FlowRecord> {
+  const prepared = await prepareCatalogFlowDocument(repoPath, document, record.name);
   return withStore(repoPath, (store) =>
     store.updateFlow(record.id, {
-      name: meta.name,
-      document,
-      ...(meta.workItemType ? { workItemType: meta.workItemType } : {}),
+      name: prepared.name,
+      document: prepared.document,
+      workItemType: prepared.workItemType,
     }),
   );
 }

@@ -2,6 +2,10 @@
 
 Status: built-in customer-hosted pilot template catalog.
 
+Each pilot template reads the built-in Flow of the same name
+(`flows/<template-id>.json`) from the Flow store, so editing that Flow (Web
+Console or `nitely flow update`) changes the template too.
+
 These templates assume customer-hosted execution against a local repository
 checkout. Source code, secrets, worktrees, raw prompts, logs, and generated
 artifacts stay in the customer environment unless the operator explicitly

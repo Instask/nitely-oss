@@ -366,6 +366,9 @@ import type { WorkItemStoreKind } from "../work-items/types.js";
 import { FlowValidationError } from "../flow/load.js";
 import { openFlowStore } from "../flows/store.js";
 import {
+  CatalogFlowInvalidError,
+  prepareCatalogFlowDocument,
+  replaceCatalogFlowDocument,
   resetCatalogFlow,
   resolveCatalogFlow,
   type ResolvedCatalogFlow,
@@ -374,9 +377,10 @@ import { validateFlowDocument } from "../flows/validate.js";
 import {
   flowTemplateDocumentForCopy,
   flowTemplateLineage,
-  flowTemplates,
   getFlowTemplate,
+  listFlowTemplates,
 } from "../flows/templates.js";
+import { CatalogFlowDisabledError } from "../flows/catalog.js";
 import { listFlowViews, getFlowView } from "./flows.js";
 import {
   assignNotification,
@@ -2648,25 +2652,28 @@ function replaceSpecInputFromJson(value: unknown): { spec: string } {
   return { spec: record.spec };
 }
 
-function taskTemplateSelection(templateId: string | undefined):
+async function getTemplateForWeb(repoPath: string, templateId: string) {
+  try {
+    const template = await getFlowTemplate(repoPath, templateId);
+    if (!template) throw new WebInputError("flow template not found");
+    return template;
+  } catch (error) {
+    if (error instanceof CatalogFlowDisabledError) throw new WebInputError(error.message);
+    throw error;
+  }
+}
+
+async function taskTemplateSelection(repoPath: string, templateId: string | undefined): Promise<
   | {
       flowPath: string;
       template: ReturnType<typeof flowTemplateLineage>;
     }
-  | undefined {
+  | undefined> {
   const trimmed = templateId?.trim();
   if (!trimmed) {
     return undefined;
   }
-  const template = getFlowTemplate(trimmed);
-  if (!template) {
-    throw new WebInputError("flow template not found");
-  }
-  if (!template.flowPath) {
-    throw new WebInputError(
-      "flow template cannot create a legacy task because it has no repository flow path",
-    );
-  }
+  const template = await getTemplateForWeb(repoPath, trimmed);
   const unsupportedInputs = template.inputs
     .filter((input) => input.required)
     .map((input) => input.id)
@@ -3496,20 +3503,68 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function flowDocumentMetadata(document: string): {
-  name: string;
-  workItemType?: string;
-} {
-  const parsed = JSON.parse(document) as {
-    metadata?: { name?: unknown; workItemType?: unknown };
-  };
-  return {
-    name:
-      typeof parsed.metadata?.name === "string" ? parsed.metadata.name : "flow",
-    ...(typeof parsed.metadata?.workItemType === "string"
-      ? { workItemType: parsed.metadata.workItemType }
-      : {}),
-  };
+/**
+ * The repository a Flow request targets: `repoId` from the query string, else
+ * from the JSON body, else the home repository. Authentication happens first;
+ * the repository must be visible to the user, and a request that creates a
+ * Flow must target a repository of the organization it writes into.
+ */
+async function flowRequestScope(
+  request: IncomingMessage,
+  input: RuntimeStartWebServerInput,
+  homeRepoPath: string,
+  repositories: WebRepository[],
+  url: URL,
+  options: { body?: Record<string, unknown>; create?: boolean } = {},
+): Promise<{ user: WebUserContext; repository: WebRepository; organizationId?: string }> {
+  const user = await requireUserContext(request, input, homeRepoPath);
+  const bodyRepoId = options.body?.repoId;
+  const repoId =
+    optionalSearchParam(url, "repoId") ??
+    (typeof bodyRepoId === "string" && bodyRepoId.trim() ? bodyRepoId.trim() : undefined);
+  const organizationId =
+    options.create && user.authMode === "required"
+      ? currentWritableOrganizationId(user, "flows:manage")
+      : undefined;
+  const repository = options.create
+    ? requireRepositoryForOrganization(repositories, repoId, user, organizationId)
+    : requireVisibleRepository(repositories, repoId, user);
+  return { user, repository, ...(organizationId ? { organizationId } : {}) };
+}
+
+/** Validate and store a new user Flow in `repoPath`, answering 422 or 201. */
+async function createCatalogUserFlowForWeb(
+  response: ServerResponse,
+  repoPath: string,
+  document: string,
+  user: WebUserContext,
+  organizationId: string | undefined,
+  extra: { template?: ReturnType<typeof flowTemplateLineage> } = {},
+): Promise<void> {
+  let prepared;
+  try {
+    prepared = await prepareCatalogFlowDocument(repoPath, document, "flow");
+  } catch (error) {
+    if (error instanceof CatalogFlowInvalidError) {
+      sendJson(response, 422, { report: error.report });
+      return;
+    }
+    throw error;
+  }
+  const store = openFlowStore(repoPath);
+  try {
+    const record = store.createFlow({
+      name: prepared.name,
+      document: prepared.document,
+      ...(prepared.workItemType ? { workItemType: prepared.workItemType } : {}),
+      ...(user.authMode === "required" ? { ownerId: user.id } : {}),
+      ...(organizationId ? { organizationId } : {}),
+      ...(extra.template ? { template: extra.template } : {}),
+    });
+    sendJson(response, 201, { flow: record });
+  } finally {
+    store.close();
+  }
 }
 
 function getProviderStore(
@@ -9108,7 +9163,7 @@ async function handleApiRequest(
       user,
       organizationId,
     );
-    const templateSelection = taskTemplateSelection(taskInput.templateId);
+    const templateSelection = await taskTemplateSelection(repository.path, taskInput.templateId);
     const task = await createTask(
       repository.path,
       {
@@ -9397,7 +9452,7 @@ async function handleApiRequest(
         ...(conversationTurns ? { conversation: conversationTurns } : {}),
       };
     }
-    const templateSelection = taskTemplateSelection(draftInput.templateId);
+    const templateSelection = await taskTemplateSelection(repository.path, draftInput.templateId);
     const selectedFlowPath = templateSelection?.flowPath ?? draftInput.flowPath;
     const draftContextKnowledge = await selectDraftSpecContextKnowledge({
       repoPath: repository.path,
@@ -10578,30 +10633,28 @@ async function handleApiRequest(
     return true;
   }
 
+  // Flow routes are repository-scoped: authenticate, resolve and authorize the
+  // target repository (`repoId`, defaulting to home), then do every catalog,
+  // template, validation, and store operation against that repository's path.
   if (request.method === "GET" && url.pathname === "/api/flows") {
-    const user = await requireUserContext(request, input, homeRepoPath);
-    sendJson(response, 200, { flows: await listFlowViews(homeRepoPath, user) });
+    const { user, repository } = await flowRequestScope(request, input, homeRepoPath, repositories, url);
+    sendJson(response, 200, { flows: await listFlowViews(repository.path, user) });
     return true;
   }
 
   if (request.method === "GET" && url.pathname === "/api/flows/templates") {
-    await requireUserContext(request, input, homeRepoPath);
-    sendJson(response, 200, { templates: flowTemplates });
+    const { repository } = await flowRequestScope(request, input, homeRepoPath, repositories, url);
+    sendJson(response, 200, { templates: await listFlowTemplates(repository.path) });
     return true;
   }
 
   if (request.method === "POST" && url.pathname === "/api/flows/from-template") {
-    const user = await requireUserContext(request, input, homeRepoPath);
-    const organizationId =
-      user.authMode === "required"
-        ? currentWritableOrganizationId(user, "flows:manage")
-        : undefined;
     const body = requireObject(await readRequestJson(request));
+    const { user, repository, organizationId } = await flowRequestScope(
+      request, input, homeRepoPath, repositories, url, { body, create: true },
+    );
     const templateId = typeof body.templateId === "string" ? body.templateId.trim() : "";
-    const template = getFlowTemplate(templateId);
-    if (!template) {
-      throw new WebInputError("flow template not found");
-    }
+    const template = await getTemplateForWeb(repository.path, templateId);
     const reviewStagePrompt =
       typeof body.reviewStagePrompt === "string"
         ? body.reviewStagePrompt
@@ -10612,134 +10665,97 @@ async function handleApiRequest(
       ...(typeof body.name === "string" ? { name: body.name } : {}),
       ...(reviewStagePrompt ? { reviewStagePrompt } : {}),
     });
-    const report = await validateFlowDocument(homeRepoPath, document);
-    if (!report.valid) {
-      sendJson(response, 422, { report });
-      return true;
-    }
-    const meta = flowDocumentMetadata(document);
-    const store = openFlowStore(homeRepoPath);
-    try {
-      const record = store.createFlow({
-        name: meta.name,
-        document,
-        ...(meta.workItemType ? { workItemType: meta.workItemType } : {}),
-        ...(user.authMode === "required" ? { ownerId: user.id } : {}),
-        ...(organizationId ? { organizationId } : {}),
-        template: flowTemplateLineage(template),
-      });
-      sendJson(response, 201, { flow: record });
-    } finally {
-      store.close();
-    }
+    await createCatalogUserFlowForWeb(response, repository.path, document, user, organizationId, {
+      template: flowTemplateLineage(template),
+    });
     return true;
   }
 
   if (request.method === "POST" && url.pathname === "/api/flows/validate") {
-    await requireUserContext(request, input, homeRepoPath);
     const body = requireObject(await readRequestJson(request));
+    const { repository } = await flowRequestScope(request, input, homeRepoPath, repositories, url, { body });
     const document = typeof body.document === "string" ? body.document : "";
     sendJson(response, 200, {
-      report: await validateFlowDocument(homeRepoPath, document),
+      report: await validateFlowDocument(repository.path, document),
     });
     return true;
   }
 
   if (request.method === "POST" && url.pathname === "/api/flows") {
-    const user = await requireUserContext(request, input, homeRepoPath);
-    const organizationId =
-      user.authMode === "required"
-        ? currentWritableOrganizationId(user, "flows:manage")
-        : undefined;
     const body = requireObject(await readRequestJson(request));
+    const { user, repository, organizationId } = await flowRequestScope(
+      request, input, homeRepoPath, repositories, url, { body, create: true },
+    );
     const document = typeof body.document === "string" ? body.document : "";
-    const report = await validateFlowDocument(homeRepoPath, document);
-    if (!report.valid) {
-      sendJson(response, 422, { report });
-      return true;
-    }
-    const meta = flowDocumentMetadata(document);
-    const store = openFlowStore(homeRepoPath);
-    try {
-      const record = store.createFlow({
-        name: meta.name,
-        document,
-        ...(meta.workItemType ? { workItemType: meta.workItemType } : {}),
-        ...(user.authMode === "required" ? { ownerId: user.id } : {}),
-        ...(organizationId ? { organizationId } : {}),
-      });
-      sendJson(response, 201, { flow: record });
-    } finally {
-      store.close();
-    }
+    await createCatalogUserFlowForWeb(response, repository.path, document, user, organizationId);
     return true;
   }
 
   const resetFlowId = request.method === "POST" ? apiFlowResetId(url.pathname) : undefined;
   if (resetFlowId) {
-    const user = await requireUserContext(request, input, homeRepoPath);
-    const existing = await requireCatalogFlowAccess(homeRepoPath, resetFlowId, user);
+    // Reset is destructive: resolve repoId from query or body like the other
+    // POST Flow routes so it never falls back to the home repository.
+    const body = requireObject(await readRequestJson(request));
+    const { user, repository } = await flowRequestScope(request, input, homeRepoPath, repositories, url, { body });
+    const existing = await requireCatalogFlowAccess(repository.path, resetFlowId, user);
     // Only built-in Flows have a shipped version; they have no owner, so this
     // admits local mode and administrators only.
     requireWriteAccessToRecord(user, existing.record, "flows:manage");
-    sendJson(response, 200, { flow: await resetCatalogFlow(homeRepoPath, resetFlowId) });
+    sendJson(response, 200, { flow: await resetCatalogFlow(repository.path, resetFlowId) });
     return true;
   }
 
   const flowId = apiFlowId(url.pathname);
   if (flowId) {
     if (request.method === "GET") {
-      const user = await requireUserContext(request, input, homeRepoPath);
-      sendJson(response, 200, { flow: await getFlowView(homeRepoPath, flowId, user) });
+      const { user, repository } = await flowRequestScope(request, input, homeRepoPath, repositories, url);
+      sendJson(response, 200, { flow: await getFlowView(repository.path, flowId, user) });
       return true;
     }
     if (request.method === "PUT") {
-      const user = await requireUserContext(request, input, homeRepoPath);
-      const existing = await requireCatalogFlowAccess(homeRepoPath, flowId, user);
+      const body = requireObject(await readRequestJson(request));
+      const { user, repository } = await flowRequestScope(request, input, homeRepoPath, repositories, url, { body });
+      const existing = await requireCatalogFlowAccess(repository.path, flowId, user);
       // System Flows have no owner, so only local mode or an administrator
       // passes this check for them.
       requireWriteAccessToRecord(user, existing.record, "flows:manage");
-      const body = requireObject(await readRequestJson(request));
       if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
         throw new WebInputError("enabled must be a boolean");
       }
       const enabled = body.enabled as boolean | undefined;
-      let documentUpdate: { name: string; document: string; workItemType?: string } | undefined;
+      let record = existing.record;
       if (typeof body.document === "string" || enabled === undefined) {
         const document = typeof body.document === "string" ? body.document : "";
-        const report = await validateFlowDocument(homeRepoPath, document);
-        if (!report.valid) {
-          sendJson(response, 422, { report });
-          return true;
+        try {
+          record = await replaceCatalogFlowDocument(repository.path, record, document);
+        } catch (error) {
+          if (error instanceof CatalogFlowInvalidError) {
+            sendJson(response, 422, { report: error.report });
+            return true;
+          }
+          throw error;
         }
-        const meta = flowDocumentMetadata(document);
-        documentUpdate = {
-          name: meta.name,
-          document,
-          ...(meta.workItemType ? { workItemType: meta.workItemType } : {}),
-        };
       }
-      const store = openFlowStore(homeRepoPath);
-      try {
-        const record = store.updateFlow(existing.record.id, {
-          ...(documentUpdate ?? {}),
-          ...(enabled !== undefined ? { enabled } : {}),
-        });
-        sendJson(response, 200, { flow: record });
-      } finally {
-        store.close();
+      if (enabled !== undefined) {
+        const store = openFlowStore(repository.path);
+        try {
+          record = store.updateFlow(record.id, { enabled });
+        } finally {
+          store.close();
+        }
       }
+      sendJson(response, 200, { flow: record });
       return true;
     }
     if (request.method === "DELETE") {
-      const user = await requireUserContext(request, input, homeRepoPath);
-      const existing = await requireCatalogFlowAccess(homeRepoPath, flowId, user);
+      const { user, repository } = await flowRequestScope(request, input, homeRepoPath, repositories, url);
+      const existing = await requireCatalogFlowAccess(repository.path, flowId, user);
       if (existing.record.origin === "system") {
         throw new WebInputError("built-in flows cannot be deleted; disable them instead");
       }
-      const store = openFlowStore(homeRepoPath);
+      requireWriteAccessToRecord(user, existing.record, "flows:manage");
+      const store = openFlowStore(repository.path);
       try {
-        requireWriteAccessToRecord(user, existing.record, "flows:manage");
         store.deleteFlow(existing.record.id);
       } finally {
         store.close();
@@ -10767,15 +10783,17 @@ async function handleApiRequest(
     const body = requireObject(await readRequestJson(request));
     const flowId =
       typeof body.flowId === "string" && body.flowId ? body.flowId : undefined;
-    if (flowId) {
-      await requireCatalogFlowAccess(homeRepoPath, flowId, user);
-    }
+    // Resolve the target repository first; the Flow is authorized against
+    // that repository's catalog, the same one createFlowWorkItem resolves.
     const repository = requireRepositoryForOrganization(
       repositories,
       typeof body.repoId === "string" ? body.repoId : undefined,
       user,
       organizationId,
     );
+    if (flowId) {
+      await requireCatalogFlowAccess(repository.path, flowId, user);
+    }
     const workItem = await createFlowWorkItem(
       repository.path,
       {

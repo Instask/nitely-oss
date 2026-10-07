@@ -20,8 +20,9 @@ import {
   isFlowSeedKey,
   resolveCatalogFlow,
 } from "../flows/catalog.js";
-import { getFlowTemplate } from "../flows/templates.js";
+import { flowTemplateEntry } from "../flows/templates.js";
 import { resolveRepositoryFlowPath } from "../flows/paths.js";
+import { inferExternalInputs } from "../flows/validate.js";
 import type { RunFlowInput } from "./run-flow.js";
 import {
   evaluateRunPreflight,
@@ -118,11 +119,13 @@ async function resolveWorkItemRunFlow(
       flowDocument = (await resolveCatalogFlow(repoPath, workItem.flowId)).document;
       flowPath = workItem.flowId;
     } else if (workItem.template) {
-      const template = getFlowTemplate(workItem.template.templateId);
-      if (!template) {
+      // Template work items read the built-in Flow the template points at,
+      // from the store, and keep their `template:<id>` run label.
+      const entry = flowTemplateEntry(workItem.template.templateId);
+      if (!entry) {
         throw new Error(`flow template not found: ${workItem.template.templateId}`);
       }
-      flowDocument = template.document;
+      flowDocument = (await resolveCatalogFlow(repoPath, entry.flowPath)).document;
     } else if (isFlowSeedKey(workItem.flowPath)) {
       // Catalog Flows run the stored document, so a customized or upgraded
       // system Flow takes effect without a file change.
@@ -136,8 +139,10 @@ async function resolveWorkItemRunFlow(
       ).absolutePath;
       flowDocument = await readFile(flowPath, "utf8");
     }
+    // Parse the graph with the Flow's own external inputs; inputs the Work
+    // item did not supply are reported later as missing-input by preflight.
     const loaded = parseFlowDocument(flowDocument, {
-      externalInputs: Object.keys(workItem.inputs),
+      externalInputs: inferExternalInputs(flowDocument),
     });
     return {
       resolved: {

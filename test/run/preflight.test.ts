@@ -207,9 +207,19 @@ describe("run preflight doctor", () => {
   });
 
   it("blocks invalid flow DAGs before runtime execution", async () => {
-    const repoPath = await repoWithFlow(
-      flow({ inputs: ["unknown-artifact"] }),
-    );
+    // An unproduced stage input is an external input, so make the DAG invalid
+    // with two producers of the same artifact instead.
+    const repoPath = await repoWithFlow({
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "preflight" },
+      spec: {
+        stages: [
+          { id: "a", type: "command", command: "true", inputs: [], outputs: ["out"] },
+          { id: "b", type: "command", command: "true", inputs: [], outputs: ["out"] },
+        ],
+      },
+    });
 
     const report = await evaluateRunPreflight({
       repoPath,
@@ -223,9 +233,26 @@ describe("run preflight doctor", () => {
       severity: "blocking",
       code: "flow-invalid",
     });
-    expect(report.issues[0]?.message).toContain(
-      "stage implement consumes unknown artifact",
+    expect(report.issues[0]?.message).toMatch(/out/);
+  });
+
+  it("reports an unproduced stage input as a missing input, not an invalid flow", async () => {
+    const repoPath = await repoWithFlow(
+      flow({ inputs: ["unknown-artifact"] }),
     );
+
+    const report = await evaluateRunPreflight({
+      repoPath,
+      flowPath: "flows/preflight.json",
+      inputs: {},
+      providerStore: providerStore({ codex: true }),
+    });
+
+    expect(report.status).toBe("BLOCK");
+    expect(report.issues.map((entry) => entry.code)).not.toContain("flow-invalid");
+    expect(report.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "missing-input", message: "required input is missing: unknown-artifact" }),
+    ]));
   });
 
   it("blocks missing mapped MCP/provider requirements", async () => {
@@ -536,4 +563,44 @@ it("blocks OCI doctor preflight on an unset image", async () => {
   });
   expect(report.status).toBe("BLOCK");
   expect(report.issues).toContainEqual(expect.objectContaining({ severity: "blocking", code: "oci.image.missing" }));
+});
+
+describe("preflight external inputs", () => {
+  const doc = (stages: unknown[], inputs?: unknown[]) => JSON.stringify({
+    apiVersion: "nitely.dev/v1alpha1",
+    kind: "Flow",
+    metadata: { name: "ext", ...(inputs ? { inputs } : {}) },
+    spec: { stages },
+  });
+
+  it("parses with the Flow's own external inputs, independent of supplied inputs", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-preflight-ext-"));
+    const report = await evaluateRunPreflight({
+      repoPath,
+      flowPath: "flows/ext.json",
+      flowDocument: doc(
+        [{ id: "build", type: "command", command: "true", inputs: ["spec", "tech-design"], outputs: ["out"] }],
+        [{ id: "spec" }],
+      ),
+      inputs: {},
+    });
+    const codes = report.issues.map((entry) => entry.code);
+    expect(codes).not.toContain("flow-invalid");
+    expect(report.issues.filter((entry) => entry.code === "missing-input").map((entry) => entry.message).sort())
+      .toEqual(["required input is missing: spec", "required input is missing: tech-design"]);
+  });
+
+  it("still reports a genuinely invalid graph as flow-invalid", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-preflight-ext-"));
+    const report = await evaluateRunPreflight({
+      repoPath,
+      flowPath: "flows/ext.json",
+      flowDocument: doc([
+        { id: "a", type: "command", command: "true", inputs: [], outputs: ["out"] },
+        { id: "b", type: "command", command: "true", inputs: [], outputs: ["out"] },
+      ]),
+      inputs: {},
+    });
+    expect(report.issues.map((entry) => entry.code)).toContain("flow-invalid");
+  });
 });
