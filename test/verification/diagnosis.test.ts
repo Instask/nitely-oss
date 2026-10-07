@@ -109,6 +109,30 @@ describe("diagnoseVerificationFailure", () => {
     expect(diagnose(log)).toMatchObject({ classification: "implementation", recommendedAction: "rework" });
   });
 
+  it("reads failure blocks through the ANSI colors a real command failure carries", () => {
+    // Shape of stage.failed.error on run 2026-10-07T111808093Z-294512c5:
+    // exit summary first, colored stderr from passing tests, then colored FAIL blocks.
+    const esc = "\u001b";
+    const log = [
+      "command failed with exit code 1: pnpm exec vitest run && pnpm run check && pnpm run build",
+      `${esc}[90mstderr${esc}[2m | test/web/server.test.ts${esc}[2m > ${esc}[22m${esc}[2mweb server API and HTML`,
+      `${esc}[22m${esc}[39mHome directory /tmp/nitely-web-server-hGad9q has runs but no registered repository (reason: no-origin).`,
+      `${esc}[90mstderr${esc}[2m | test/run/execution/local.test.ts${esc}[2m > ${esc}[22mdescribes provider failures`,
+      `${esc}[22m${esc}[39mcodex diagnostic 429: {"message":"Rate limit exceeded","code":429}`,
+      ` ${esc}[32m✓${esc}[39m test/run/execution/network-gateway.test.ts ${esc}[2m(18 tests)${esc}[22m${esc}[33m 108${esc}[2mms${esc}[22m${esc}[39m`,
+      `${esc}[41m${esc}[1m FAIL ${esc}[22m${esc}[49m test/web/session-organization-switch.test.ts${esc}[2m > ${esc}[22mswitches current organization from A to B`,
+      `${esc}[31m${esc}[1mAssertionError${esc}[22m: expected 3 to be 2 // Object.is equality${esc}[39m`,
+      `${esc}[41m${esc}[1m FAIL ${esc}[22m${esc}[49m test/web/session-organization-switch.test.ts${esc}[2m > ${esc}[22mAPI token requests get 404`,
+      `${esc}[31m${esc}[1mAssertionError${esc}[22m: expected 401 to be 404 // Object.is equality${esc}[39m`,
+    ].join("\n");
+    const diagnosis = diagnose(log);
+    expect(diagnosis).toMatchObject({ classification: "implementation", recommendedAction: "rework", targetStage: "implement" });
+    const evidence = diagnosis!.evidence.join("\n");
+    expect(evidence).toContain("AssertionError: expected 3 to be 2");
+    expect(evidence).not.toContain(esc);
+    expect(evidence).not.toContain("Rate limit exceeded");
+  });
+
   it("keeps whole-text classification for unstructured command output", () => {
     expect(diagnose("curl: (6) Could not resolve host: example.com\nnetwork is unreachable")).toMatchObject({
       classification: "environment",
