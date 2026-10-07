@@ -1,3 +1,4 @@
+import { applyRunOverrides, type RunOverrides } from "../flow/overrides.js";
 import { constants } from "node:fs";
 import { access, readFile, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -12,6 +13,7 @@ import {
   stageRuntimeCandidates,
   type Flow,
   type Stage,
+  type RuntimeCandidate,
 } from "../flow/schema.js";
 import {
   CatalogFlowNotFoundError,
@@ -32,7 +34,7 @@ import type {
 import { normalizeFlowConfiguration } from "../flows/configurables.js";
 import { loadProjectInstructions } from "./project-instructions.js";
 import { checkOciReadiness, normalizeExecutionBackendName, type ExecutionBackendName } from "./execution/backend.js";
-import { createDefaultAgentRuntimeRegistry } from "./execution/local.js";
+import { createDefaultAgentRuntimeRegistry, runtimeEffortProblem } from "./execution/local.js";
 import type { OciReadinessIssue } from "./execution/oci.js";
 import type { WorkItemRecord } from "../work-items/types.js";
 
@@ -52,6 +54,7 @@ export interface RunPreflightIssue {
     | "runtime-unavailable"
     | "runtime-unchecked"
     | "runtime-model-unsupported"
+    | "runtime-effort-unsupported"
     | "provider-unchecked"
     | "missing-skill"
     | "output-directory-unwritable";
@@ -85,6 +88,7 @@ export interface RunPreflightReport {
 }
 
 export interface EvaluateRunPreflightInput {
+  overrides?: RunOverrides;
   repoPath: string;
   flowPath: string;
   flowDocument?: string;
@@ -227,15 +231,24 @@ const runtimeRegistry = createDefaultAgentRuntimeRegistry();
  */
 function runtimeModelIssues(
   stageId: string,
-  candidates: Array<{ runtime: string; model?: string }>,
+  candidates: RuntimeCandidate[],
 ): RunPreflightIssue[] {
   const issues: RunPreflightIssue[] = [];
   for (const candidate of candidates) {
     let problem: string | undefined;
+    let effortProblem: string | undefined;
     try {
-      problem = runtimeRegistry.resolve(candidate.runtime).validateModel?.(candidate.model);
+      const runtime = runtimeRegistry.resolve(candidate.runtime);
+      problem = runtime.validateModel?.(candidate.model);
+      effortProblem = runtimeEffortProblem(runtime, candidate.effort);
     } catch {
-      continue;
+      effortProblem = runtimeEffortProblem({ id: candidate.runtime }, candidate.effort);
+    }
+    if (effortProblem) {
+      issues.push(issue(candidates.length > 1 ? "warning" : "blocking",
+        "runtime-effort-unsupported", `stage ${stageId}: ${effortProblem}`,
+        "Remove effort or choose a runtime with an effort mapping.",
+        { stageId, runtime: candidate.runtime }));
     }
     if (!problem) continue;
     issues.push(
@@ -591,7 +604,14 @@ export async function evaluateRunPreflight(
     });
   }
 
-  const flow = loaded.flow;
+  let flow: Flow;
+  try {
+    flow = applyRunOverrides(loaded.flow, input.overrides);
+  } catch (error) {
+    return emptyReport({ flowPath: input.flowPath, outputDirectory, issues: [
+      issue("blocking", "flow-invalid", error instanceof Error ? error.message : String(error), "Set valid runtime, model and effort overrides."),
+    ] });
+  }
   const effectiveInputs = flowInputReferences(flow, inputs);
   const requiredInputs = inputIdsRequiredByFlow(flow, loaded);
   const requiredProviders = new Set<ProviderId>();
@@ -678,6 +698,7 @@ export async function evaluateWorkItemRunPreflight(
         flowDocument: resolved.document,
         inputs: input.workItem.inputs,
         configuration: input.workItem.configuration,
+        overrides: input.workItem.overrides,
         providerStore: input.providerStore,
         executionBackend: input.executionBackend,
         env: input.env,
@@ -708,6 +729,7 @@ export async function evaluateWorkItemRunPreflight(
     flowPath: resolvedFlowPath.absolutePath,
     inputs: input.workItem.inputs,
     configuration: input.workItem.configuration,
+        overrides: input.workItem.overrides,
     providerStore: input.providerStore,
     executionBackend: input.executionBackend,
     env: input.env,

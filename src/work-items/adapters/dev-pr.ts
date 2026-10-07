@@ -86,6 +86,7 @@ export function taskRecordToWorkItem(
     suggestedDependencies: task.suggestedDependencies ?? [],
     workItemType: DEV_PR_WORK_ITEM_TYPE,
     flowPath: task.flowPath,
+    ...(task.overrides ? { overrides: task.overrides } : {}),
     ...(task.template ? { template: task.template } : {}),
     ...(task.specStatus ? { specStatus: task.specStatus } : {}),
     ...(task.techDesignStatus ? { techDesignStatus: task.techDesignStatus } : {}),

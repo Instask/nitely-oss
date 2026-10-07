@@ -182,6 +182,7 @@ const nonAgentConvergenceSchema = z
   .optional();
 
 const stageBase = z.object({
+  effort: z.never({ error: "effort is only valid on agent, judge and review gate stages" }).optional(),
   id: identifierSchema,
   costClass: stageCostClassSchema.optional(),
   inputs: z.array(identifierSchema).default([]),
@@ -272,9 +273,15 @@ function addAgentLikeDuplicateIssues(
 
 const requiredMcpServersSchema = z.array(identifierSchema).default([]);
 const requiredConnectorsSchema = z.array(providerIdSchema).default([]);
+export const effortSchema = z.enum([
+  "off", "minimal", "low", "medium", "high", "xhigh", "max",
+]);
+export type Effort = z.infer<typeof effortSchema>;
+
 const runtimeCandidateSchema = z.object({
   runtime: z.string().min(1),
   model: z.string().min(1).optional(),
+  effort: effortSchema.optional(),
 });
 const pathCapabilitySchema = z.object({
   scope: z.string().min(1).optional(),
@@ -346,6 +353,7 @@ function addRuntimeCandidateIssues(
   stage: {
     runtime?: string;
     model?: string;
+    effort?: Effort;
     runtimes?: unknown;
   },
 ): void {
@@ -355,6 +363,9 @@ function addRuntimeCandidateIssues(
       path: ["runtimes"],
       message: "stage must declare either runtime/model or runtimes, not both",
     });
+  }
+  if (stage.effort && !stage.runtime) {
+    context.addIssue({ code: "custom", path: ["effort"], message: "effort requires runtime; set candidate effort inside runtimes" });
   }
   if (stage.model && !stage.runtime) {
     context.addIssue({
@@ -478,6 +489,7 @@ const agentStageSchema = z.preprocess(runtimeConfigValidationInput, stageBase.ex
   type: z.literal("agent"),
   runtime: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
+  effort: effortSchema.optional(),
   runtimes: z.array(runtimeCandidateSchema).min(1).optional(),
   skills: z.array(identifierSchema).default([]),
   required_mcp_servers: requiredMcpServersSchema,
@@ -560,6 +572,7 @@ const reviewGateStageSchema = stageBase.extend({
   blocking: z.boolean().optional(),
   runtime: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
+  effort: effortSchema.optional(),
   runtimes: z.array(runtimeCandidateSchema).min(1).optional(),
   skills: z.array(identifierSchema).default([]),
   required_mcp_servers: requiredMcpServersSchema,
@@ -582,6 +595,7 @@ const judgeStageSchema = z.preprocess(runtimeConfigValidationInput, stageBase.ex
   type: z.literal("judge"),
   runtime: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
+  effort: effortSchema.optional(),
   runtimes: z.array(runtimeCandidateSchema).min(1).optional(),
   skills: z.array(identifierSchema).default([]),
   required_mcp_servers: requiredMcpServersSchema,
@@ -865,6 +879,7 @@ export type AgentCapabilityPolicy = z.infer<typeof agentCapabilityPolicySchema>;
 export interface RuntimeCandidate {
   runtime: string;
   model?: string;
+  effort?: Effort;
 }
 
 export const DEFAULT_WORK_ITEM_TYPE = "dev.pr";
@@ -911,11 +926,13 @@ export function stageRuntimeCandidates(
     ? stage.runtimes.map((candidate) => ({
         runtime: candidate.runtime.trim(),
         ...(candidate.model ? { model: candidate.model } : {}),
+        ...(candidate.effort ? { effort: candidate.effort } : {}),
       }))
     : [
         {
           runtime: stage.runtime?.trim() ?? "",
           ...(stage.model ? { model: stage.model } : {}),
+          ...(stage.effort ? { effort: stage.effort } : {}),
         },
       ];
 }

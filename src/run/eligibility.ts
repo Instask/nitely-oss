@@ -511,6 +511,7 @@ export async function evaluateWorkItemRunStarts(
           flowDocument: resolvedFlow.flowDocument,
           inputs: workItem.inputs,
           configuration: workItem.configuration,
+          overrides: workItem.overrides,
           executionBackend: input.executionBackend,
           env: await executionEnv(),
           ...(input.providerStore ? { providerStore: input.providerStore } : {}),
@@ -544,6 +545,7 @@ export async function evaluateWorkItemRunStarts(
                 : {}),
               ...(input.repoName ? { repoName: input.repoName } : {}),
               inputs: workItem.inputs,
+              ...(workItem.overrides ? { overrides: workItem.overrides } : {}),
               ...(input.executionBackend ? { executionBackend: input.executionBackend } : {}),
               ...(workItem.configuration
                 ? { configuration: workItem.configuration }

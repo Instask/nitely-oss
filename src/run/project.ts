@@ -1,3 +1,4 @@
+import { normalizeRunOverrides, type RunOverrides } from "../flow/overrides.js";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
@@ -541,6 +542,7 @@ export interface ProjectedRun {
   runEligibilityOverride?: RunEligibilityOverrideEvidence;
   flowName?: string;
   flowPath?: string;
+  overrides?: RunOverrides;
   flowDocument?: string;
   flowDocumentSha256?: string;
   configurationSnapshotPath?: string;
@@ -1828,6 +1830,7 @@ export function projectRun(
           payload.runEligibilityOverride as RunEligibilityOverrideEvidence;
       }
       projection.flowPath = asString(payload.flowPath);
+      projection.overrides = normalizeRunOverrides(payload.overrides);
       projection.flowDocument = asString(payload.flowDocument);
       projection.flowDocumentSha256 = asString(payload.flowDocumentSha256);
       projection.configurationSnapshotPath = asString(

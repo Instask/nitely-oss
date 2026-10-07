@@ -1,3 +1,4 @@
+import { effortSchema } from "../flow/schema.js";
 import { z } from "zod";
 
 import type { ReproducibilityManifest } from "../run/reproducibility.js";
@@ -8,6 +9,9 @@ const commitShaSchema = z.string().regex(/^[0-9a-f]{40}$/i);
 const runtimeCandidateSchema = z.object({
   runtime: z.string().min(1),
   model: z.string().min(1).optional(),
+  effort: effortSchema.optional(),
+  requestedEffort: effortSchema.optional(),
+  effortStatus: z.enum(["configured", "default", "not-applicable"]).optional(),
 }).strict();
 
 const contextDecisionSchema = z.object({
@@ -39,6 +43,11 @@ export const baselineReproducibilityManifestSchema = z.object({
     path: z.string().min(1).optional(),
     documentSha256: sha256Schema.optional(),
     configurationSha256: sha256Schema.optional(),
+    overrides: z.object({
+      runtime: z.string().min(1).optional(),
+      model: z.string().min(1).optional(),
+      effort: effortSchema.optional(),
+    }).strict().optional(),
   }).strict(),
   inputs: z.array(z.object({
     id: z.string().min(1),

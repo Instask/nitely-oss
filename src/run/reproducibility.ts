@@ -1,3 +1,5 @@
+import type { RuntimeEffortSelection } from "./execution/effort.js";
+import type { RunOverrides } from "../flow/overrides.js";
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -29,8 +31,8 @@ export interface ReproducibilityCommandStage {
 export interface ReproducibilityRuntimeStage {
   stageId: string;
   kind: "agent" | "judge" | "review-gate";
-  candidates: RuntimeCandidate[];
-  selected?: RuntimeCandidate;
+  candidates: Array<RuntimeCandidate & Partial<RuntimeEffortSelection>>;
+  selected?: RuntimeCandidate & Partial<RuntimeEffortSelection>;
 }
 
 export interface ReproducibilitySkillSource {
@@ -75,6 +77,7 @@ export interface ReproducibilityManifest {
     path?: string;
     documentSha256?: string;
     configurationSha256?: string;
+    overrides?: RunOverrides;
   };
   inputs: ReproducibilityInputSnapshot[];
   context: {

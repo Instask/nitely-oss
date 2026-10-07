@@ -1,3 +1,4 @@
+import { normalizeRunOverrides, type RunOverrides } from "../flow/overrides.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   CatalogFlowDisabledError,
@@ -238,6 +239,7 @@ export interface TaskRecord {
   specReadinessOverride?: TaskSpecReadinessOverride;
   repoId?: string;
   flowPath: string;
+  overrides?: RunOverrides;
   template?: FlowTemplateLineage;
   issueUrl?: string;
   specPath: string;
@@ -262,6 +264,7 @@ export interface CreateTaskInput {
   repoId?: string;
   issueUrl?: string;
   flowPath?: string;
+  overrides?: RunOverrides;
 }
 
 export interface TaskDetail {
@@ -844,6 +847,7 @@ export async function createTask(
     ...(options.planningNotes ? { planningNotes: options.planningNotes } : {}),
     ...(options.repoId ? { repoId: options.repoId } : {}),
     flowPath,
+    ...(normalizeRunOverrides(input.overrides) ? { overrides: normalizeRunOverrides(input.overrides) } : {}),
     ...(options.template ? { template: options.template } : {}),
     specPath,
     techDesignPath,

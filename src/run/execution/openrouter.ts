@@ -1,3 +1,5 @@
+import type { Effort } from "../../flow/schema.js";
+
 /**
  * OpenRouter runtime support.
  *
@@ -49,11 +51,12 @@ export function openRouterModelProblem(model: string | undefined): string | unde
  * OpenRouter's own `openrouter/...` model ids intact instead of letting Pi
  * mistake their author for the provider prefix.
  */
-export function createOpenRouterAgentArgs(model: string | undefined): string[] {
+export function createOpenRouterAgentArgs(model: string | undefined, effort?: Effort): string[] {
   const problem = openRouterModelProblem(model);
   if (problem) throw new Error(problem);
   return [
     "-p",
+    ...(effort ? ["--thinking", effort] : []),
     "--provider",
     PI_OPENROUTER_PROVIDER,
     "--model",

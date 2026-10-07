@@ -1,3 +1,4 @@
+import { runtimeEffortSelection } from "./execution/effort.js";
 import { join } from "node:path";
 
 import type { EventStore } from "../events/store.js";
@@ -52,11 +53,15 @@ export function runtimeCandidateEventPayload(input: {
 }): {
   runtime: string;
   model?: string;
+  effort?: import("../flow/schema.js").Effort;
+  requestedEffort?: import("../flow/schema.js").Effort;
+  effortStatus: "configured" | "default" | "not-applicable";
   runtimeCandidateIndex: number;
   runtimeCandidateCount: number;
 } {
   return {
     runtime: input.candidate.runtime,
+    ...runtimeEffortSelection(input.candidate),
     ...(input.candidate.model ? { model: input.candidate.model } : {}),
     runtimeCandidateIndex: input.index,
     runtimeCandidateCount: input.count,
@@ -71,6 +76,7 @@ export function stageWithRuntimeCandidate<T extends AgentRunnableStage>(
     ...stage,
     runtime: candidate.runtime,
     ...(candidate.model ? { model: candidate.model } : { model: undefined }),
+    effort: candidate.effort,
   };
 }
 

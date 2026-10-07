@@ -1,3 +1,4 @@
+import { runtimeEffortSelection, type RuntimeEffortSelection } from "./execution/effort.js";
 import { execFile } from "node:child_process";
 import {
   mkdir,
@@ -110,6 +111,7 @@ import { EventStore } from "../events/store.js";
 import type { StoredRunEvent } from "../events/types.js";
 import { ensureContextKnowledgeProposalNotification } from "../web/context-knowledge-notifications.js";
 import { loadFlow, parseFlowDocument, type FlowGraph } from "../flow/load.js";
+import { applyRunOverrides, normalizeRunOverrides, type RunOverrides } from "../flow/overrides.js";
 import { decideBudgetStoppedResume } from "./budget-resume.js";
 import { flowInputReferences } from "../flow/inputs.js";
 import {
@@ -493,6 +495,7 @@ export interface RunFlowInput {
   repoName?: string;
   inputs: Record<string, ResourceReference>;
   configuration?: Record<string, unknown>;
+  overrides?: RunOverrides;
   providerConnections?: Partial<Record<import("../providers/types.js").ProviderId, string>>;
   ownerId?: string;
   organizationId?: string;
@@ -11126,14 +11129,14 @@ async function writeEvidence(input: {
             if (agent.candidates.length === 1) {
               const candidate = agent.candidates[0]!;
               return [
-                `- ${agent.stageId} (${agent.stageKind}): runtime ${candidate.runtime}, model ${candidate.model ?? "default"}`,
+                `- ${agent.stageId} (${agent.stageKind}): runtime ${candidate.runtime}, model ${candidate.model ?? "default"}, effort ${runtimeEffortSelection(candidate).effort ?? runtimeEffortSelection(candidate).effortStatus}`,
                 ...capabilityLines,
               ].join("\n");
             }
             const chain = agent.candidates
               .map(
                 (candidate) =>
-                  `${candidate.runtime}/${candidate.model ?? "default"}`,
+                  `${candidate.runtime}/${candidate.model ?? "default"} (effort ${runtimeEffortSelection(candidate).effort ?? runtimeEffortSelection(candidate).effortStatus})`,
               )
               .join(" -> ");
             return [
@@ -11690,6 +11693,9 @@ async function writeEvidence(input: {
     "## Agent Runtimes",
     "",
     agentRuntimeLines,
+    ...(input.reproducibility?.runtimes.flatMap((stage) => stage.selected
+      ? [`Selected ${stage.stageId}: runtime ${stage.selected.runtime}, model ${stage.selected.model ?? "default"}, effort ${stage.selected.effort ?? stage.selected.effortStatus ?? "default"}${stage.selected.requestedEffort ? ` (requested ${stage.selected.requestedEffort})` : ""}`]
+      : []) ?? []),
     "",
     "## Stage Context Controls",
     "",
@@ -12039,7 +12045,7 @@ function reproducibilityRuntimeStages(input: {
   stages: Stage[];
   events: StoredRunEvent[];
 }): ReproducibilityManifest["runtimes"] {
-  const selectedByStage = new Map<string, RuntimeCandidate>();
+  const selectedByStage = new Map<string, RuntimeCandidate & Partial<RuntimeEffortSelection>>();
   for (const event of input.events) {
     if (event.type !== "stage.runtime.selected" || !event.stageId) continue;
     const payload = asRecord(event.payload);
@@ -12048,12 +12054,17 @@ function reproducibilityRuntimeStages(input: {
     selectedByStage.set(event.stageId, {
       runtime,
       ...(stringValue(payload.model) ? { model: stringValue(payload.model) } : {}),
+      ...runtimeEffortSelection({
+        runtime,
+        model: stringValue(payload.model),
+        effort: (payload.requestedEffort ?? payload.effort) as RuntimeCandidate["effort"],
+      }),
     });
   }
   return collectAgentRuntimeEvidence(input.stages).map((stage) => ({
     stageId: stage.stageId,
     kind: stage.stageKind,
-    candidates: stage.candidates,
+    candidates: stage.candidates.map(({ effort, ...candidate }) => ({ ...candidate, ...runtimeEffortSelection({ ...candidate, effort }) })),
     ...(selectedByStage.get(stage.stageId)
       ? { selected: selectedByStage.get(stage.stageId) }
       : {}),
@@ -12669,9 +12680,11 @@ export async function runFlow(
   const worktreePath = join(runDirectory, "worktree");
   const loadedFlowDocument =
     input.flowDocument ?? (await readFile(input.flowPath, "utf8"));
-  const loaded = parseFlowDocument(loadedFlowDocument, {
+  const overrides = normalizeRunOverrides(input.overrides);
+  const stored = parseFlowDocument(loadedFlowDocument, {
     externalInputs: Object.keys(input.inputs),
   });
+  const loaded = { ...stored, flow: applyRunOverrides(stored.flow, overrides) };
   const runWorkItemType = input.workItemType ?? flowWorkItemType(loaded.flow);
   await assertWorkItemTypeAllowed({
     repoPath,
@@ -12801,6 +12814,7 @@ export async function runFlow(
       runEligibilityOverride: input.runEligibilityOverride,
       flowPath: input.flowPath,
       flowDocument: loadedFlowDocument,
+      overrides,
       flowDocumentSha256: sha256Text(loadedFlowDocument),
       repoPath,
       repoId: input.repoId,
@@ -12867,6 +12881,7 @@ export async function runFlow(
         name: loaded.flow.metadata.name,
         path: input.flowPath,
         documentSha256: sha256Text(loadedFlowDocument),
+        overrides,
         configurationSha256,
       },
       inputs: inputSnapshots,
@@ -14826,6 +14841,7 @@ export async function resumeRun(
       : await loadFlow(flowPath, {
           externalInputs: Object.keys(inputReferences),
         });
+    loaded = { ...loaded, flow: applyRunOverrides(loaded.flow, projection.overrides) };
     let budgetResumeStageId: string | undefined;
     if (resumableStages.length === 0) {
       const alwaysRunStageIds = loaded.flow.spec.stages

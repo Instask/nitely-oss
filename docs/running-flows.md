@@ -449,3 +449,45 @@ expensive review. Keep the pair explicit in each flow and verify it against
 the repository's runtime capability policy; do not assume model names are
 portable across providers. Operators can copy a flow and override the pairs
 when their provider account, policy, or cost boundary differs.
+
+## Model and effort overrides
+
+Agent, judge, and review-gate stages can declare `effort` alongside `runtime`
+and `model`, or on each `runtimes` candidate. Accepted levels are `off`,
+`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Omitting it uses the
+runtime's default. Pi, OpenRouter, and Together pass `--thinking <level>`;
+Claude passes `--effort <level>`; Codex passes
+`-c model_reasoning_effort=<level>`. A runtime without an effort mapping blocks
+preflight with `runtime-effort-unsupported` when effort is supplied.
+
+Choose a model and effort per run without editing the stored Flow:
+
+```bash
+nitely run flows/implement-medium.json --repo . \
+  --input spec=./spec.md --input tech-design=./tech-design.md \
+  --runtime openrouter --model openai/gpt-oss-120b --effort high
+
+nitely task create --server http://localhost:4173 --repo-id my-repo \
+  --title "Implement approved work" --spec ./spec.md --tech-design ./tech-design.md \
+  --model openai/gpt-oss-120b --effort high
+```
+
+`--model`, `--effort`, and optional `--runtime` override every agent, judge,
+and review-gate stage. Model and effort overrides apply to every existing
+fallback candidate; a runtime override replaces the fallback chain with that
+runtime. Command and approval stages are unaffected. Per-stage overrides are
+not supported.
+
+`POST /api/tasks` accepts an `overrides` object as task defaults;
+`POST /api/tasks/:id/runs` accepts the same object for one run:
+
+```json
+{ "overrides": { "runtime": "openrouter", "model": "openai/gpt-oss-120b", "effort": "high" } }
+```
+
+Overrides pass flow and runtime preflight validation. The Run stores the
+original Flow document and applied overrides separately, and resume reapplies
+the recorded overrides. Run events, `reproducibility.json`, and evidence record
+model, requested effort, and effective effort status. Known models without
+reasoning support record `not-applicable` and omit the thinking flag; see
+[OpenRouter models](openrouter.md).

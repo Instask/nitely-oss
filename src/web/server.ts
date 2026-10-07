@@ -1,3 +1,4 @@
+import { normalizeRunOverrides, RunOverridesError, type RunOverrides } from "../flow/overrides.js";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -2203,6 +2204,7 @@ function requireCurrentOrganizationPermission(
 }
 
 function taskInputFromJson(value: unknown): {
+  overrides?: RunOverrides;
   title: string;
   spec: string;
   techDesign: string;
@@ -2221,6 +2223,7 @@ function taskInputFromJson(value: unknown): {
     throw new WebInputError("planningStatus must be draft or ready");
   }
   return {
+    overrides: normalizeRunOverrides(record.overrides),
     title: typeof record.title === "string" ? record.title : "",
     spec: typeof record.spec === "string" ? record.spec : "",
     techDesign: typeof record.techDesign === "string" ? record.techDesign : "",
@@ -2524,6 +2527,7 @@ function taskReworkRequestInputFromJson(value: unknown): {
 }
 
 function draftSpecInputFromJson(value: unknown): {
+  overrides?: RunOverrides;
   sourceType: DraftSpecSourceType;
   prompt?: string;
   text?: string;
@@ -2612,6 +2616,7 @@ function draftSpecInputFromJson(value: unknown): {
     throw new WebInputError("publicBaseUrl is only supported for ticket intake");
   }
   return {
+    overrides: normalizeRunOverrides(record.overrides),
     sourceType,
     prompt: typeof record.prompt === "string" ? record.prompt : undefined,
     text: typeof record.text === "string" ? record.text : undefined,
@@ -4218,6 +4223,7 @@ async function runStoredWorkItem(
   notFoundMessage: string,
   intent: RunEligibilityIntent,
   taskScope?: RunFlowInput["taskScope"],
+  overrides?: RunOverrides,
 ): Promise<RunFlowResult> {
   const repoPath = repository.path;
   let candidate = await getWorkItemSnapshot(repoPath, workItemId);
@@ -4250,7 +4256,8 @@ async function runStoredWorkItem(
       ? { ...workItem, ownerId: user.id }
       : workItem;
   const workItems = (await listUnifiedWorkItems(repoPath)).map((item) =>
-    item.id === candidateSnapshot.id ? candidateSnapshot : item,
+    item.id === candidateSnapshot.id
+      ? { ...candidateSnapshot, overrides: normalizeRunOverrides({ ...candidateSnapshot.overrides, ...overrides }) } : item,
   );
   const candidateVersion = {
     ...candidate.version,
@@ -5805,6 +5812,7 @@ function appendAcceptedRunCreated(input: {
   repoName?: string;
   inputs: RunFlowInput["inputs"];
   configuration?: RunFlowInput["configuration"];
+  overrides?: RunOverrides;
   providerConnections?: RunFlowInput["providerConnections"];
   workItemId: string;
   workItemType?: string;
@@ -5823,6 +5831,7 @@ function appendAcceptedRunCreated(input: {
       repoName: input.repoName,
       inputs: input.inputs,
       configuration: input.configuration,
+      overrides: input.overrides,
       providerConnections: input.providerConnections,
       branchName: input.branchName,
       workItemId: input.workItemId,
@@ -5854,6 +5863,7 @@ function ensureRunCompletedEvent(
       repoName: runInput.repoName,
       inputs: runInput.inputs,
       ...(runInput.configuration ? { configuration: runInput.configuration } : {}),
+      ...(runInput.overrides ? { overrides: runInput.overrides } : {}),
       ...(runInput.providerConnections ? { providerConnections: runInput.providerConnections } : {}),
       workItemId: runInput.workItemId,
       workItemType: runInput.workItemType,
@@ -6146,6 +6156,7 @@ async function runStoredWorkItemAcrossRepositories(
   notFoundMessage: string,
   intent: RunEligibilityIntent,
   taskScope?: RunFlowInput["taskScope"],
+  overrides?: RunOverrides,
 ): Promise<RunFlowResult> {
   for (const repository of visibleRepositories(repositories, user)) {
     try {
@@ -6164,6 +6175,7 @@ async function runStoredWorkItemAcrossRepositories(
         notFoundMessage,
         intent,
         taskScope,
+        overrides,
       );
     } catch (error) {
       if (error instanceof WebNotFoundError) {
@@ -9485,6 +9497,7 @@ async function handleApiRequest(
       repository.path,
       {
         title: draft.title,
+        ...(draftInput.overrides ? { overrides: draftInput.overrides } : {}),
         spec: draft.markdown,
         techDesign:
           "# Technical Design\n\nStatus: draft\n\nA technical design must be created and approved before implementation.\n",
@@ -10356,6 +10369,7 @@ async function handleApiRequest(
     try { input = { ...input, providerConnectionBindings: validateProviderConnectionBindings(body.providerConnections) ?? input.providerConnectionBindings }; } catch { throw new WebInputError("invalid provider connection bindings"); }
     const runFacts = manualRunRequestFacts(url, body, user);
     const taskScope = taskScopeFromJson(body.taskScope);
+    const overrides = normalizeRunOverrides(body.overrides);
     let currentTask: Awaited<ReturnType<typeof getTask>>;
     let repository: WebRepository;
     try {
@@ -10373,6 +10387,7 @@ async function handleApiRequest(
         "task not found",
         runFacts.intent,
         taskScope,
+        overrides,
       );
       sendJson(response, 200, { run: runStartResponse(result) });
       return true;
@@ -10415,7 +10430,8 @@ async function handleApiRequest(
       preparedCandidate.executionInputs,
     );
     const workItems = (await listUnifiedWorkItems(repository.path)).map((item) =>
-      item.id === candidateWorkItem.id ? candidateWorkItem : item,
+      item.id === candidateWorkItem.id
+        ? { ...candidateWorkItem, overrides: normalizeRunOverrides({ ...candidateWorkItem.overrides, ...overrides }) } : item,
     );
     const candidateVersion = {
       ...preparedCandidate.version,
@@ -10805,6 +10821,7 @@ async function handleApiRequest(
             ? { flowId }
             : { flowPath: typeof body.flowPath === "string" ? body.flowPath : "" }),
         inputs: isResourceReferenceMap(body.inputs) ? body.inputs : {},
+        overrides: normalizeRunOverrides(body.overrides),
         ...(body.configuration &&
         typeof body.configuration === "object" &&
         !Array.isArray(body.configuration)
@@ -12000,6 +12017,7 @@ export async function startWebServer(
       } catch (error) {
         if (error instanceof ConnectionManagementDeniedError) error = new WebForbiddenError();
         if (error instanceof MissingConnectionError) error = new WebNotFoundError("provider connection not found");
+        if (error instanceof RunOverridesError) error = new WebInputError(error.message);
         if (error instanceof ReconnectRequiredError) error = new WebInputError("provider connection requires reconnection");
         const details = errorStatusAndCode(error);
         if (preparedApiToken) {

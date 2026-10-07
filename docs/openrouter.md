@@ -92,6 +92,27 @@ back between models:
 ]
 ```
 
+## Reasoning effort and evaluation runs
+
+Set optional `effort` on a stage or runtime candidate, or supply `--model` and
+`--effort` to `nitely run` / `nitely task create`. Add `--runtime openrouter`
+when the stored Flow uses a different runtime. API callers use
+`{ "overrides": { "model": "openai/gpt-oss-120b", "effort": "high" } }`.
+See [running flows](running-flows.md#model-and-effort-overrides) for scope and
+snapshot behavior.
+
+For applicable models, Nitely passes a separate `--thinking <level>` to Pi.
+Do not append `:high` to a model id: OpenRouter's `:free` and `:batch` variants
+are part of the model id and are preserved.
+
+The bundled capability metadata identifies `qwen/qwen3-coder-next` (including
+its variant suffixes) as not supporting reasoning, based on OpenRouter's
+[model catalog](https://openrouter.ai/api/v1/models). For that model, effort is
+optional; even if a batch requests effort, Nitely omits `--thinking`, retains
+`requestedEffort`, and records `effortStatus: "not-applicable"`. Other models
+use the requested level, or the CLI default when effort is omitted. The
+bundled capability entry is a snapshot, rather than a live catalog lookup.
+
 ## Credential precedence
 
 From highest to lowest:

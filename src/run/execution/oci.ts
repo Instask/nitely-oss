@@ -1,3 +1,4 @@
+import { runtimeEffortSelection } from "./effort.js";
 import { randomUUID } from "node:crypto";
 import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { lstatSync } from "node:fs";
@@ -19,6 +20,7 @@ import {
   agentRuntimeExitMessage,
   claudePermissionModeForPolicy,
   createDefaultAgentRuntimeRegistry,
+  runtimeEffortProblem,
   LocalExecutionBackend,
   type AgentRuntimeRegistry,
   type ClaudePermissionMode,
@@ -1255,6 +1257,8 @@ export class OciExecutionBackend implements ExecutionBackend {
             .join("; ")}.`,
         );
       }
+      const effortProblem = runtimeEffortProblem(runtime, input.stage.effort);
+      if (effortProblem) throw new Error(`stage ${input.stage.id}: ${effortProblem}`);
       const modelProblem = runtime.validateModel?.(input.stage.model);
       if (modelProblem) {
         throw new Error(`stage ${input.stage.id}: ${modelProblem}`);
@@ -1293,6 +1297,7 @@ export class OciExecutionBackend implements ExecutionBackend {
       const launch = runtime.build({
         worktreePath: "/workspace",
         model: input.stage.model,
+        effort: runtimeEffortSelection(input.stage).effort,
         prompt: preparedPrompt,
         ...claudeLaunch,
         env: {
@@ -1847,6 +1852,8 @@ export class OciExecutionBackend implements ExecutionBackend {
           missingConfig: missing.flat(),
         };
       }
+      const effortProblem = runtimeEffortProblem(runtime, input.stage.effort);
+      if (effortProblem) return { available: false, reason: effortProblem };
       const modelProblem = runtime.validateModel?.(input.stage.model);
       if (modelProblem) {
         return { available: false, reason: modelProblem };
