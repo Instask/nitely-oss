@@ -484,6 +484,39 @@ export class FlowStore {
     return this.getFlow(id);
   }
 
+  /**
+   * Replace a system record's document with the shipped seed, discarding
+   * customizations and adopting that seed's version as the record's lineage.
+   * The enabled flag is kept.
+   */
+  resetToSeed(id: string, seed: FlowSeed, options: FlowStoreOptions = {}): FlowRecord {
+    const existing = this.getFlow(id);
+    if (existing.origin !== "system" || existing.seed?.key !== seed.key) {
+      throw new WebInputError("only a built-in flow can be reset to its shipped version");
+    }
+    const updatedAt = (options.now?.() ?? new Date()).toISOString();
+    const result = this.#database
+      .prepare(`
+        UPDATE flows
+        SET name = ?, work_item_type = ?, document = ?, seed_hash = ?, seed_source = ?,
+            seed_available_hash = NULL, seed_removed_at = NULL, updated_at = ?
+        WHERE id = ?
+      `)
+      .run(
+        seed.name,
+        seed.workItemType ?? null,
+        seed.document,
+        flowDocumentHash(seed.document),
+        seed.source,
+        updatedAt,
+        id,
+      );
+    if (Number(result.changes) !== 1) {
+      throw new WebNotFoundError("flow not found");
+    }
+    return this.getFlow(id);
+  }
+
   deleteFlow(id: string): void {
     validateFlowId(id);
     if (this.getFlow(id).origin === "system") {

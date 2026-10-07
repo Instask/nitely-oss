@@ -9,6 +9,7 @@ import {
 } from "./flow/format-graph.js";
 import { FlowValidationError, loadFlow, parseFlowDocument } from "./flow/load.js";
 import { lintFlowProduction } from "./flows/lint.js";
+import { FLOW_CLI_USAGE, runFlowCli } from "./cli/flows.js";
 import {
   resumeRun,
   runFlow,
@@ -1514,67 +1515,6 @@ async function createRemoteTask(
     ...(typeof task.status === "string" ? { status: task.status } : {}),
     ...(typeof task.issueUrl === "string" ? { issueUrl: task.issueUrl } : {}),
   };
-}
-
-interface RemoteFlowSummary {
-  id: string;
-  name?: string;
-  source?: string;
-  runnable?: boolean;
-}
-
-async function listRemoteFlows(
-  input: { serverUrl: string; apiToken?: string },
-  fetchImpl: FetchFunction,
-): Promise<unknown[]> {
-  const serverUrl = normalizeRemoteServerUrl(input.serverUrl);
-  const headers = remoteRequestHeaders(input.apiToken);
-  const response = await fetchImpl(
-    `${serverUrl}/api/flows`,
-    headers ? { headers } : {},
-  );
-  if (!response.ok) {
-    throw new Error(
-      `remote flow list failed (HTTP ${response.status}): ${await remoteErrorMessage(response)}`,
-    );
-  }
-  let payload: unknown;
-  try {
-    payload = await response.json();
-  } catch {
-    throw new Error("remote flow list failed: invalid JSON response");
-  }
-  const flows = readJsonObject(payload)?.flows;
-  if (!Array.isArray(flows)) {
-    throw new Error("remote flow list failed: invalid response: missing flows");
-  }
-  return flows;
-}
-
-function remoteFlowSummary(value: unknown): RemoteFlowSummary | undefined {
-  const record = readJsonObject(value);
-  if (typeof record?.id !== "string" || !record.id) return undefined;
-  return {
-    id: record.id,
-    ...(typeof record.name === "string" ? { name: record.name } : {}),
-    ...(typeof record.source === "string" ? { source: record.source } : {}),
-    ...(typeof record.runnable === "boolean" ? { runnable: record.runnable } : {}),
-  };
-}
-
-function printRemoteFlows(io: CliIo, flows: unknown[]): void {
-  if (flows.length === 0) {
-    io.stdout("No flows");
-    return;
-  }
-  for (const entry of flows) {
-    const flow = remoteFlowSummary(entry);
-    if (!flow) continue;
-    const source = flow.source ?? "unknown";
-    const runnable = flow.runnable === false ? "blocked" : "runnable";
-    io.stdout(`${flow.id}  ${source}  ${runnable}  ${flow.name ?? flow.id}`);
-  }
-  io.stdout("Pass an id above to nitely task create --flow <id>.");
 }
 
 function printRemoteTaskResult(
@@ -4030,60 +3970,12 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
   },
   {
     name: "flow",
-    usage: [
-      "  flow list [--server <url>] [--json]",
-    ],
-    run: async ({ argv, io, dependencies }) => {
-      if (argv[1] !== "list") {
-        io.stderr("Usage: nitely flow list [--server <url>] [--json]");
-        return 1;
-      }
-
-      const env = dependencies.env ?? process.env;
-      let serverFlag = "";
-      let asJson = false;
-      let resolvedApiToken: string | undefined;
-      try {
-        for (let index = 2; index < argv.length; index += 1) {
-          const arg = argv[index];
-          if (arg === "--server") {
-            serverFlag = argv[++index] ?? "";
-            if (!serverFlag) throw new Error("Missing value for --server");
-            continue;
-          }
-          if (arg === "--json") {
-            asJson = true;
-            continue;
-          }
-          io.stderr(`Unknown flow list option: ${arg}`);
-          return 1;
-        }
-        const remote = await resolveRemoteTarget({
-          env,
-          ...(serverFlag ? { flag: serverFlag } : {}),
-        });
-        resolvedApiToken = remote.apiToken;
-        const serverUrl = requireRemoteServerUrl(remote.serverUrl);
-        const flows = await listRemoteFlows(
-          {
-            serverUrl,
-            ...(remote.apiToken ? { apiToken: remote.apiToken } : {}),
-          },
-          dependencies.fetch ?? fetch,
-        );
-        if (asJson) {
-          io.stdout(JSON.stringify({ flows }));
-        } else {
-          printRemoteFlows(io, flows);
-        }
-        return 0;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        io.stderr(redactSecret(message, resolvedApiToken, env.NITELY_API_TOKEN));
-        return 1;
-      }
-
-    },
+    usage: FLOW_CLI_USAGE,
+    run: async ({ argv, io, dependencies }) =>
+      await runFlowCli(argv.slice(1), io, {
+        env: dependencies.env ?? process.env,
+        fetch: dependencies.fetch ?? fetch,
+      }),
   },
   {
     name: "task",

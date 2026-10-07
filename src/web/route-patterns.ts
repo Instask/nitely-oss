@@ -211,6 +211,12 @@ export function apiWorkItemRunId(pathname: string): string | undefined {
   return match ? decodeURIComponent(match[1]) : undefined;
 }
 
+/** `POST /api/flows/<encoded id>/reset`; the id is encoded, so it has no slash. */
+export function apiFlowResetId(pathname: string): string | undefined {
+  const match = /^\/api\/flows\/([^/]+)\/reset$/.exec(pathname);
+  return match ? decodeURIComponent(match[1]) : undefined;
+}
+
 export function apiFlowId(pathname: string): string | undefined {
   const match = /^\/api\/flows\/(.+)$/.exec(pathname);
   return match ? decodeURIComponent(match[1]) : undefined;

@@ -463,6 +463,35 @@ describe("flows API", () => {
     expect(deleted.status).toBe(400);
   });
 
+  it("lets only an administrator change or reset a built-in Flow when sign-in is required", async () => {
+    const repo = await createRepo();
+    await createUser(repo, { email: "user@example.test", password: "user password passphrase", role: "user" });
+    await createUser(repo, { email: "admin@example.test", password: "admin password passphrase", role: "admin" });
+    const server = await start(repo, undefined, { authMode: "required", providerEnv: {} });
+    const userLogin = await login(server, "user@example.test", "user password passphrase");
+    const adminLogin = await login(server, "admin@example.test", "admin password passphrase");
+    const id = encodeURIComponent("flows/implement-spec-bootstrap.json");
+    const put = (cookie: string, body: unknown) =>
+      fetch(`${server.url}/api/flows/${id}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json", cookie },
+        body: JSON.stringify(body),
+      });
+    const reset = (cookie: string) =>
+      fetch(`${server.url}/api/flows/${id}/reset`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie },
+        body: "{}",
+      });
+
+    expect((await put(userLogin.cookie, { enabled: false })).status).toBe(403);
+    expect((await reset(userLogin.cookie)).status).toBe(403);
+    expect((await put(adminLogin.cookie, { enabled: false })).status).toBe(200);
+    const adminReset = await reset(adminLogin.cookie);
+    expect(adminReset.status).toBe(200);
+    await expect(json(adminReset)).resolves.toMatchObject({ flow: { enabled: false, origin: "system" } });
+  });
+
   it("updates and deletes stored user flows in local mode", async () => {
     const repo = await createRepo();
     const server = await start(repo);

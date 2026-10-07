@@ -83,7 +83,10 @@ nitely flow list --server http://192.0.2.10:4173 --json
 renamed, or removed on the instance shows up immediately. Each line prints the
 Flow id, its source (`builtin` or `user`), whether it is runnable, and its name.
 The id is exactly what `task create --flow` accepts. An API token needs the
-`tasks:read` capability to read the catalog.
+`tasks:read` capability to read the catalog. Newer servers append the Flow's
+state in brackets, such as `[disabled,edited,newer-shipped-version]`. The
+other `nitely flow` commands (`show`, `enable`, `disable`, `update`, `reset`,
+`delete`) are described in [user-defined-flows.md](user-defined-flows.md#cli).
 
 Create a draft task from one intake source, without writing a spec or technical
 design first. The intake contract is

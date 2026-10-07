@@ -5350,7 +5350,9 @@ None.
     );
 
     expect(code).toBe(1);
-    expect(stderr).toEqual(["Usage: nitely flow list [--server <url>] [--json]"]);
+    expect(stderr).toEqual([
+      "Usage: nitely flow list|show|enable|disable|update|reset|delete [<id>] [--repo <path> | --server <url>] [--json]",
+    ]);
   });
 
   it("lists remote tasks with id, status, and title", async () => {

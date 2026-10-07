@@ -17,7 +17,12 @@ missing.
 nitely validate <flow> [--external-input <name>]
 nitely graph <flow> [--format text|mermaid|json] [--external-input <name>]
 nitely doctor <flow> --repo <path> [--input <name>=<path>]
-nitely flow list [--server <url>] [--json]
+nitely flow list [--repo <path> | --server <url>] [--json]
+nitely flow show <id> [--repo <path> | --server <url>] [--json]
+nitely flow enable|disable <id> [--repo <path> | --server <url>] [--json]
+nitely flow update <id> --file <path> [--repo <path> | --server <url>] [--json]
+nitely flow reset <id> [--repo <path> | --server <url>] [--json]
+nitely flow delete <id> [--repo <path> | --server <url>] [--json]
 ```
 
 - `validate` checks the flow contract offline. Declare each externally supplied
@@ -28,7 +33,16 @@ nitely flow list [--server <url>] [--json]
 - `doctor` is the preflight: it reports `PASS`, `WARN`, or `BLOCK` with issue
   codes such as `missing-input`, `input-unreadable`, `missing-provider`,
   `unknown-mcp-server`, and `runtime-unavailable`.
-- `flow list` talks to a running server (built-in plus user-defined flows).
+- `flow …` manages the Flow catalog (built-in plus user-defined flows). With
+  `--repo` it edits that repository's `.nitely/flows.db` directly; without it, it
+  talks to a running server, which allows built-in changes only to an admin or
+  in local mode (API tokens cannot change flows).
+- Built-in flows are `flows/<name>.json`. Editing one (`update`) stops shipped
+  upgrades from overwriting it; `list` then shows "newer-shipped-version" when
+  one exists, and `reset` takes the shipped version (discarding the edits). A
+  disabled flow blocks new work and runs. Built-in flows cannot be deleted.
+- `update` validates the document first and leaves the stored one untouched if
+  it is invalid.
 
 ## Running
 

@@ -7,10 +7,19 @@ behind those tasks (see [work-item-model.md](work-item-model.md)).
 
 ## Flow sources
 
-- **Built-in flows**: the JSON files under `flows/`. They are read-only in the
-  Web Console and always visible and runnable. Built-in Web/API ids are limited
-  to discovered `flows/*.json` entries; absolute paths, `..` traversal, nested
-  paths, non-JSON files, and symlinks that resolve outside `flows/` are rejected.
+- **Built-in flows**: the JSON files under `flows/`, from the repository or, when
+  the repository lacks one, the copy shipped with Nitely. They are seeded into
+  the Flow store (`.nitely/flows.db`) as `system` Flows, and everything that runs
+  or lists a Flow reads the stored copy. Their id stays `flows/<name>.json`;
+  absolute paths, `..` traversal, nested paths, non-JSON files, and symlinks
+  that resolve outside `flows/` are not built-in ids.
+  - An **unedited** built-in Flow follows the shipped file: a newer shipped
+    version replaces it on the next lookup.
+  - An **edited** built-in Flow is never overwritten. When a newer version
+    ships it is flagged (`upstreamUpdateAvailable` in the API, "newer shipped
+    version" in the CLI) until you reset it.
+  - A built-in Flow can be **disabled** (no new work or runs from it) but not
+    deleted.
 - **User flows**: stored in a local SQLite database (`.nitely/flows.db`), not as
   repository files and not committed to Git. They are created and edited from the
   page.
@@ -171,12 +180,35 @@ run time. A flow with any validation error is not saveable or runnable.
 
 - `GET /api/flows`, `GET /api/flows/:id`
 - `POST /api/flows/validate` — validate a document without persisting.
-- `POST /api/flows`, `PUT /api/flows/:id`, `DELETE /api/flows/:id` — user flows.
+- `POST /api/flows`, `DELETE /api/flows/:id` — user flows.
+- `PUT /api/flows/:id` — replace the document (`document`) and/or set
+  `enabled`, for user and built-in flows.
+- `POST /api/flows/:id/reset` — replace a built-in flow with its shipped
+  version (encode the id, e.g. `flows%2Fimplement-small.json`).
 - `GET /api/flows/templates`
 - Running a flow currently reuses the compatibility `POST /api/work-items`
   endpoint, which persists an internal generic work item and surfaces it through
   `/tasks`. The endpoint accepts a built-in `flowPath` such as
   `flows/rework-pr-bootstrap.json` or a stored user `flowId`.
+
+## CLI
+
+`nitely flow` manages the same catalog. With `--repo <path>` it works on that
+repository's Flow store directly; without it, it calls the API of the server
+from `--server`, `NITELY_SERVER_URL`, or `nitely connect`.
+
+```sh
+nitely flow list [--repo <path>] [--json]        # id, origin, enabled, edited, newer shipped version
+nitely flow show <id> [--repo <path>] [--json]   # print the Flow document
+nitely flow enable <id> [--repo <path>]
+nitely flow disable <id> [--repo <path>]
+nitely flow update <id> --file <path> [--repo <path>]   # validated before it is stored
+nitely flow reset <id> [--repo <path>]           # built-in only: take the shipped version
+nitely flow delete <id> [--repo <path>]          # user flows only
+```
+
+`reset` both discards your edits and accepts a newer shipped version, since
+both mean "use what ships now". It keeps the enabled flag.
 
 ## Comment-triggered PR rework
 
@@ -203,5 +235,11 @@ before execution while preserving the normalized feedback lineage.
 
 ## Permissions
 
-Any logged-in user may create, edit, run, and delete flows. Local mode is
-unrestricted.
+Any logged-in user may create flows, and edit or delete the ones they may
+write. Built-in flows have no owner: only an administrator may edit, enable,
+disable, or reset them, and nobody may delete them. Local mode is unrestricted,
+and so is `nitely flow --repo`, because writing the repository's `.nitely/`
+directory already means full control of its store. API tokens have no
+flow-management capability, so remote `nitely flow` changes need a server in
+local mode; on a sign-in server, use the Web Console as an administrator or run
+the command on the host with `--repo`.
