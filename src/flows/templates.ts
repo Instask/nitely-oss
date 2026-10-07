@@ -8,6 +8,7 @@ import {
   type FlowArtifactGraphView,
 } from "./artifact-graph.js";
 import {
+  CatalogFlowDisabledError,
   CatalogFlowNotFoundError,
   catalogFlowSummary,
   resolveCatalogFlow,
@@ -203,21 +204,29 @@ function stageSkills(stage: Stage): string[] {
 }
 
 /**
- * External inputs of a template's Flow: the declared `metadata.inputs`, or,
- * for a Flow that declares none, the inputs its stages consume that no stage
- * produces (the same inference the validator uses). A declared input with a
- * default source is optional; an inferred one is always required.
+ * External inputs of a template's Flow, the same set the validator infers:
+ * the declared `metadata.inputs` plus every input a stage consumes that no
+ * stage produces. A declared input keeps its type and is optional when it has
+ * a default source; an undeclared external input is always required.
  */
 function templateInputs(flow: Flow, document: string): FlowTemplateInput[] {
-  const declared = flow.metadata.inputs ?? [];
-  if (declared.length > 0) {
-    return declared.map((input) => ({
+  const inputs: FlowTemplateInput[] = [];
+  const seen = new Set<string>();
+  for (const input of flow.metadata.inputs ?? []) {
+    if (seen.has(input.id)) continue;
+    seen.add(input.id);
+    inputs.push({
       id: input.id,
       ...(input.type ? { type: input.type } : {}),
       required: !inputContractHasDefaultSource(input),
-    }));
+    });
   }
-  return inferExternalInputs(document).map((id) => ({ id, required: true }));
+  for (const id of inferExternalInputs(document)) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    inputs.push({ id, required: true });
+  }
+  return inputs;
 }
 
 function summarizeTemplate(
@@ -311,8 +320,12 @@ export async function listFlowTemplates(
     try {
       const template = await getFlowTemplate(repoPath, entry.id, options);
       if (template) templates.push(template);
-    } catch {
-      // A disabled built-in Flow is not offered as a starting point.
+    } catch (error) {
+      // A disabled built-in Flow is not offered as a starting point. Anything
+      // else (an invalid stored document, a store or filesystem failure) is a
+      // real fault and must not silently drop the template.
+      if (error instanceof CatalogFlowDisabledError) continue;
+      throw error;
     }
   }
   return templates;

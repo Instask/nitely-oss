@@ -77,7 +77,11 @@ List the Flows the connected instance exposes before choosing one:
 ```bash
 nitely flow list
 nitely flow list --server http://192.0.2.10:4173 --json
+nitely flow list --server http://192.0.2.10:4173 --repo-id <repo-id>
 ```
+
+Flow catalogs are per repository: `--repo-id` selects which of the server's
+repositories every `nitely flow` subcommand targets (default: home).
 
 `flow list` queries `GET /api/flows` on every invocation, so a Flow added,
 renamed, or removed on the instance shows up immediately. Each line prints the

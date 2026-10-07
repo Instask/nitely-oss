@@ -30,24 +30,27 @@ import {
  * controls the store, so this is the same as the Web Console's local mode.
  * Otherwise it talks to a running server (`--server`, `NITELY_SERVER_URL`, or
  * the saved instance), where the server applies its own rules: built-in Flows
- * can be changed only by an administrator or in local mode.
+ * can be changed only by an administrator or in local mode. Flow stores are
+ * per repository, so `--repo-id <id>` picks which of the server's
+ * repositories every remote subcommand targets (the server's home repository
+ * when omitted).
  *
  * The store logic lives in src/flows/catalog.ts; this file only parses
  * arguments, picks a target, and prints.
  */
 
 export const FLOW_CLI_USAGE = [
-  "  flow list [--repo <path> | --server <url>] [--json]",
-  "  flow show <id> [--repo <path> | --server <url>] [--json]",
-  "  flow enable <id> [--repo <path> | --server <url>] [--json]",
-  "  flow disable <id> [--repo <path> | --server <url>] [--json]",
-  "  flow update <id> --file <path> [--repo <path> | --server <url>] [--json]",
-  "  flow reset <id> [--repo <path> | --server <url>] [--json]",
-  "  flow delete <id> [--repo <path> | --server <url>] [--json]",
+  "  flow list [--repo <path> | [--server <url>] [--repo-id <id>]] [--json]",
+  "  flow show <id> [--repo <path> | [--server <url>] [--repo-id <id>]] [--json]",
+  "  flow enable <id> [--repo <path> | [--server <url>] [--repo-id <id>]] [--json]",
+  "  flow disable <id> [--repo <path> | [--server <url>] [--repo-id <id>]] [--json]",
+  "  flow update <id> --file <path> [--repo <path> | [--server <url>] [--repo-id <id>]] [--json]",
+  "  flow reset <id> [--repo <path> | [--server <url>] [--repo-id <id>]] [--json]",
+  "  flow delete <id> [--repo <path> | [--server <url>] [--repo-id <id>]] [--json]",
 ];
 
 const USAGE_LINE =
-  "Usage: nitely flow list|show|enable|disable|update|reset|delete [<id>] [--repo <path> | --server <url>] [--json]";
+  "Usage: nitely flow list|show|enable|disable|update|reset|delete [<id>] [--repo <path> | [--server <url>] [--repo-id <id>]] [--json]";
 
 /** One Flow as the CLI prints it, from either target. */
 export interface FlowCliEntry {
@@ -121,10 +124,12 @@ function remoteTarget(
   serverUrl: string,
   apiToken: string | undefined,
   fetchImpl: FetchFunction,
+  repoId?: string,
 ): FlowCliTarget {
   const base = normalizeRemoteServerUrl(serverUrl);
+  const query = repoId ? `?repoId=${encodeURIComponent(repoId)}` : "";
   const flowUrl = (id: string, suffix = "") =>
-    `${base}/api/flows/${encodeURIComponent(id)}${suffix}`;
+    `${base}/api/flows/${encodeURIComponent(id)}${suffix}${query}`;
 
   async function request(
     action: string,
@@ -175,7 +180,7 @@ function remoteTarget(
 
   const this_: FlowCliTarget = {
     list: async () => {
-      const root = await request("list", `${base}/api/flows`);
+      const root = await request("list", `${base}/api/flows${query}`);
       if (!Array.isArray(root.flows)) {
         throw new Error("remote flow list failed: invalid response: missing flows");
       }
@@ -262,6 +267,7 @@ export async function runFlowCli(
   let id: string | undefined;
   let repoPath: string | undefined;
   let serverFlag = "";
+  let repoId: string | undefined;
   let filePath: string | undefined;
   let asJson = false;
   let apiToken: string | undefined;
@@ -273,6 +279,9 @@ export async function runFlowCli(
       } else if (arg === "--repo") {
         repoPath = rest[++index];
         if (!repoPath) throw new Error("Missing value for --repo");
+      } else if (arg === "--repo-id") {
+        repoId = rest[++index];
+        if (!repoId) throw new Error("Missing value for --repo-id");
       } else if (arg === "--server") {
         serverFlag = rest[++index] ?? "";
         if (!serverFlag) throw new Error("Missing value for --server");
@@ -289,6 +298,9 @@ export async function runFlowCli(
     if (needsId.has(subcommand!) && !id) throw new Error(`Missing flow id. ${USAGE_LINE}`);
     if (subcommand === "update" && !filePath) throw new Error("Missing --file <path> with the new Flow document");
     if (repoPath && serverFlag) throw new Error("Use either --repo or --server, not both");
+    if (repoPath && repoId) {
+      throw new Error("--repo-id selects a server repository; use it with --server, not --repo");
+    }
 
     let target: FlowCliTarget;
     const local = repoPath !== undefined;
@@ -300,7 +312,7 @@ export async function runFlowCli(
         ...(serverFlag ? { flag: serverFlag } : {}),
       });
       apiToken = remote.apiToken;
-      target = remoteTarget(requireRemoteServerUrl(remote.serverUrl), remote.apiToken, options.fetch);
+      target = remoteTarget(requireRemoteServerUrl(remote.serverUrl), remote.apiToken, options.fetch, repoId);
     }
 
     const printResult = (verb: string, entry: FlowCliEntry) => {

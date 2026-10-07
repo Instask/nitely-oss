@@ -81,7 +81,8 @@ export interface CreateFlowInput {
 export interface UpdateFlowInput {
   name?: string;
   document?: string;
-  workItemType?: string;
+  /** A string sets the stored work item type; `null` clears it. */
+  workItemType?: string | null;
   enabled?: boolean;
 }
 
