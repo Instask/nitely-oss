@@ -1,6 +1,4 @@
 import { organizationSessionAccessAllowed, type OrganizationSessionAccess } from "./session-policy.js";
-import { readdir, readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
 
 import { FlowValidationError, parseFlowDocument } from "../flow/load.js";
 import { flowWorkItemType, stageOutputIds } from "../flow/schema.js";
@@ -9,8 +7,13 @@ import {
   summarizeFlowArtifactGraph,
   type FlowArtifactGraphView,
 } from "../flows/artifact-graph.js";
-import { bundledFlowsRoot, resolveBuiltinFlowPath } from "../flows/paths.js";
-import { openFlowStore, type FlowRecord } from "../flows/store.js";
+import {
+  CatalogFlowNotFoundError,
+  catalogFlowId,
+  listCatalogFlows,
+  resolveCatalogFlow,
+} from "../flows/catalog.js";
+import { flowRecordCustomized, type FlowOrigin, type FlowRecord } from "../flows/store.js";
 import type { FlowTemplateLineage } from "../flows/templates.js";
 import { inferExternalInputs, validateFlowDocument } from "../flows/validate.js";
 import { WebNotFoundError } from "./errors.js";
@@ -31,6 +34,12 @@ export interface FlowView {
   runnable: boolean;
   editable: boolean;
   template?: FlowTemplateLineage;
+  origin: FlowOrigin;
+  enabled: boolean;
+  /** A system Flow whose document was changed after it was seeded. */
+  customized?: boolean;
+  /** A newer shipped version exists but was not applied over a customization. */
+  upstreamUpdateAvailable?: boolean;
 }
 
 export interface FlowAccessContext extends OrganizationSessionAccess {
@@ -80,6 +89,7 @@ function summarizeFlow(input: {
   runnable: boolean;
   template?: FlowTemplateLineage;
   editable: boolean;
+  record: FlowRecord;
 }): FlowView {
   let flow: Flow | undefined;
   try {
@@ -95,10 +105,40 @@ function summarizeFlow(input: {
     source: input.source,
     ...(flow ? { workItemType: flowWorkItemType(flow) } : {}),
     stageCount: flow?.spec.stages.length ?? 0,
-    runnable: input.runnable,
+    runnable: input.runnable && input.record.enabled,
     editable: input.editable,
     ...(input.template ? { template: input.template } : {}),
+    origin: input.record.origin,
+    enabled: input.record.enabled,
+    ...(input.record.origin === "system"
+      ? {
+          customized: flowRecordCustomized(input.record),
+          upstreamUpdateAvailable: Boolean(input.record.seed?.availableHash),
+        }
+      : {}),
   };
+}
+
+function flowSource(record: FlowRecord): FlowSource {
+  return record.origin === "system" ? "builtin" : "user";
+}
+
+/**
+ * System Flows have no owner; only an administrator (or anyone in local mode)
+ * may customize or disable them.
+ */
+export function systemFlowWritableByUser(user?: FlowAccessContext): boolean {
+  return !user || user.authMode === "local" || user.role === "admin";
+}
+
+function catalogRecordVisibleToUser(record: FlowRecord, user?: FlowAccessContext): boolean {
+  return record.origin === "system" || flowRecordVisibleToUser(record, user);
+}
+
+function catalogRecordWritableByUser(record: FlowRecord, user?: FlowAccessContext): boolean {
+  return record.origin === "system"
+    ? systemFlowWritableByUser(user)
+    : flowRecordWritableByUser(record, user);
 }
 
 export function flowRecordVisibleToUser(
@@ -134,115 +174,55 @@ export function flowRecordWritableByUser(
   return record.ownerId === user.id;
 }
 
-async function readFlowEntries(root: string): Promise<string[]> {
-  try {
-    return await readdir(join(resolve(root), "flows"));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return [];
-    }
-    throw error;
-  }
-}
-
 /**
- * Built-in flows are the repository's `flows/` plus the flows shipped with this
- * installation; resolveBuiltinFlowPath lets the repository's copy win.
+ * The catalog: system Flows seeded from the repository's and this
+ * installation's `flows/`, plus stored user Flows, all read from the Flow
+ * store. User Flows are listed first, as before.
  */
-async function readBuiltinFlows(
-  repoPath: string,
-): Promise<Array<{ id: string; document: string }>> {
-  const entries = [
-    ...new Set([
-      ...(await readFlowEntries(repoPath)),
-      ...(await readFlowEntries(bundledFlowsRoot())),
-    ]),
-  ].sort();
-  const flows = await Promise.all(
-    entries
-      .filter((entry) => entry.endsWith(".json"))
-      .map(async (entry) => {
-        try {
-          const id = `flows/${entry}`;
-          const resolved = await resolveBuiltinFlowPath(repoPath, id);
-          const document = await readFile(resolved.absolutePath, "utf8");
-          return { id: resolved.flowPath, document };
-        } catch {
-          return undefined;
-        }
-      }),
-  );
-  return flows.filter(
-    (flow): flow is { id: string; document: string } => flow !== undefined,
-  );
-}
-
 export async function listFlowViews(
   repoPath: string,
   user?: FlowAccessContext,
 ): Promise<FlowView[]> {
-  const builtin = await readBuiltinFlows(repoPath);
-  const builtinViews = await Promise.all(
-    builtin.map(async (flow) => {
-      const report = await validateFlowDocument(repoPath, flow.document);
+  const records = (await listCatalogFlows(repoPath)).filter((record) =>
+    catalogRecordVisibleToUser(record, user),
+  );
+  const views = await Promise.all(
+    records.map(async (record) => {
+      const report = await validateFlowDocument(repoPath, record.document);
       return summarizeFlow({
-        id: flow.id,
-        source: "builtin",
-        document: flow.document,
+        id: catalogFlowId(record),
+        source: flowSource(record),
+        document: record.document,
         runnable: report.valid,
-        editable: false,
+        editable: catalogRecordWritableByUser(record, user),
+        template: record.template,
+        record,
       });
     }),
   );
-
-  const store = openFlowStore(repoPath);
-  let userViews: FlowView[];
-  try {
-    userViews = await Promise.all(
-      store
-        .listFlows()
-        .filter((record) => flowRecordVisibleToUser(record, user))
-        .map(async (record) => {
-          const report = await validateFlowDocument(repoPath, record.document);
-          return summarizeFlow({
-            id: record.id,
-            source: "user",
-            document: record.document,
-            runnable: report.valid,
-            editable: flowRecordWritableByUser(record, user),
-            template: record.template,
-          });
-        }),
-    );
-  } finally {
-    store.close();
-  }
-
-  return [...userViews, ...builtinViews];
+  const userViews = views.filter((view) => view.source === "user");
+  const builtin = views
+    .filter((view) => view.source === "builtin")
+    .sort((a, b) => a.id.localeCompare(b.id));
+  return [...userViews, ...builtin];
 }
 
-function flowDocumentById(
+async function flowDocumentById(
   repoPath: string,
   id: string,
-): Promise<{ document: string; source: FlowSource; record?: FlowRecord }> {
-  if (id.startsWith("flows/")) {
-    return resolveBuiltinFlowPath(repoPath, id)
-      .then((resolved) => readFile(resolved.absolutePath, "utf8"))
-      .then((document) => ({ document, source: "builtin" as const }))
-      .catch(() => {
-        throw new WebNotFoundError("flow not found");
-      });
-  }
-  const store = openFlowStore(repoPath);
+): Promise<{ document: string; source: FlowSource; record: FlowRecord }> {
   try {
-    const record = store.getFlow(id);
-    return Promise.resolve({
-      document: record.document,
-      source: "user" as const,
-      record,
-    });
-  } finally {
-    store.close();
+    const resolved = await resolveCatalogFlow(repoPath, id, { requireEnabled: false });
+    return {
+      document: resolved.document,
+      source: flowSource(resolved.record),
+      record: resolved.record,
+    };
+  } catch (error) {
+    if (error instanceof CatalogFlowNotFoundError) {
+      throw new WebNotFoundError("flow not found");
+    }
+    throw error;
   }
 }
 
@@ -263,7 +243,7 @@ export async function getFlowView(
   user?: FlowAccessContext,
 ): Promise<FlowDetailView> {
   const { document, source, record } = await flowDocumentById(repoPath, id);
-  if (record && !flowRecordVisibleToUser(record, user)) {
+  if (!catalogRecordVisibleToUser(record, user)) {
     throw new WebNotFoundError("flow not found");
   }
   const report = await validateFlowDocument(repoPath, document);
@@ -307,12 +287,13 @@ export async function getFlowView(
 
   return {
     ...summarizeFlow({
-      id,
+      id: catalogFlowId(record),
       source,
       document,
       runnable: report.valid,
-      editable: record ? flowRecordWritableByUser(record, user) : false,
-      ...(record?.template ? { template: record.template } : {}),
+      editable: catalogRecordWritableByUser(record, user),
+      ...(record.template ? { template: record.template } : {}),
+      record,
     }),
     document,
     stages,

@@ -411,6 +411,58 @@ describe("flows API", () => {
     expect(list.flows.some((f) => f.source === "user")).toBe(true);
   });
 
+  it("customizes, disables, and refuses to delete a built-in Flow", async () => {
+    const repo = await createRepo();
+    const server = await start(repo);
+    const id = encodeURIComponent("flows/implement-spec-bootstrap.json");
+    const listed = (await json(await fetch(`${server.url}/api/flows`))) as {
+      flows: Array<Record<string, unknown>>;
+    };
+    expect(listed.flows.find((f) => f.id === "flows/implement-spec-bootstrap.json")).toMatchObject({
+      source: "builtin",
+      origin: "system",
+      enabled: true,
+      customized: false,
+      editable: true,
+      runnable: true,
+    });
+
+    const custom = JSON.stringify({
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "implement-spec-bootstrap" },
+      spec: {
+        stages: [{ id: "build", type: "command", command: "echo custom", inputs: [], outputs: ["out"] }],
+      },
+    });
+    const customized = await fetch(`${server.url}/api/flows/${id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ document: custom }),
+    });
+    expect(customized.status).toBe(200);
+    const disabled = await fetch(`${server.url}/api/flows/${id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(disabled.status).toBe(200);
+
+    const detail = (await json(await fetch(`${server.url}/api/flows/${id}`))) as {
+      flow: Record<string, unknown>;
+    };
+    expect(detail.flow).toMatchObject({
+      id: "flows/implement-spec-bootstrap.json",
+      document: custom,
+      customized: true,
+      enabled: false,
+      runnable: false,
+    });
+
+    const deleted = await fetch(`${server.url}/api/flows/${id}`, { method: "DELETE" });
+    expect(deleted.status).toBe(400);
+  });
+
   it("updates and deletes stored user flows in local mode", async () => {
     const repo = await createRepo();
     const server = await start(repo);

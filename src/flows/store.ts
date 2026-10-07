@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -8,6 +8,32 @@ import type { FlowTemplateLineage } from "./templates.js";
 
 const flowIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
+/**
+ * Where a stored Flow came from. `system` records are seeded from the Flow
+ * documents shipped with Nitely or checked into the repository's `flows/`;
+ * `user` records are authored in the store; `imported` is reserved for
+ * explicit imports.
+ */
+export type FlowOrigin = "system" | "user" | "imported";
+
+export type FlowSeedSource = "repository" | "bundled";
+
+/** Seed lineage of a `system` record. */
+export interface FlowSeedLineage {
+  /** Stable seed identity, the `flows/<name>.json` path the document ships as. */
+  key: string;
+  /** Digest of the seed document this record was last seeded from. */
+  hash: string;
+  source: FlowSeedSource;
+  /**
+   * Digest of a newer seed that was not applied because the record was
+   * customized after seeding.
+   */
+  availableHash?: string;
+  /** When the seed stopped shipping; the record is kept, never deleted. */
+  removedAt?: string;
+}
+
 export interface FlowRecord {
   id: string;
   name: string;
@@ -16,8 +42,29 @@ export interface FlowRecord {
   ownerId?: string;
   template?: FlowTemplateLineage;
   organizationId?: string;
+  origin: FlowOrigin;
+  enabled: boolean;
+  seed?: FlowSeedLineage;
   createdAt: string;
   updatedAt: string;
+}
+
+/** One shipped Flow document offered to {@link FlowStore.reconcileSeeds}. */
+export interface FlowSeed {
+  key: string;
+  name: string;
+  workItemType?: string;
+  document: string;
+  source: FlowSeedSource;
+}
+
+export interface FlowSeedReconciliation {
+  inserted: string[];
+  upgraded: string[];
+  /** Customized records left alone although a newer seed exists. */
+  preserved: string[];
+  removed: string[];
+  restored: string[];
 }
 
 export interface CreateFlowInput {
@@ -33,6 +80,7 @@ export interface UpdateFlowInput {
   name?: string;
   document?: string;
   workItemType?: string;
+  enabled?: boolean;
 }
 
 export interface FlowStoreOptions {
@@ -57,8 +105,48 @@ interface FlowRow {
   template_version: string | null;
   template_source: string | null;
   template_source_flow_path: string | null;
+  origin: string | null;
+  enabled: number | null;
+  seed_key: string | null;
+  seed_hash: string | null;
+  seed_source: string | null;
+  seed_available_hash: string | null;
+  seed_removed_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export function flowDocumentHash(document: string): string {
+  return `sha256:${createHash("sha256").update(document, "utf8").digest("hex")}`;
+}
+
+/**
+ * A system record is customized once its document no longer matches the seed
+ * it was last seeded from. Customized records are never overwritten by a
+ * shipped update.
+ */
+export function flowRecordCustomized(record: Pick<FlowRecord, "document" | "seed">): boolean {
+  return record.seed !== undefined && flowDocumentHash(record.document) !== record.seed.hash;
+}
+
+const seedSystemIdPattern = /[^A-Za-z0-9_-]+/g;
+
+function systemFlowIdForSeed(key: string): string {
+  const base = key.replace(/^flows\//, "").replace(/\.json$/, "");
+  const slug = base.replace(seedSystemIdPattern, "-").replace(/^-+|-+$/g, "");
+  const candidate = `system-${slug}`;
+  if (slug && slug === base && flowIdPattern.test(candidate)) return candidate;
+  // Keep ids stable and valid for names the id pattern cannot carry verbatim.
+  const digest = createHash("sha256").update(key, "utf8").digest("hex").slice(0, 12);
+  return `system-${(slug || "flow").slice(0, 100)}-${digest}`;
+}
+
+function flowOrigin(value: string | null): FlowOrigin {
+  return value === "system" || value === "imported" ? value : "user";
+}
+
+function flowSeedSource(value: string | null): FlowSeedSource {
+  return value === "repository" ? "repository" : "bundled";
 }
 
 interface TableInfoRow {
@@ -82,6 +170,19 @@ function toRecord(row: FlowRow): FlowRecord {
             ...(row.template_source_flow_path
               ? { sourceFlowPath: row.template_source_flow_path }
               : {}),
+          },
+        }
+      : {}),
+    origin: flowOrigin(row.origin),
+    enabled: row.enabled !== 0,
+    ...(row.seed_key && row.seed_hash
+      ? {
+          seed: {
+            key: row.seed_key,
+            hash: row.seed_hash,
+            source: flowSeedSource(row.seed_source),
+            ...(row.seed_available_hash ? { availableHash: row.seed_available_hash } : {}),
+            ...(row.seed_removed_at ? { removedAt: row.seed_removed_at } : {}),
           },
         }
       : {}),
@@ -128,11 +229,24 @@ export class FlowStore {
       ["template_version", "template_version TEXT"],
       ["template_source", "template_source TEXT"],
       ["template_source_flow_path", "template_source_flow_path TEXT"],
+      ["origin", "origin TEXT"],
+      ["enabled", "enabled INTEGER NOT NULL DEFAULT 1"],
+      ["seed_key", "seed_key TEXT"],
+      ["seed_hash", "seed_hash TEXT"],
+      ["seed_source", "seed_source TEXT"],
+      ["seed_available_hash", "seed_available_hash TEXT"],
+      ["seed_removed_at", "seed_removed_at TEXT"],
     ] as const) {
       if (!columnNames.has(name)) {
         this.#database.exec(`ALTER TABLE flows ADD COLUMN ${definition};`);
       }
     }
+    // Every row written before origins existed was authored in the store.
+    this.#database.exec("UPDATE flows SET origin = 'user' WHERE origin IS NULL;");
+    this.#database.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS flows_seed_key
+      ON flows (seed_key) WHERE seed_key IS NOT NULL;
+    `);
   }
 
   createFlow(input: CreateFlowInput, options: FlowStoreOptions = {}): FlowRecord {
@@ -159,10 +273,11 @@ export class FlowStore {
           template_version,
           template_source,
           template_source_flow_path,
+          origin,
           created_at,
           updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'user', ?, ?)
       `)
       .run(
         id,
@@ -192,11 +307,131 @@ export class FlowStore {
     return toRecord(row);
   }
 
+  /** Every stored Flow, system and user, newest first. */
   listFlows(): FlowRecord[] {
     const rows = this.#database
       .prepare("SELECT * FROM flows ORDER BY created_at DESC, id DESC")
       .all() as unknown as FlowRow[];
     return rows.map(toRecord);
+  }
+
+  /** The system record seeded from `key`, if it has ever been seeded. */
+  findBySeedKey(key: string): FlowRecord | undefined {
+    const row = this.#database
+      .prepare("SELECT * FROM flows WHERE seed_key = ?")
+      .get(key) as unknown as FlowRow | undefined;
+    return row ? toRecord(row) : undefined;
+  }
+
+  /**
+   * Bring system records in line with the shipped seeds.
+   *
+   * - A seed with no record is inserted as an enabled `system` record.
+   * - A record still holding the document it was seeded from is upgraded to
+   *   the new seed. Its enabled state is kept.
+   * - A record whose document was changed after seeding is customized and is
+   *   never overwritten; the newer seed's digest is recorded instead.
+   * - A record whose seed no longer ships is marked removed but kept, so an
+   *   operator's customization or disabled state is not lost. It is restored
+   *   if the seed ships again.
+   */
+  reconcileSeeds(seeds: FlowSeed[], options: FlowStoreOptions = {}): FlowSeedReconciliation {
+    const result: FlowSeedReconciliation = {
+      inserted: [],
+      upgraded: [],
+      preserved: [],
+      removed: [],
+      restored: [],
+    };
+    const now = (options.now?.() ?? new Date()).toISOString();
+    const keys = new Set(seeds.map((seed) => seed.key));
+    this.#database.exec("BEGIN IMMEDIATE;");
+    try {
+      for (const seed of seeds) {
+        const hash = flowDocumentHash(seed.document);
+        const existing = this.findBySeedKey(seed.key);
+        if (!existing) {
+          this.#database
+            .prepare(`
+              INSERT INTO flows (
+                id, name, work_item_type, document, origin, enabled,
+                seed_key, seed_hash, seed_source, created_at, updated_at
+              )
+              VALUES (?, ?, ?, ?, 'system', 1, ?, ?, ?, ?, ?)
+              ON CONFLICT DO NOTHING
+            `)
+            .run(
+              systemFlowIdForSeed(seed.key),
+              seed.name,
+              seed.workItemType ?? null,
+              seed.document,
+              seed.key,
+              hash,
+              seed.source,
+              now,
+              now,
+            );
+          result.inserted.push(seed.key);
+          continue;
+        }
+        const lineage = existing.seed!;
+        if (lineage.removedAt) {
+          this.#database
+            .prepare("UPDATE flows SET seed_removed_at = NULL WHERE id = ?")
+            .run(existing.id);
+          result.restored.push(seed.key);
+        }
+        if (lineage.hash === hash) {
+          if (lineage.availableHash || lineage.source !== seed.source) {
+            this.#database
+              .prepare("UPDATE flows SET seed_available_hash = NULL, seed_source = ? WHERE id = ?")
+              .run(seed.source, existing.id);
+          }
+          continue;
+        }
+        if (flowRecordCustomized(existing)) {
+          if (lineage.availableHash !== hash) {
+            this.#database
+              .prepare("UPDATE flows SET seed_available_hash = ? WHERE id = ?")
+              .run(hash, existing.id);
+          }
+          result.preserved.push(seed.key);
+          continue;
+        }
+        this.#database
+          .prepare(`
+            UPDATE flows
+            SET name = ?, work_item_type = ?, document = ?, seed_hash = ?,
+                seed_source = ?, seed_available_hash = NULL, updated_at = ?
+            WHERE id = ?
+          `)
+          .run(
+            seed.name,
+            seed.workItemType ?? null,
+            seed.document,
+            hash,
+            seed.source,
+            now,
+            existing.id,
+          );
+        result.upgraded.push(seed.key);
+      }
+      const seeded = this.#database
+        .prepare("SELECT id, seed_key FROM flows WHERE seed_key IS NOT NULL AND seed_removed_at IS NULL")
+        .all() as unknown as Array<{ id: string; seed_key: string }>;
+      for (const row of seeded) {
+        if (keys.has(row.seed_key)) continue;
+        this.#database
+          .prepare("UPDATE flows SET seed_removed_at = ? WHERE id = ?")
+          .run(now, row.id);
+        result.removed.push(row.seed_key);
+      }
+      this.#database.exec("COMMIT;");
+    } catch (error) {
+      this.#database.exec("ROLLBACK;");
+      throw error;
+    }
+    return result;
   }
 
   updateFlow(
@@ -214,18 +449,23 @@ export class FlowStore {
       input.workItemType !== undefined
         ? input.workItemType
         : existing.workItemType;
+    const enabled = input.enabled ?? existing.enabled;
     const updatedAt = (options.now?.() ?? new Date()).toISOString();
     this.#database
       .prepare(`
-        UPDATE flows SET name = ?, work_item_type = ?, document = ?, updated_at = ?
+        UPDATE flows SET name = ?, work_item_type = ?, document = ?, enabled = ?, updated_at = ?
         WHERE id = ?
       `)
-      .run(name, workItemType ?? null, document, updatedAt, id);
+      .run(name, workItemType ?? null, document, enabled ? 1 : 0, updatedAt, id);
     return this.getFlow(id);
   }
 
   deleteFlow(id: string): void {
     validateFlowId(id);
+    if (this.getFlow(id).origin === "system") {
+      // Deleting a seeded record would only re-seed it; disable it instead.
+      throw new WebInputError("system flows cannot be deleted; disable them instead");
+    }
     const result = this.#database
       .prepare("DELETE FROM flows WHERE id = ?")
       .run(id);

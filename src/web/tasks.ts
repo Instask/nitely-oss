@@ -1,5 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  CatalogFlowDisabledError,
+  CatalogFlowNotFoundError,
+  isFlowSeedKey,
+  resolveCatalogFlow,
+} from "../flows/catalog.js";
+import {
   mkdir,
   readdir,
   readFile,
@@ -436,10 +442,28 @@ function normalizeVersionSet(
   };
 }
 
-async function validateFlowPath(
+/**
+ * Validate a Flow reference for a task: a built-in `flows/<name>.json` key
+ * must be an enabled catalog Flow; any other path must be a Flow file inside
+ * the repository. Returns the normalized reference.
+ */
+export async function validateFlowPath(
   repoPath: string,
   candidatePath: string,
 ): Promise<string> {
+  if (isFlowSeedKey(candidatePath)) {
+    // Built-in Flow keys resolve through the Flow catalog, which also honours
+    // the enabled flag.
+    try {
+      return (await resolveCatalogFlow(repoPath, candidatePath)).id;
+    } catch (error) {
+      if (error instanceof CatalogFlowDisabledError) {
+        throw new WebInputError(error.message);
+      }
+      if (!(error instanceof CatalogFlowNotFoundError)) throw error;
+      // Fall through so a missing Flow reports the same error as before.
+    }
+  }
   try {
     return (await resolveRepositoryFlowPath(repoPath, candidatePath)).flowPath;
   } catch (error) {

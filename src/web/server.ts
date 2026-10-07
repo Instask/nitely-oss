@@ -235,6 +235,7 @@ import {
   type TaskSourceRecord,
   type TaskSourceSnapshot,
   type TaskSourceStatusSync,
+  validateFlowPath,
 } from "./tasks.js";
 import {
   ExternalDocumentInputError,
@@ -363,6 +364,7 @@ import { workItemDependencyGuards } from "../work-items/candidate-version.js";
 import type { WorkItemStoreKind } from "../work-items/types.js";
 import { FlowValidationError } from "../flow/load.js";
 import { openFlowStore } from "../flows/store.js";
+import { resolveCatalogFlow, type ResolvedCatalogFlow } from "../flows/catalog.js";
 import { validateFlowDocument } from "../flows/validate.js";
 import {
   flowTemplateDocumentForCopy,
@@ -3895,17 +3897,23 @@ async function resolveTaskReworkFlowPath(
   repoPath: string,
   candidatePath?: string,
 ): Promise<string> {
-  try {
-    return (await resolveRepositoryFlowPath(
-      repoPath,
-      candidatePath?.trim() || defaultTaskReworkFlowPath,
-    )).flowPath;
-  } catch (error) {
-    if (error instanceof RepositoryFlowPathError) {
-      throw new WebInputError(error.message);
-    }
-    throw error;
+  return validateFlowPath(repoPath, candidatePath?.trim() || defaultTaskReworkFlowPath);
+}
+
+/**
+ * Check a stored Flow reference is visible to `user`. System Flows are shared
+ * by every user of the installation; user Flows keep their owner scoping.
+ */
+async function requireCatalogFlowAccess(
+  repoPath: string,
+  reference: string,
+  user: WebUserContext,
+): Promise<ResolvedCatalogFlow> {
+  const resolved = await resolveCatalogFlow(repoPath, reference, { requireEnabled: false });
+  if (resolved.record.origin !== "system") {
+    requireRecordAccess(resolved.record, user, "flow not found");
   }
+  return resolved;
 }
 
 function taskRequestChangesCapability(
@@ -4175,12 +4183,7 @@ async function runStoredWorkItem(
   }
   providerStore = bindProviderConnections(user.authMode === "required" ? providerStoreForUser(serverInput, repository.path, user, { organizationId: workItem.organizationId, repositoryId: repository.id, repositoryOrganizationId: repository.organizationId }) : providerStore, serverInput.providerConnectionBindings);
   if (workItem.flowId) {
-    const flowStore = openFlowStore(repoPath);
-    try {
-      requireRecordAccess(flowStore.getFlow(workItem.flowId), user, "flow not found");
-    } finally {
-      flowStore.close();
-    }
+    await requireCatalogFlowAccess(repoPath, workItem.flowId, user);
   }
   const candidateSnapshot =
     user.authMode === "required" && !workItem.ownerId
@@ -10676,26 +10679,35 @@ async function handleApiRequest(
     }
     if (request.method === "PUT") {
       const user = await requireUserContext(request, input, homeRepoPath);
-      if (flowId.startsWith("flows/")) {
-        throw new WebInputError("built-in flows are read-only");
-      }
+      const existing = await requireCatalogFlowAccess(homeRepoPath, flowId, user);
+      // System Flows have no owner, so only local mode or an administrator
+      // passes this check for them.
+      requireWriteAccessToRecord(user, existing.record, "flows:manage");
       const body = requireObject(await readRequestJson(request));
-      const document = typeof body.document === "string" ? body.document : "";
-      const report = await validateFlowDocument(homeRepoPath, document);
-      if (!report.valid) {
-        sendJson(response, 422, { report });
-        return true;
+      if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
+        throw new WebInputError("enabled must be a boolean");
       }
-      const meta = flowDocumentMetadata(document);
-      const store = openFlowStore(homeRepoPath);
-      try {
-        const existing = store.getFlow(flowId);
-        requireRecordAccess(existing, user, "flow not found");
-        requireWriteAccessToRecord(user, existing, "flows:manage");
-        const record = store.updateFlow(flowId, {
+      const enabled = body.enabled as boolean | undefined;
+      let documentUpdate: { name: string; document: string; workItemType?: string } | undefined;
+      if (typeof body.document === "string" || enabled === undefined) {
+        const document = typeof body.document === "string" ? body.document : "";
+        const report = await validateFlowDocument(homeRepoPath, document);
+        if (!report.valid) {
+          sendJson(response, 422, { report });
+          return true;
+        }
+        const meta = flowDocumentMetadata(document);
+        documentUpdate = {
           name: meta.name,
           document,
           ...(meta.workItemType ? { workItemType: meta.workItemType } : {}),
+        };
+      }
+      const store = openFlowStore(homeRepoPath);
+      try {
+        const record = store.updateFlow(existing.record.id, {
+          ...(documentUpdate ?? {}),
+          ...(enabled !== undefined ? { enabled } : {}),
         });
         sendJson(response, 200, { flow: record });
       } finally {
@@ -10705,15 +10717,14 @@ async function handleApiRequest(
     }
     if (request.method === "DELETE") {
       const user = await requireUserContext(request, input, homeRepoPath);
-      if (flowId.startsWith("flows/")) {
-        throw new WebInputError("built-in flows are read-only");
+      const existing = await requireCatalogFlowAccess(homeRepoPath, flowId, user);
+      if (existing.record.origin === "system") {
+        throw new WebInputError("built-in flows cannot be deleted; disable them instead");
       }
       const store = openFlowStore(homeRepoPath);
       try {
-        const existing = store.getFlow(flowId);
-        requireRecordAccess(existing, user, "flow not found");
-        requireWriteAccessToRecord(user, existing, "flows:manage");
-        store.deleteFlow(flowId);
+        requireWriteAccessToRecord(user, existing.record, "flows:manage");
+        store.deleteFlow(existing.record.id);
       } finally {
         store.close();
       }
@@ -10741,12 +10752,7 @@ async function handleApiRequest(
     const flowId =
       typeof body.flowId === "string" && body.flowId ? body.flowId : undefined;
     if (flowId) {
-      const flowStore = openFlowStore(homeRepoPath);
-      try {
-        requireRecordAccess(flowStore.getFlow(flowId), user, "flow not found");
-      } finally {
-        flowStore.close();
-      }
+      await requireCatalogFlowAccess(homeRepoPath, flowId, user);
     }
     const repository = requireRepositoryForOrganization(
       repositories,

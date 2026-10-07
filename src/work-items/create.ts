@@ -6,7 +6,11 @@ import {
   BuiltinFlowPathError,
   resolveBuiltinFlowPath,
 } from "../flows/paths.js";
-import { openFlowStore } from "../flows/store.js";
+import {
+  CatalogFlowDisabledError,
+  isFlowSeedKey,
+  resolveCatalogFlow,
+} from "../flows/catalog.js";
 import {
   flowTemplateLineage,
   getFlowTemplate,
@@ -40,20 +44,19 @@ export interface CreateFlowWorkItemInput {
   priority?: TaskPriority;
 }
 
-function resolveStoredFlow(
+async function resolveStoredFlow(
   repoPath: string,
-  flowId: string,
+  reference: string,
   externalInputs: string[],
-): { loaded: LoadedFlow; flowPath: string } {
-  const store = openFlowStore(repoPath);
+): Promise<LoadedFlow> {
   try {
-    const record = store.getFlow(flowId);
-    return {
-      loaded: parseFlowDocument(record.document, { externalInputs }),
-      flowPath: flowId,
-    };
-  } finally {
-    store.close();
+    const resolved = await resolveCatalogFlow(repoPath, reference);
+    return parseFlowDocument(resolved.document, { externalInputs });
+  } catch (error) {
+    if (error instanceof CatalogFlowDisabledError) {
+      throw new WebInputError(error.message);
+    }
+    throw error;
   }
 }
 
@@ -95,11 +98,8 @@ export async function createFlowWorkItem(
     flowPath = `template:${selectedTemplate.id}`;
     template = flowTemplateLineage(selectedTemplate);
   } else if (input.flowId) {
-    ({ loaded, flowPath } = resolveStoredFlow(
-      repoPath,
-      input.flowId,
-      externalInputs,
-    ));
+    loaded = await resolveStoredFlow(repoPath, input.flowId, externalInputs);
+    flowPath = input.flowId;
     flowId = input.flowId;
   } else if (input.flowPath) {
     let resolvedFlowPath: Awaited<ReturnType<typeof resolveBuiltinFlowPath>>;
@@ -111,7 +111,9 @@ export async function createFlowWorkItem(
       }
       throw error;
     }
-    loaded = await loadFlow(resolvedFlowPath.absolutePath, { externalInputs });
+    loaded = isFlowSeedKey(resolvedFlowPath.flowPath)
+      ? await resolveStoredFlow(repoPath, resolvedFlowPath.flowPath, externalInputs)
+      : await loadFlow(resolvedFlowPath.absolutePath, { externalInputs });
     flowPath = resolvedFlowPath.flowPath;
   } else {
     throw new WebInputError("flowPath, flowId, or templateId is required");
