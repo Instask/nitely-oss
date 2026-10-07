@@ -1,5 +1,5 @@
 import { readdir, readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 
 import {
   BuiltinFlowPathError,
@@ -415,4 +415,58 @@ export async function deleteCatalogFlow(
   }
   withStore(repoPath, (store) => store.deleteFlow(record.id));
   return record;
+}
+
+/** The Flow a run executes, resolved from a CLI or runtime Flow reference. */
+export interface RunFlowSource {
+  /** The run's flow label (`RunFlowInput.flowPath`). */
+  flowPath: string;
+  /** The exact document the run executes and snapshots. */
+  flowDocument: string;
+  /** Catalog id when the reference named a catalog Flow. */
+  catalogId?: string;
+}
+
+/**
+ * The catalog seed key a Flow file reference names, if any. A reference is a
+ * catalog Flow when it is `flows/<name>.json` relative to the repository, or
+ * an absolute or repoPath-relative path to the repository's or this installation's
+ * `flows/<name>.json`. Anything else is an explicit Flow file.
+ */
+export function catalogSeedKeyForFlowReference(
+  repoPath: string,
+  reference: string,
+  options: { cwd?: string; bundledRoot?: string } = {},
+): string | undefined {
+  if (isFlowSeedKey(reference)) return reference;
+  const absolute = resolve(options.cwd ?? repoPath, reference);
+  for (const root of [repoPath, options.bundledRoot ?? bundledFlowsRoot()]) {
+    const fromRoot = relative(resolve(root), absolute).replaceAll("\\", "/");
+    if (isFlowSeedKey(fromRoot)) return fromRoot;
+  }
+  return undefined;
+}
+
+/**
+ * Resolve the Flow a CLI/runtime entry point runs against `repoPath`. Catalog
+ * references read the stored document (edited built-ins honored, disabled
+ * Flows refused); explicit non-catalog files are read as given. Relative
+ * references are anchored to `repoPath` (never `process.cwd()`), absolute
+ * references stay absolute, so every entry point agrees. The label
+ * stays the caller's reference so run labels are unchanged.
+ */
+export async function resolveRunFlowSource(
+  repoPath: string,
+  reference: string,
+  options: FlowCatalogOptions & { cwd?: string } = {},
+): Promise<RunFlowSource> {
+  const seedKey = catalogSeedKeyForFlowReference(repoPath, reference, options);
+  if (seedKey) {
+    const resolved = await resolveCatalogFlow(repoPath, seedKey, options);
+    return { flowPath: reference, flowDocument: resolved.document, catalogId: resolved.id };
+  }
+  return {
+    flowPath: reference,
+    flowDocument: await readFile(resolve(options.cwd ?? repoPath, reference), "utf8"),
+  };
 }

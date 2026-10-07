@@ -1,3 +1,4 @@
+import { resolveRunFlowSource } from "./flows/catalog.js";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { bundledFlowsRoot, resolveBuiltinFlowPath } from "./flows/paths.js";
 import { hostname } from "node:os";
@@ -1917,10 +1918,14 @@ async function inputReferencesFromDirectory(
 }
 
 async function readSingleStageFlow(input: {
+  repoPath: string;
   flowPath: string;
   stageId: string;
 }): Promise<{ document: string; stage: Record<string, unknown>; inputIds: string[] }> {
-  const raw = JSON.parse(await readFile(input.flowPath, "utf8")) as unknown;
+  // Resolve through the repository's Flow catalog like `run`: edited
+  // built-ins replay the stored document and disabled Flows are refused.
+  const source = await resolveRunFlowSource(input.repoPath, input.flowPath);
+  const raw = JSON.parse(source.flowDocument) as unknown;
   const root = recordValue(raw);
   const spec = recordValue(root?.spec);
   const stages = spec?.stages;
@@ -2182,7 +2187,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
           return 1;
         }
 
-        const replay = await readSingleStageFlow({ flowPath, stageId });
+        const replay = await readSingleStageFlow({ repoPath, flowPath, stageId });
         const loaded = parseFlowDocument(replay.document, {
           externalInputs: replay.inputIds,
         });
@@ -4566,7 +4571,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
           resume,
           dependencies: defaultCiRepairDependencies({
             repoPath,
-            flowPath: resolve(repoPath, flowPath),
+            flowPath,
             inputs,
             pullRequestTarget,
           }),
