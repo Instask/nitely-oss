@@ -66,6 +66,7 @@ const ERROR_LINE = /^\s*(Error:|[A-Z]\w*Error\b:)/;
 const BLOCK_END_LINE =
   /^\s*(✓|√|PASS\b|ok\b|stdout \||stderr \||[⎯─]{3,}|Test Files\b|Tests\b)/;
 const MAX_BLOCK_LINES = 12;
+const ANSI_ESCAPE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 
 /**
  * Splits test-runner output into the blocks that describe failures, so a
@@ -226,17 +227,20 @@ export function diagnoseVerificationFailure(
     return undefined;
   }
 
-  const blocks = failureBlocks(input.error);
-  const evidence = evidenceFor(input, blocks);
+  // Test runners color their output, so a FAIL marker arrives as
+  // "\x1b[41m\x1b[1m FAIL"; strip escape sequences before reading lines.
+  const plainError = input.error.replaceAll(ANSI_ESCAPE, "");
+  const blocks = failureBlocks(plainError);
+  const evidence = evidenceFor({ ...input, error: plainError }, blocks);
   const candidates = reworkCandidates(input);
   // With recognizable failure blocks, the failure is environmental only when
   // every failing block is; one code failure among them still needs rework.
   const environmental = blocks.length > 0
     ? blocks.every((block) => ENVIRONMENT_PATTERN.test(block.join("\n")))
-    : ENVIRONMENT_PATTERN.test(input.error);
+    : ENVIRONMENT_PATTERN.test(plainError);
   const error = blocks.length > 0
     ? blocks.map((block) => block.join("\n")).join("\n")
-    : input.error;
+    : plainError;
 
   if (environmental) {
     const repeated = repeatedFailure(input);
