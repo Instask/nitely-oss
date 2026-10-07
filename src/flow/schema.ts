@@ -101,6 +101,19 @@ export const timeoutControlsSchema = z.object({
   gateMs: z.number().int().positive().optional(),
 });
 
+/**
+ * Operator question policy for agent stages. `ask` waits for a human up to
+ * `timeoutMs`; `auto` adopts the single recommended option immediately;
+ * `deny` removes the question instruction and fails a stage that asks anyway.
+ */
+export const questionPolicySchema = z
+  .object({
+    mode: z.enum(["ask", "auto", "deny"]).optional(),
+    timeoutMs: z.number().int().positive().optional(),
+    onTimeout: z.enum(["recommended", "fail"]).optional(),
+  })
+  .strict();
+
 export const verificationBudgetSchema = z.object({
   maxAgentAttempts: z.number().int().positive().optional(),
   maxJudgeAttempts: z.number().int().positive().optional(),
@@ -487,6 +500,7 @@ function addConvergenceIssues(
 
 const agentStageSchema = z.preprocess(runtimeConfigValidationInput, stageBase.extend({
   type: z.literal("agent"),
+  questions: questionPolicySchema.optional(),
   runtime: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
   effort: effortSchema.optional(),
@@ -853,6 +867,7 @@ export const flowSchema = z.object({
   spec: z.object({
     context: contextControlsSchema.optional(),
     timeouts: timeoutControlsSchema.optional(),
+    questions: questionPolicySchema.optional(),
     verificationBudget: verificationBudgetSchema.optional(),
     reads: readPolicySchema.optional(),
     hooks: flowHooksSchema.optional(),
@@ -870,6 +885,7 @@ export type InputContract = z.infer<typeof inputContractSchema>;
 export type ConfigurableInput = z.infer<typeof configurableInputSchema>;
 export type ContextControls = z.infer<typeof contextControlsSchema>;
 export type ReadPolicy = z.infer<typeof readPolicySchema>;
+export type QuestionPolicy = z.infer<typeof questionPolicySchema>;
 export type TimeoutControls = z.infer<typeof timeoutControlsSchema>;
 export type VerificationBudget = z.infer<typeof verificationBudgetSchema>;
 export type StageCostClass = z.infer<typeof stageCostClassSchema>;

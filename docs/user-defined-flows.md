@@ -251,6 +251,16 @@ nitely flow delete <id> [--repo <path> | --repo-id <id>]          # user flows o
 `reset` both discards your edits and accepts a newer shipped version, since
 both mean "use what ships now". It keeps the enabled flag.
 
+Commands that run a Flow file (`nitely run`, `doctor`, `rework-pr`,
+`pr-comments`, `ci-repair`, each with `--repo <path>`) resolve a built-in
+reference through that repository's catalog. A reference is a built-in when it
+is `flows/<name>.json` relative to the repository, or a path to the
+repository's or this installation's `flows/<name>.json`. Such a run executes
+the stored document, so an edited built-in runs as edited, a disabled Flow is
+refused (`doctor` reports `flow-disabled`), and the run snapshot records the
+exact stored document and its hash. The run's flow label stays the reference
+you passed. Any other path is an explicit Flow file and is read as given.
+
 ## Comment-triggered PR rework
 
 `nitely pr-comments` defaults to `flows/rework-pr-bootstrap.json`. Feedback

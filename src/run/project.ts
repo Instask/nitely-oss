@@ -74,6 +74,10 @@ export interface ProjectedRunBlocker {
 export interface ProjectedOperatorAnswer {
   optionId?: string;
   text?: string;
+  /** Set when the question policy answered instead of a human. */
+  reason?: "timeout" | "auto-policy";
+  /** The policy found no adoptable option; the resumed attempt fails. */
+  failStage?: boolean;
   actor: string;
   answeredAt: string;
 }
@@ -86,6 +90,12 @@ export interface ProjectedOperatorQuestion extends OperatorQuestion {
   askedAt: string;
   status: "pending" | "answered";
   answer?: ProjectedOperatorAnswer;
+  policy?: {
+    mode: "ask" | "auto" | "deny";
+    timeoutMs: number;
+    onTimeout: "recommended" | "fail";
+  };
+  expiresAt?: string;
 }
 
 export interface ProjectRunOptions {
@@ -827,6 +837,33 @@ function asProjectedQuestion(
       : {}),
     askedAt: event.createdAt,
     status: "pending",
+    ...questionPolicyFields(payload.policy, event.createdAt),
+  };
+}
+
+function questionPolicyFields(
+  value: unknown,
+  askedAt: string,
+): Pick<ProjectedOperatorQuestion, "policy" | "expiresAt"> {
+  const record = asRecord(value);
+  const mode = record.mode;
+  const onTimeout = record.onTimeout;
+  const timeoutMs = record.timeoutMs;
+  if (
+    (mode !== "ask" && mode !== "auto" && mode !== "deny") ||
+    (onTimeout !== "recommended" && onTimeout !== "fail") ||
+    typeof timeoutMs !== "number" ||
+    !Number.isFinite(timeoutMs) ||
+    timeoutMs <= 0
+  ) {
+    return {};
+  }
+  const asked = Date.parse(askedAt);
+  return {
+    policy: { mode, timeoutMs, onTimeout },
+    ...(mode === "ask" && Number.isFinite(asked)
+      ? { expiresAt: new Date(asked + timeoutMs).toISOString() }
+      : {}),
   };
 }
 
@@ -2387,6 +2424,10 @@ export function projectRun(
         question.answer = {
           ...(asString(payload.optionId) ? { optionId: asString(payload.optionId) } : {}),
           ...(asString(payload.text) ? { text: asString(payload.text) } : {}),
+          ...(payload.reason === "timeout" || payload.reason === "auto-policy"
+            ? { reason: payload.reason }
+            : {}),
+          ...(payload.failStage === true ? { failStage: true } : {}),
           actor,
           answeredAt: event.createdAt,
         };

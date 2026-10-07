@@ -355,6 +355,40 @@ Run projection folds these events onto attempt, stage, and run context usage.
 The Web Console run details expose per-stage context usage and run-total context
 usage when the run has these events; older runs simply omit the fields.
 
+## Operator Question Policy
+
+Agent stages may write `question.json` to ask a human for a decision. A
+question policy controls what happens next. Set it on the Flow
+(`spec.questions`) or on an agent stage (`questions`); stage fields override
+Flow fields.
+
+```json
+"questions": {
+  "mode": "ask",
+  "timeoutMs": 1800000,
+  "onTimeout": "recommended"
+}
+```
+
+- `ask` (default): the run blocks on the question. If nobody answers within
+  `timeoutMs` (default 30 minutes), the scheduler answers it: with
+  `onTimeout: "recommended"` (default) it adopts the option marked
+  `recommended` when there is exactly one; otherwise, or with
+  `onTimeout: "fail"`, the resumed attempt fails and the stage's normal
+  retry/rework/escalation policy applies.
+- `auto`: never waits. The single recommended option is adopted immediately
+  and the run continues; a question without one fails the stage.
+- `deny`: the question instruction is left out of the agent prompt, and a
+  `question.json` written anyway fails the stage.
+
+Policy answers are recorded as `operator.answer` with actor
+`nitely:question-policy` plus an `operator.question.auto-answered` event
+(question, chosen option, reason `timeout` or `auto-policy`), are listed in
+the run evidence, and reach the next attempt exactly like a human answer.
+Timeouts are enforced by `nitely scheduler` and the Web server's background
+recovery loop; a run started with plain `nitely run` and no scheduler stays
+blocked until one of them, or a human, picks it up.
+
 ## Agent Runtime Configuration
 
 Each `agent` stage or review gate must declare either a single `runtime` with
