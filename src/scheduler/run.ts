@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { materializeDueSchedules } from "../schedules/materialize.js";
 
 import { EventStore } from "../events/store.js";
+import { AUTO_ANSWER_ACTOR, answerExpiredQuestions } from "../run/questions.js";
 import { createScmProvider } from "../scm/registry.js";
 import type { ChangeRequestStatus, ScmProvider } from "../scm/types.js";
 import type { ProviderConnectionStore } from "../providers/types.js";
@@ -442,6 +443,43 @@ export function usageLimitBlockedRun(input: {
   };
 }
 
+/**
+ * A run blocked on an operator question that the question policy has already
+ * answered (for example after an `ask` timeout) is ready to resume.
+ */
+export function policyAnsweredQuestionRun(input: {
+  task: WorkItemRecord;
+  eventStore: EventStore;
+}): { runId: string; retryAt: Date; runtime?: string } | undefined {
+  const runId = input.task.latestRunId;
+  if (!runId) return undefined;
+  const events = input.eventStore.list(runId);
+  if (events.length === 0) return undefined;
+  const projection = projectRun(events);
+  if (
+    projection.status !== "blocked" ||
+    projection.blocker?.reason !== "awaiting_operator_answer"
+  ) {
+    return undefined;
+  }
+  const question = (projection.questions ?? []).find(
+    (candidate) => candidate.id === projection.blocker?.questionId,
+  );
+  if (question?.status !== "answered" || question.answer?.actor !== AUTO_ANSWER_ACTOR) {
+    return undefined;
+  }
+  return { runId, retryAt: new Date(question.answer.answeredAt) };
+}
+
+function resumableBlockedRun(input: {
+  task: WorkItemRecord;
+  eventStore: EventStore;
+  now: Date;
+  persisted?: ReadonlyMap<string, Date>;
+}): { runId: string; retryAt: Date; runtime?: string } | undefined {
+  return usageLimitBlockedRun(input) ?? policyAnsweredQuestionRun(input);
+}
+
 function activeUsageLimitCooldowns(
   repoPath: string,
   tasks: readonly WorkItemRecord[],
@@ -719,7 +757,7 @@ async function resumeDueUsageLimitRuns(input: {
       return input.tasks
         .map((task) => ({
           task,
-          blocked: usageLimitBlockedRun({
+          blocked: resumableBlockedRun({
             task,
             eventStore,
             now: input.now,
@@ -767,7 +805,7 @@ async function resumeDueUsageLimitRuns(input: {
       const validationEvents = new EventStore(eventStorePath(input.repoPath));
       const currentBlocked = (() => {
         try {
-          return usageLimitBlockedRun({
+          return resumableBlockedRun({
             task: currentTask,
             eventStore: validationEvents,
             now: input.now,
@@ -904,6 +942,14 @@ export async function runSchedulerOnce(
       now,
       usageLimitCooldownMs,
     );
+    answerExpiredQuestions({
+      repoPath,
+      runIds: tasks.flatMap((task) =>
+        task.latestRunId && (!candidateIds || candidateIds.has(task.id))
+          ? [task.latestRunId]
+          : []),
+      now,
+    });
     const resumed = await resumeDueUsageLimitRuns({
       repoPath,
       tasks,

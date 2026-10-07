@@ -56,7 +56,7 @@ import {
   type WorkItemRunAdmission,
 } from "../run/admission.js";
 import { resolveApproval } from "../run/approvals.js";
-import { answerQuestion } from "../run/questions.js";
+import { answerQuestion, questionPolicyResumeDue } from "../run/questions.js";
 import { submitOperatorReview } from "../run/operator-review.js";
 import {
   defaultGitHubIssueFetcher,
@@ -6225,6 +6225,7 @@ export async function runWebUsageLimitRecovery(input: StartWebServerInput): Prom
         return tasks.filter((task) => {
           if (!task.latestRunId) return false;
           const run = projectRun(events.list(task.latestRunId));
+          if (questionPolicyResumeDue(run, now)) return true;
           if (run.status !== "blocked" || run.blocker?.reason !== "agent_usage_limit") return false;
           return Boolean(usageLimitBlockedRun({ task, eventStore: events, now, persisted })) ||
             (!parseRetryAfter(run.blocker.retryAfter, now) && !persisted.has(runtimeKey(run.blocker.runtime ?? "")));

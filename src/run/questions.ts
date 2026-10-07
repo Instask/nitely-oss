@@ -144,6 +144,9 @@ export async function answerQuestion(input: {
     throw new Error("answer must provide exactly one of optionId or text");
   }
   const actor = redactText(input.actor?.trim() || "cli") ?? "cli";
+  if (actor === AUTO_ANSWER_ACTOR) {
+    throw new Error(`answer actor is reserved for the question policy: ${actor}`);
+  }
   const redactedText = redactText(text);
 
   const store = new EventStore(eventStorePath(input.repoPath));
@@ -216,4 +219,150 @@ export function renderOperatorQuestionAnswer(
     "Treat this operator answer as the authoritative decision for this attempt.",
     "",
   ];
+}
+
+export const DEFAULT_QUESTION_TIMEOUT_MS = 30 * 60 * 1000;
+export const AUTO_ANSWER_ACTOR = "nitely:question-policy";
+
+export interface ResolvedQuestionPolicy {
+  mode: "ask" | "auto" | "deny";
+  timeoutMs: number;
+  onTimeout: "recommended" | "fail";
+}
+
+type QuestionPolicyInput = {
+  mode?: "ask" | "auto" | "deny";
+  timeoutMs?: number;
+  onTimeout?: "recommended" | "fail";
+};
+
+/** Stage policy overrides flow policy field by field; unset fields use defaults. */
+export function resolveQuestionPolicy(
+  flowPolicy: QuestionPolicyInput | undefined,
+  stagePolicy: QuestionPolicyInput | undefined,
+): ResolvedQuestionPolicy {
+  return {
+    mode: stagePolicy?.mode ?? flowPolicy?.mode ?? "ask",
+    timeoutMs:
+      stagePolicy?.timeoutMs ?? flowPolicy?.timeoutMs ?? DEFAULT_QUESTION_TIMEOUT_MS,
+    onTimeout: stagePolicy?.onTimeout ?? flowPolicy?.onTimeout ?? "recommended",
+  };
+}
+
+export function singleRecommendedOption(
+  options: readonly OperatorQuestionOption[],
+): OperatorQuestionOption | undefined {
+  const recommended = options.filter((option) => option.recommended === true);
+  return recommended.length === 1 ? recommended[0] : undefined;
+}
+
+export type AutoAnswerReason = "timeout" | "auto-policy";
+
+/**
+ * Records a non-human answer for the active question blocker. With a chosen
+ * option the next attempt receives it like a human answer; without one the
+ * answer is recorded as `failStage`, so the resumed attempt fails and the
+ * normal failure policy applies.
+ */
+export function appendAutoAnswer(input: {
+  store: EventStore;
+  runId: string;
+  question: { id: string; stageId: string; attempt: number; question: string };
+  option?: OperatorQuestionOption;
+  reason: AutoAnswerReason;
+}): void {
+  const { store, runId, question, option, reason } = input;
+  store.append({
+    runId,
+    stageId: question.stageId,
+    attempt: question.attempt,
+    type: "operator.answer",
+    payload: {
+      questionId: question.id,
+      actor: AUTO_ANSWER_ACTOR,
+      reason,
+      ...(option
+        ? { optionId: option.id }
+        : { text: `No answer adopted (${reason}); failing stage per question policy.`, failStage: true }),
+    },
+  });
+  store.append({
+    runId,
+    stageId: question.stageId,
+    attempt: question.attempt,
+    type: "operator.question.auto-answered",
+    payload: {
+      questionId: question.id,
+      question: question.question,
+      reason,
+      ...(option ? { optionId: option.id, optionLabel: option.label } : { outcome: "fail-stage" }),
+    },
+  });
+}
+
+/**
+ * Answers every expired `ask` question blocker in the repository according
+ * to its recorded policy. Returns the run ids that are now ready to resume.
+ */
+export function answerExpiredQuestions(input: {
+  repoPath: string;
+  runIds: readonly string[];
+  now: Date;
+}): string[] {
+  const store = new EventStore(eventStorePath(input.repoPath));
+  const ready: string[] = [];
+  try {
+    for (const runId of input.runIds) {
+      const events = store.list(runId);
+      if (events.length === 0) continue;
+      const projection = projectRun(events);
+      if (
+        projection.status !== "blocked" ||
+        projection.blocker?.reason !== "awaiting_operator_answer"
+      ) {
+        continue;
+      }
+      const question = (projection.questions ?? []).find(
+        (candidate) => candidate.id === projection.blocker?.questionId,
+      );
+      if (!question || question.status !== "pending" || !question.policy) continue;
+      if (question.policy.mode !== "ask" || !question.expiresAt) continue;
+      if (Date.parse(question.expiresAt) > input.now.getTime()) continue;
+      const option =
+        question.policy.onTimeout === "recommended"
+          ? singleRecommendedOption(question.options)
+          : undefined;
+      appendAutoAnswer({ store, runId, question, option, reason: "timeout" });
+      ready.push(runId);
+    }
+  } finally {
+    store.close();
+  }
+  return ready;
+}
+
+/**
+ * True when a run blocked on an operator question should be handed to the
+ * scheduler: the policy already answered it, or its `ask` timeout expired.
+ */
+export function questionPolicyResumeDue(
+  projection: ReturnType<typeof projectRun>,
+  now: Date,
+): boolean {
+  if (
+    projection.status !== "blocked" ||
+    projection.blocker?.reason !== "awaiting_operator_answer"
+  ) {
+    return false;
+  }
+  const question = (projection.questions ?? []).find(
+    (candidate) => candidate.id === projection.blocker?.questionId,
+  );
+  if (!question) return false;
+  if (question.status === "answered") return question.answer?.actor === AUTO_ANSWER_ACTOR;
+  return (
+    question.policy?.mode === "ask" &&
+    question.expiresAt !== undefined &&
+    Date.parse(question.expiresAt) <= now.getTime()
+  );
 }
