@@ -321,6 +321,7 @@ import {
   apiContextKnowledgeId,
   apiDeviceAuthorizationUserCode,
   apiFlowId,
+  apiFlowResetId,
   apiNotificationActionsId,
   apiNotificationAssignId,
   apiNotificationResolveId,
@@ -364,7 +365,11 @@ import { workItemDependencyGuards } from "../work-items/candidate-version.js";
 import type { WorkItemStoreKind } from "../work-items/types.js";
 import { FlowValidationError } from "../flow/load.js";
 import { openFlowStore } from "../flows/store.js";
-import { resolveCatalogFlow, type ResolvedCatalogFlow } from "../flows/catalog.js";
+import {
+  resetCatalogFlow,
+  resolveCatalogFlow,
+  type ResolvedCatalogFlow,
+} from "../flows/catalog.js";
 import { validateFlowDocument } from "../flows/validate.js";
 import {
   flowTemplateDocumentForCopy,
@@ -10667,6 +10672,17 @@ async function handleApiRequest(
     } finally {
       store.close();
     }
+    return true;
+  }
+
+  const resetFlowId = request.method === "POST" ? apiFlowResetId(url.pathname) : undefined;
+  if (resetFlowId) {
+    const user = await requireUserContext(request, input, homeRepoPath);
+    const existing = await requireCatalogFlowAccess(homeRepoPath, resetFlowId, user);
+    // Only built-in Flows have a shipped version; they have no owner, so this
+    // admits local mode and administrators only.
+    requireWriteAccessToRecord(user, existing.record, "flows:manage");
+    sendJson(response, 200, { flow: await resetCatalogFlow(homeRepoPath, resetFlowId) });
     return true;
   }
 

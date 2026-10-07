@@ -1,4 +1,3 @@
-import { WebNotFoundError } from "../web/errors.js";
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
@@ -15,6 +14,8 @@ import {
   type FlowSeedReconciliation,
   type FlowStore,
 } from "./store.js";
+import { validateFlowDocument, type FlowValidationReport } from "./validate.js";
+import { WebInputError, WebNotFoundError } from "../web/errors.js";
 
 /**
  * The Flow catalog: every runtime Flow lookup resolves through the Flow store.
@@ -219,4 +220,142 @@ export async function catalogFlowRunLabel(
   } catch {
     return resolved.record.seed.key;
   }
+}
+
+/** A catalog entry as shown by the CLI and other management surfaces. */
+export interface CatalogFlowSummary {
+  /** Public id: `flows/<name>.json` for built-in Flows, the store id otherwise. */
+  id: string;
+  storeId: string;
+  name: string;
+  origin: FlowRecord["origin"];
+  enabled: boolean;
+  seedKey?: string;
+  /** A built-in Flow whose document differs from the shipped version it came from. */
+  edited: boolean;
+  /** A newer shipped version exists and was not applied because of the edits. */
+  newerShippedVersion: boolean;
+  /** The shipped file is gone; the edited record is kept. */
+  shippedVersionRemoved: boolean;
+  workItemType?: string;
+  updatedAt: string;
+}
+
+export function catalogFlowSummary(record: FlowRecord): CatalogFlowSummary {
+  return {
+    id: catalogFlowId(record),
+    storeId: record.id,
+    name: record.name,
+    origin: record.origin,
+    enabled: record.enabled,
+    ...(record.seed ? { seedKey: record.seed.key } : {}),
+    edited: record.origin === "system" && flowRecordCustomized(record),
+    newerShippedVersion: Boolean(record.seed?.availableHash),
+    shippedVersionRemoved: Boolean(record.seed?.removedAt),
+    ...(record.workItemType ? { workItemType: record.workItemType } : {}),
+    updatedAt: record.updatedAt,
+  };
+}
+
+/** Thrown when a Flow document fails validation; carries the report. */
+export class CatalogFlowInvalidError extends Error {
+  constructor(readonly report: FlowValidationReport) {
+    super(`invalid flow document: ${report.errors.join("; ") || "unknown error"}`);
+    this.name = "CatalogFlowInvalidError";
+  }
+}
+
+function withStore<T>(repoPath: string, action: (store: FlowStore) => T): T {
+  const store = openFlowStore(repoPath);
+  try {
+    return action(store);
+  } finally {
+    store.close();
+  }
+}
+
+/** Enable or disable a catalog Flow. */
+export async function setCatalogFlowEnabled(
+  repoPath: string,
+  reference: string,
+  enabled: boolean,
+  options: FlowCatalogOptions = {},
+): Promise<FlowRecord> {
+  const { record } = await resolveCatalogFlow(repoPath, reference, {
+    ...options,
+    requireEnabled: false,
+  });
+  return withStore(repoPath, (store) => store.updateFlow(record.id, { enabled }));
+}
+
+/**
+ * Replace a catalog Flow's document after validating it with the same
+ * validator the Web Console uses. Editing a built-in Flow marks it edited, so
+ * later shipped versions no longer overwrite it.
+ */
+export async function updateCatalogFlowDocument(
+  repoPath: string,
+  reference: string,
+  document: string,
+  options: FlowCatalogOptions = {},
+): Promise<FlowRecord> {
+  const { record } = await resolveCatalogFlow(repoPath, reference, {
+    ...options,
+    requireEnabled: false,
+  });
+  const report = await validateFlowDocument(repoPath, document);
+  if (!report.valid) throw new CatalogFlowInvalidError(report);
+  const meta = seedMetadata(document, record.name);
+  return withStore(repoPath, (store) =>
+    store.updateFlow(record.id, {
+      name: meta.name,
+      document,
+      ...(meta.workItemType ? { workItemType: meta.workItemType } : {}),
+    }),
+  );
+}
+
+/**
+ * Replace a built-in Flow with the version shipped now. This both discards
+ * local edits and accepts a newer shipped version: they are the same write.
+ */
+export async function resetCatalogFlow(
+  repoPath: string,
+  reference: string,
+  options: FlowCatalogOptions = {},
+): Promise<FlowRecord> {
+  const { record } = await resolveCatalogFlow(repoPath, reference, {
+    ...options,
+    requireEnabled: false,
+  });
+  if (record.origin !== "system" || !record.seed) {
+    throw new WebInputError("only built-in flows have a shipped version to reset to");
+  }
+  const seedKey = record.seed.key;
+  const seed = (await readFlowSeeds(repoPath, options.bundledRoot)).find(
+    (candidate) => candidate.key === seedKey,
+  );
+  if (!seed) {
+    throw new WebInputError(`no shipped version of ${seedKey} is available`);
+  }
+  return withStore(repoPath, (store) =>
+    store.resetToSeed(record.id, seed, options.now ? { now: options.now } : {}),
+  );
+}
+
+/** Delete a user Flow. Built-in Flows cannot be deleted, only disabled. */
+export async function deleteCatalogFlow(
+  repoPath: string,
+  reference: string,
+  options: FlowCatalogOptions = {},
+): Promise<FlowRecord> {
+  const { record } = await resolveCatalogFlow(repoPath, reference, {
+    ...options,
+    requireEnabled: false,
+  });
+  if (record.origin === "system") {
+    throw new WebInputError("built-in flows cannot be deleted; disable them instead");
+  }
+  withStore(repoPath, (store) => store.deleteFlow(record.id));
+  return record;
 }
