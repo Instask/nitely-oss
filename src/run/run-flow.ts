@@ -1,3 +1,9 @@
+import {
+  formatRuntimeEffort,
+  isEffort,
+  resolveRuntimeEffort,
+  type ResolvedRuntimeEffort,
+} from "./execution/effort.js";
 import { resolveRunFlowSource } from "../flows/catalog.js";
 import { execFile } from "node:child_process";
 import {
@@ -111,6 +117,7 @@ import { EventStore } from "../events/store.js";
 import type { StoredRunEvent } from "../events/types.js";
 import { ensureContextKnowledgeProposalNotification } from "../web/context-knowledge-notifications.js";
 import { loadFlow, parseFlowDocument, type FlowGraph } from "../flow/load.js";
+import { applyRunOverrides, normalizeRunOverrides, type RunOverrides } from "../flow/overrides.js";
 import { decideBudgetStoppedResume } from "./budget-resume.js";
 import { flowInputReferences } from "../flow/inputs.js";
 import {
@@ -499,6 +506,7 @@ export interface RunFlowInput {
   repoName?: string;
   inputs: Record<string, ResourceReference>;
   configuration?: Record<string, unknown>;
+  overrides?: RunOverrides;
   providerConnections?: Partial<Record<import("../providers/types.js").ProviderId, string>>;
   ownerId?: string;
   organizationId?: string;
@@ -11184,14 +11192,14 @@ async function writeEvidence(input: {
             if (agent.candidates.length === 1) {
               const candidate = agent.candidates[0]!;
               return [
-                `- ${agent.stageId} (${agent.stageKind}): runtime ${candidate.runtime}, model ${candidate.model ?? "default"}`,
+                `- ${agent.stageId} (${agent.stageKind}): runtime ${candidate.runtime}, model ${candidate.model ?? "default"}, effort ${effortEvidenceText(candidate)}`,
                 ...capabilityLines,
               ].join("\n");
             }
             const chain = agent.candidates
               .map(
                 (candidate) =>
-                  `${candidate.runtime}/${candidate.model ?? "default"}`,
+                  `${candidate.runtime}/${candidate.model ?? "default"} (effort ${effortEvidenceText(candidate)})`,
               )
               .join(" -> ");
             return [
@@ -11754,6 +11762,9 @@ async function writeEvidence(input: {
     "## Agent Runtimes",
     "",
     agentRuntimeLines,
+    ...(input.reproducibility?.runtimes.flatMap((stage) => stage.selected
+      ? [`Selected ${stage.stageId}: runtime ${stage.selected.runtime}, model ${stage.selected.model ?? "default"}, effort ${effortEvidenceText(stage.selected)}`]
+      : []) ?? []),
     "",
     "## Stage Context Controls",
     "",
@@ -11885,6 +11896,49 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+/** Formats a stored selection. Resolves only when the event did not record one. */
+function effortEvidenceText(selection: RuntimeCandidate & Partial<ResolvedRuntimeEffort>): string {
+  if (
+    selection.effortStatus === "configured" ||
+    selection.effortStatus === "default" ||
+    selection.effortStatus === "not-applicable"
+  ) {
+    return formatRuntimeEffort({
+      effortStatus: selection.effortStatus,
+      ...(selection.requestedEffort ? { requestedEffort: selection.requestedEffort } : {}),
+      ...(selection.nativeEffort ? { nativeEffort: selection.nativeEffort } : {}),
+    });
+  }
+  return formatRuntimeEffort(resolveRuntimeEffort(selection).selection);
+}
+
+/**
+ * Copies requested effort, native token, and status from the runtime event.
+ * Events that predate native tokens are resolved again so the manifest matches
+ * the argv the current mapping would send.
+ */
+function recordedEffortSelection(
+  payload: Record<string, unknown>,
+  fallback: { runtime?: string; model?: string },
+): ResolvedRuntimeEffort {
+  const status = stringValue(payload.effortStatus);
+  const requestedRaw = stringValue(payload.requestedEffort) ?? stringValue(payload.effort);
+  const requestedEffort = isEffort(requestedRaw) ? requestedRaw : undefined;
+  const nativeEffort = stringValue(payload.nativeEffort);
+  if (status === "not-applicable" || status === "default" || (status === "configured" && nativeEffort)) {
+    return {
+      effortStatus: status,
+      ...(requestedEffort ? { requestedEffort } : {}),
+      ...(nativeEffort ? { nativeEffort } : {}),
+    };
+  }
+  return resolveRuntimeEffort({
+    runtime: fallback.runtime,
+    model: fallback.model,
+    effort: requestedEffort,
+  }).selection;
 }
 
 function numberValue(value: unknown): number | undefined {
@@ -12103,22 +12157,27 @@ function reproducibilityRuntimeStages(input: {
   stages: Stage[];
   events: StoredRunEvent[];
 }): ReproducibilityManifest["runtimes"] {
-  const selectedByStage = new Map<string, RuntimeCandidate>();
+  const selectedByStage = new Map<string, RuntimeCandidate & ResolvedRuntimeEffort>();
   for (const event of input.events) {
     if (event.type !== "stage.runtime.selected" || !event.stageId) continue;
     const payload = asRecord(event.payload);
     const runtime = stringValue(payload.runtime);
     if (!runtime) continue;
+    const model = stringValue(payload.model);
     selectedByStage.set(event.stageId, {
       runtime,
-      ...(stringValue(payload.model) ? { model: stringValue(payload.model) } : {}),
+      ...(model ? { model } : {}),
+      ...recordedEffortSelection(payload, { runtime, model }),
     });
   }
   return collectAgentRuntimeEvidence(input.stages).map((stage) => ({
     stageId: stage.stageId,
     kind: stage.stageKind,
-    candidates: stage.candidates,
-    ...(selectedByStage.get(stage.stageId)
+    candidates: stage.candidates.map(({ effort, ...candidate }) => ({
+      ...candidate,
+      ...resolveRuntimeEffort({ ...candidate, effort }).selection,
+    })),
+    ...(selectedByStage.has(stage.stageId)
       ? { selected: selectedByStage.get(stage.stageId) }
       : {}),
   }));
@@ -12757,9 +12816,11 @@ async function runFlowOnce(
   const loadedFlowDocument =
     input.flowDocument ??
     (await resolveRunFlowSource(repoPath, input.flowPath)).flowDocument;
-  const loaded = parseFlowDocument(loadedFlowDocument, {
+  const overrides = normalizeRunOverrides(input.overrides);
+  const stored = parseFlowDocument(loadedFlowDocument, {
     externalInputs: Object.keys(input.inputs),
   });
+  const loaded = { ...stored, flow: applyRunOverrides(stored.flow, overrides) };
   const runWorkItemType = input.workItemType ?? flowWorkItemType(loaded.flow);
   await assertWorkItemTypeAllowed({
     repoPath,
@@ -12889,6 +12950,7 @@ async function runFlowOnce(
       runEligibilityOverride: input.runEligibilityOverride,
       flowPath: input.flowPath,
       flowDocument: loadedFlowDocument,
+      overrides,
       flowDocumentSha256: sha256Text(loadedFlowDocument),
       repoPath,
       repoId: input.repoId,
@@ -12955,6 +13017,7 @@ async function runFlowOnce(
         name: loaded.flow.metadata.name,
         path: input.flowPath,
         documentSha256: sha256Text(loadedFlowDocument),
+        overrides,
         configurationSha256,
       },
       inputs: inputSnapshots,
@@ -14941,6 +15004,7 @@ async function resumeRunOnce(
       : await loadFlow(flowPath, {
           externalInputs: Object.keys(inputReferences),
         });
+    loaded = { ...loaded, flow: applyRunOverrides(loaded.flow, projection.overrides) };
     let budgetResumeStageId: string | undefined;
     if (resumableStages.length === 0) {
       const alwaysRunStageIds = loaded.flow.spec.stages

@@ -1,3 +1,4 @@
+import type { RunOverrides } from "../flow/overrides.js";
 import {
   normalizeRemoteServerUrl,
   remoteAuthorizationHeaders,
@@ -334,6 +335,7 @@ export type RemoteIntakeSourceType =
   | "external-document";
 
 export interface RemoteDraftTaskInput {
+  overrides?: RunOverrides;
   serverUrl: string;
   sourceType: RemoteIntakeSourceType;
   prompt?: string;
@@ -378,6 +380,7 @@ export async function createRemoteDraftTask(
     }),
     body: JSON.stringify({
       sourceType: input.sourceType,
+      ...(input.overrides ? { overrides: input.overrides } : {}),
       ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
       ...(input.text !== undefined ? { text: input.text } : {}),
       ...(input.issue ? { issue: input.issue } : {}),

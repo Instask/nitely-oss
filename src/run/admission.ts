@@ -180,6 +180,7 @@ function acceptedRunPayload(admission: StoredRunAdmission): Record<string, unkno
     repoName: input.repoName,
     inputs: input.inputs,
     configuration: input.configuration,
+    overrides: input.overrides,
     providerConnections: input.providerConnections,
     branchName: admission.branchName,
     workItemId: input.workItemId,

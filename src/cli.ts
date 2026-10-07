@@ -1,3 +1,4 @@
+import { normalizeRunOverrides, type RunOverrides } from "./flow/overrides.js";
 import { resolveRunFlowSource } from "./flows/catalog.js";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { bundledFlowsRoot, resolveBuiltinFlowPath } from "./flows/paths.js";
@@ -671,6 +672,7 @@ function printTaskIssueSync(io: CliIo, result: SyncTaskIssuesResult): void {
 }
 
 interface RemoteTaskCreateInput {
+  overrides?: RunOverrides;
   serverUrl: string;
   title: string;
   specPath: string;
@@ -1274,6 +1276,9 @@ export const TASK_COMMAND_USAGE =
 class TaskCommandUsageError extends Error {}
 
 interface TaskCreateOptions {
+  model?: string;
+  effort?: string;
+  runtime?: string;
   serverFlag: string;
   title: string;
   specPath: string;
@@ -1303,6 +1308,9 @@ function parseTaskCreateOptions(argv: string[], label: string): TaskCreateOption
     asJson: false,
   };
   const valueOptions: Record<string, keyof TaskCreateOptions> = {
+    "--model": "model",
+    "--effort": "effort",
+    "--runtime": "runtime",
     "--server": "serverFlag",
     "--title": "title",
     "--spec": "specPath",
@@ -1486,6 +1494,7 @@ async function createRemoteTask(
     }),
     body: JSON.stringify({
       title: input.title,
+      ...(input.overrides ? { overrides: input.overrides } : {}),
       spec,
       techDesign,
       ...(input.repoId ? { repoId: input.repoId } : {}),
@@ -2559,6 +2568,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
       let repoPath = ".";
       const inputs: RunFlowInput["inputs"] = {};
       const configuration: NonNullable<RunFlowInput["configuration"]> = {};
+      const overrideOptions: Record<string, string> = {};
       let taskScope: RunFlowInput["taskScope"];
       let executionBackend: string | undefined;
       try {
@@ -2571,6 +2581,12 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
           if (arg === "--input") {
             const [name, reference] = parseRunInput(argv[++index] ?? "");
             inputs[name] = reference;
+            continue;
+          }
+          if (arg === "--model" || arg === "--effort" || arg === "--runtime") {
+            const value = argv[++index] ?? "";
+            if (!value || value.startsWith("--")) throw new Error(`Missing value for ${arg}`);
+            overrideOptions[arg.slice(2)] = value;
             continue;
           }
           if (arg === "--config") {
@@ -2607,6 +2623,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
           flowPath,
           repoPath,
           inputs,
+          ...(normalizeRunOverrides(overrideOptions) ? { overrides: normalizeRunOverrides(overrideOptions) } : {}),
           ...(Object.keys(configuration).length > 0 ? { configuration } : {}),
           ...(taskScope ? { taskScope } : {}),
           ...(executionBackend ? { executionBackend } : {}),
@@ -4123,6 +4140,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
       const label = action === "plan" ? "task plan" : "task create";
       try {
         const options = parseTaskCreateOptions(argv, label);
+        const overrides = normalizeRunOverrides({ model: options.model, effort: options.effort, runtime: options.runtime });
         const remote = await resolveRemoteTarget({
           env,
           ...(options.serverFlag ? { flag: options.serverFlag } : {}),
@@ -4135,6 +4153,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
             {
               serverUrl,
               ...intake,
+              ...(overrides ? { overrides } : {}),
               ...(options.title ? { title: options.title } : {}),
               ...(options.guidance ? { guidance: options.guidance } : {}),
               ...(options.flowPath ? { flowPath: options.flowPath } : {}),
@@ -4160,6 +4179,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
           {
             serverUrl,
             title: options.title,
+            ...(overrides ? { overrides } : {}),
             specPath: options.specPath,
             techDesignPath: options.techDesignPath,
             ...(options.issue ? { issueUrl: options.issue } : {}),

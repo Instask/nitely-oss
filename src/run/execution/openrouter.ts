@@ -49,11 +49,12 @@ export function openRouterModelProblem(model: string | undefined): string | unde
  * OpenRouter's own `openrouter/...` model ids intact instead of letting Pi
  * mistake their author for the provider prefix.
  */
-export function createOpenRouterAgentArgs(model: string | undefined): string[] {
+export function createOpenRouterAgentArgs(model: string | undefined, nativeEffort?: string): string[] {
   const problem = openRouterModelProblem(model);
   if (problem) throw new Error(problem);
   return [
     "-p",
+    ...(nativeEffort ? ["--thinking", nativeEffort] : []),
     "--provider",
     PI_OPENROUTER_PROVIDER,
     "--model",

@@ -1,3 +1,4 @@
+import { resolveRuntimeEffort } from "./effort.js";
 import { randomUUID } from "node:crypto";
 import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { lstatSync } from "node:fs";
@@ -1255,6 +1256,12 @@ export class OciExecutionBackend implements ExecutionBackend {
             .join("; ")}.`,
         );
       }
+      const effortDecision = resolveRuntimeEffort({
+        runtime: runtime.id,
+        model: input.stage.model,
+        effort: input.stage.effort,
+      });
+      if (effortDecision.problem) throw new Error(`stage ${input.stage.id}: ${effortDecision.problem}`);
       const modelProblem = runtime.validateModel?.(input.stage.model);
       if (modelProblem) {
         throw new Error(`stage ${input.stage.id}: ${modelProblem}`);
@@ -1293,6 +1300,7 @@ export class OciExecutionBackend implements ExecutionBackend {
       const launch = runtime.build({
         worktreePath: "/workspace",
         model: input.stage.model,
+        nativeEffort: effortDecision.selection.nativeEffort,
         prompt: preparedPrompt,
         ...claudeLaunch,
         env: {
@@ -1847,6 +1855,12 @@ export class OciExecutionBackend implements ExecutionBackend {
           missingConfig: missing.flat(),
         };
       }
+      const effortProblem = resolveRuntimeEffort({
+        runtime: runtime.id,
+        model: input.stage.model,
+        effort: input.stage.effort,
+      }).problem;
+      if (effortProblem) return { available: false, reason: effortProblem };
       const modelProblem = runtime.validateModel?.(input.stage.model);
       if (modelProblem) {
         return { available: false, reason: modelProblem };

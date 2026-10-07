@@ -252,3 +252,53 @@ runtime registry 精确解析。当前支持：
 可选的 `model` 字段会作为 `-m <model>` 传给 Codex，作为 `--model <model>`
 传给 Claude、GLM、Grok Build 和 Pi。未知 runtime 会在启动任何命令前失败；已知
 runtime 缺少必需凭据时也会提前给出明确错误。
+
+## 覆盖模型与 effort
+
+`agent`、`judge` 和 review gate 可在 `runtime`、`model` 旁声明 `effort`，
+也可在每个 `runtimes` 候选中声明。Nitely 的级别是 `off`、`minimal`、`low`、
+`medium`、`high`、`xhigh`、`max`；省略时沿用运行时默认值。Nitely 先按该运行时
+校验并转换成它自己的参数：
+
+- Codex 的 `model_reasoning_effort`：`off` 转为 `none`；`minimal`、`low`、
+  `medium`、`high`、`xhigh`、`max` 原样传递。
+- Claude 的 `--effort`：`low`、`medium`、`high`、`xhigh`、`max`。`off` 和
+  `minimal` 没有对应参数，预检以 `runtime-effort-unsupported` 阻止。
+- Pi、OpenRouter、Together 的 `--thinking`：Pi 接受的级别原样传递。
+  OpenRouter 上捆绑目录标明不支持 reasoning 的模型保留请求的 effort，不传
+  `--thinking`，并记录 `not-applicable`。
+
+运行时没有 effort 映射，或无法表示所请求的级别时，预检在启动进程前以
+`runtime-effort-unsupported` 阻止。有序 `runtimes` 里只要还有一个候选能表示
+所请求的模型和 effort，阶段仍可运行，其余候选只给出警告。全部候选都无效时，
+预检阻止并报告没有可用的运行时候选。
+
+无需修改已存储 Flow，即可为一次运行选择模型和 effort：
+
+```bash
+nitely run flows/implement-medium.json --repo . \
+  --input spec=./spec.md --input tech-design=./tech-design.md \
+  --runtime openrouter --model openai/gpt-oss-120b --effort high
+
+nitely task create --server http://localhost:4173 --repo-id my-repo \
+  --title "实现已批准工作" --spec ./spec.md --tech-design ./tech-design.md \
+  --model openai/gpt-oss-120b --effort high
+```
+
+`--model`、`--effort` 和可选的 `--runtime` 作用于所有 agent、judge 和 review
+gate。仅覆盖 model/effort 时作用于现有每个候选；覆盖 runtime 时替换候选链。
+command 与人工批准阶段不受影响；暂不支持按 stage 指定覆盖。
+
+`POST /api/tasks` 可用 `overrides` 保存任务默认值，
+`POST /api/tasks/:id/runs` 可用相同对象设置单次运行覆盖：
+
+```json
+{ "overrides": { "runtime": "openrouter", "model": "openai/gpt-oss-120b", "effort": "high" } }
+```
+
+覆盖值经过 Flow 与运行时预检。Run 分别保存原始 Flow 文档和应用的覆盖值，
+恢复运行时重新应用已记录的覆盖。事件、运行投影、`reproducibility.json` 和
+evidence 分开记录三件事：请求的 Nitely effort、实际传给 CLI 的原生参数，以及
+有效状态（`configured`、`default` 或 `not-applicable`）。请求 `off` 的 Codex
+运行记录原生值 `none`。已知不支持 reasoning 的模型记录 `not-applicable` 并
+省略 thinking 参数；详见 [OpenRouter 模型](openrouter.md)。

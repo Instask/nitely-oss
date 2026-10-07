@@ -1,3 +1,4 @@
+import type { RunOverrides } from "../flow/overrides.js";
 import type { ResourceReference } from "../connectors/types.js";
 import type { FlowConfiguration } from "../flows/configurables.js";
 import type { FlowTemplateLineage } from "../flows/templates.js";
@@ -44,6 +45,7 @@ export interface WorkItemRecord {
   template?: FlowTemplateLineage;
   inputs: Record<string, ResourceReference>;
   configuration?: FlowConfiguration;
+  overrides?: RunOverrides;
   issueUrl?: string;
   latestRunId?: string;
   changeRequestUrl?: string;
@@ -75,6 +77,7 @@ export interface CreateWorkItemInput {
   template?: FlowTemplateLineage;
   inputs: Record<string, ResourceReference>;
   configuration?: FlowConfiguration;
+  overrides?: RunOverrides;
   issueUrl?: string;
   dependsOn?: string[];
   suggestedDependencies?: SuggestedDependency[];

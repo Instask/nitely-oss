@@ -6270,3 +6270,48 @@ None.
     expect(lines.join("\n")).not.toContain("connect [--server <url>]");
   });
 });
+
+
+describe("run model and effort overrides", () => {
+  it("forwards explicit runtime choices to runFlow", async () => {
+    let captured: RunFlowInput | undefined;
+    const errors: string[] = [];
+    const code = await runCli(["run", "flow.json", "--repo", "/repo", "--model", "qwen/qwen3-coder-next", "--effort", "high", "--runtime", "openrouter"],
+      { stdout: () => {}, stderr: (line) => errors.push(line) }, {
+        runFlow: async (input) => { captured = input; return { runId: "run-override", branchName: "nitely/run-override", worktreePath: "/repo/worktree" }; },
+      });
+    expect(errors).toEqual([]);
+    expect(code).toBe(0);
+    expect(captured?.overrides).toEqual({ model: "qwen/qwen3-coder-next", effort: "high", runtime: "openrouter" });
+  });
+
+  it("rejects invalid effort before starting a run", async () => {
+    const errors: string[] = [];
+    let started = false;
+    const code = await runCli(["run", "flow.json", "--effort", "urgent"],
+      { stdout: () => {}, stderr: (line) => errors.push(line) }, {
+        runFlow: async () => { started = true; throw new Error("unexpected run"); },
+      });
+    expect(code).toBe(1);
+    expect(started).toBe(false);
+    expect(errors.join("\n")).toContain("overrides.effort must be one of");
+  });
+
+  it("sends task defaults to the server", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "nitely-cli-overrides-"));
+    const spec = join(directory, "spec.md");
+    const design = join(directory, "design.md");
+    await writeFile(spec, "Spec"); await writeFile(design, "Design");
+    let body: Record<string, unknown> | undefined;
+    const errors: string[] = [];
+    const code = await runCli(["task", "create", "--server", "http://localhost:4173", "--title", "Evaluate", "--spec", spec, "--tech-design", design, "--model", "qwen/qwen3-coder-next", "--effort", "off"],
+      { stdout: () => {}, stderr: (line) => errors.push(line) }, {
+        env: {}, fetch: async (_url, init) => {
+          body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return new Response(JSON.stringify({ task: { id: "task-eval" } }), { status: 201 });
+        },
+      });
+    expect(errors).toEqual([]); expect(code).toBe(0);
+    expect(body?.overrides).toEqual({ model: "qwen/qwen3-coder-next", effort: "off" });
+  });
+});

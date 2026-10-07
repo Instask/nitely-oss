@@ -483,3 +483,61 @@ expensive review. Keep the pair explicit in each flow and verify it against
 the repository's runtime capability policy; do not assume model names are
 portable across providers. Operators can copy a flow and override the pairs
 when their provider account, policy, or cost boundary differs.
+
+## Model and effort overrides
+
+Agent, judge, and review-gate stages can declare `effort` alongside `runtime`
+and `model`, or on each `runtimes` candidate. Accepted Nitely levels are
+`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Omitting it
+uses the runtime's default. Nitely validates the level for that runtime and
+sends the runtime's own token:
+
+- Codex `model_reasoning_effort`: `off` becomes `none`; `minimal`, `low`,
+  `medium`, `high`, `xhigh`, and `max` pass through.
+- Claude `--effort`: `low`, `medium`, `high`, `xhigh`, and `max`. `off` and
+  `minimal` have no Claude token and block with `runtime-effort-unsupported`.
+- Pi, OpenRouter, and Together `--thinking`: the Nitely level passes through
+  where Pi accepts it. OpenRouter models whose bundled catalog entry reports
+  no reasoning support keep the requested effort, send no `--thinking` flag,
+  and record `not-applicable`.
+
+A runtime with no effort mapping, or a level that runtime cannot represent,
+blocks preflight with `runtime-effort-unsupported` before any process starts.
+An ordered `runtimes` stage stays runnable when at least one candidate can
+represent the requested model and effort; the others warn. When every
+candidate is invalid, preflight blocks and reports zero viable runtime
+candidates.
+
+Choose a model and effort per run without editing the stored Flow:
+
+```bash
+nitely run flows/implement-medium.json --repo . \
+  --input spec=./spec.md --input tech-design=./tech-design.md \
+  --runtime openrouter --model openai/gpt-oss-120b --effort high
+
+nitely task create --server http://localhost:4173 --repo-id my-repo \
+  --title "Implement approved work" --spec ./spec.md --tech-design ./tech-design.md \
+  --model openai/gpt-oss-120b --effort high
+```
+
+`--model`, `--effort`, and optional `--runtime` override every agent, judge,
+and review-gate stage. Model and effort overrides apply to every existing
+fallback candidate; a runtime override replaces the fallback chain with that
+runtime. Command and approval stages are unaffected. Per-stage overrides are
+not supported.
+
+`POST /api/tasks` accepts an `overrides` object as task defaults;
+`POST /api/tasks/:id/runs` accepts the same object for one run:
+
+```json
+{ "overrides": { "runtime": "openrouter", "model": "openai/gpt-oss-120b", "effort": "high" } }
+```
+
+Overrides pass flow and runtime preflight validation. The Run stores the
+original Flow document and applied overrides separately, and resume reapplies
+the recorded overrides. Run events, the run projection, `reproducibility.json`,
+and evidence record three distinct facts: the requested Nitely effort, the
+native token sent to the CLI, and the effective status (`configured`,
+`default`, or `not-applicable`). A Codex run requested at `off` records native
+`none`. Known models without reasoning support record `not-applicable` and
+omit the thinking flag; see [OpenRouter models](openrouter.md).

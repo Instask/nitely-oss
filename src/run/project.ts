@@ -1,3 +1,6 @@
+import { normalizeRunOverrides, type RunOverrides } from "../flow/overrides.js";
+import type { Effort } from "../flow/schema.js";
+import { isEffort, type RuntimeEffortStatus } from "./execution/effort.js";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
@@ -467,6 +470,9 @@ export interface ProjectedAttempt {
   generatedArtifactPaths?: string[];
   runtime?: string;
   model?: string;
+  requestedEffort?: Effort;
+  nativeEffort?: string;
+  effortStatus?: RuntimeEffortStatus;
   runtimeCandidateIndex?: number;
   runtimeCandidateCount?: number;
   startedAt?: string;
@@ -551,6 +557,7 @@ export interface ProjectedRun {
   runEligibilityOverride?: RunEligibilityOverrideEvidence;
   flowName?: string;
   flowPath?: string;
+  overrides?: RunOverrides;
   flowDocument?: string;
   flowDocumentSha256?: string;
   configurationSnapshotPath?: string;
@@ -763,6 +770,17 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function applyProjectedEffort(attempt: ProjectedAttempt, payload: Record<string, unknown>): void {
+  const status = asString(payload.effortStatus);
+  if (status === "configured" || status === "default" || status === "not-applicable") {
+    attempt.effortStatus = status;
+  }
+  const requested = asString(payload.requestedEffort);
+  if (isEffort(requested)) attempt.requestedEffort = requested;
+  const native = asString(payload.nativeEffort);
+  if (native) attempt.nativeEffort = native;
 }
 
 function asRunBlocker(value: unknown): ProjectedRunBlocker | undefined {
@@ -1865,6 +1883,7 @@ export function projectRun(
           payload.runEligibilityOverride as RunEligibilityOverrideEvidence;
       }
       projection.flowPath = asString(payload.flowPath);
+      projection.overrides = normalizeRunOverrides(payload.overrides);
       projection.flowDocument = asString(payload.flowDocument);
       projection.flowDocumentSha256 = asString(payload.flowDocumentSha256);
       projection.configurationSnapshotPath = asString(
@@ -2152,6 +2171,7 @@ export function projectRun(
       attempt.attemptDirectory = asString(payload.attemptDirectory);
       attempt.runtime = asString(payload.runtime) ?? attempt.runtime;
       attempt.model = asString(payload.model) ?? attempt.model;
+      applyProjectedEffort(attempt, payload);
       attempt.runtimeCandidateIndex =
         asNumber(payload.runtimeCandidateIndex) ?? attempt.runtimeCandidateIndex;
       attempt.runtimeCandidateCount =
@@ -2174,6 +2194,7 @@ export function projectRun(
       const attempt = ensureAttempt(stage, event.attempt);
       attempt.runtime = asString(payload.runtime) ?? attempt.runtime;
       attempt.model = asString(payload.model) ?? attempt.model;
+      applyProjectedEffort(attempt, payload);
       attempt.runtimeCandidateIndex =
         asNumber(payload.runtimeCandidateIndex) ?? attempt.runtimeCandidateIndex;
       attempt.runtimeCandidateCount =
@@ -2188,6 +2209,7 @@ export function projectRun(
       attempt.status = status === "skipped" ? "skipped" : "unavailable";
       attempt.runtime = asString(payload.runtime) ?? attempt.runtime;
       attempt.model = asString(payload.model) ?? attempt.model;
+      applyProjectedEffort(attempt, payload);
       attempt.runtimeCandidateIndex =
         asNumber(payload.runtimeCandidateIndex) ?? attempt.runtimeCandidateIndex;
       attempt.runtimeCandidateCount =
