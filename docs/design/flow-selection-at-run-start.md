@@ -1,228 +1,255 @@
-# Choosing the Flow and runtime when a run starts
+# Choosing the runtime when a run starts
 
-Status: proposal · Refs jerryleooo/nitely#708 (step 6, "Problem B") · Related: jerryleooo/nitely#709, jerryleooo/nitely#710
+Status: proposal for remaining #708 step 6 work; shared `RunOverrides` core established
+by #709 (Instask/nitely-oss#47, merged) · Refs jerryleooo/nitely#708 (step 6,
+"Problem B") · Related: jerryleooo/nitely#709, jerryleooo/nitely#710
+
+This document builds on the override mechanism that #709 already shipped. Sections
+are split into **existing behavior** (on `main`, from #709) and **proposed behavior**
+(remaining step 6 work). It does not define a competing override model.
 
 ## Problem
 
-The repository Flow catalog is now canonical (#708 steps 1–5): built-ins are seeded
-into the per-repository Flow store, edits and enable/disable live there, the Web API
-and CLI are repository-scoped, and `resolveRunFlowSource(repoPath, reference)` is the
-single way any CLI execution path turns a reference into a document.
+The repository Flow catalog is canonical (#708 steps 1–5): built-ins are seeded into
+the per-repository Flow store, edits and enable/disable live there, the Web API and
+CLI are repository-scoped, and `resolveRunFlowSource(repoPath, reference)` is the
+single way a CLI execution path turns a reference into a document.
 
-What has not changed is that the **agent runtime is baked into the Flow document**.
-Each agent / review-gate stage carries a literal `runtime` (and `model`) string, and the
-only way to run the same Flow on another runtime is to copy it. That is why
-`flows/implement-spec-bootstrap.json` has `-grok`, `-pi` and `-claude` siblings that
-differ only in `runtime`/`model` and in prompts that name the product ("with Grok
-Build"). Moving Flows into the store turned "copy a file per runtime" into "copy a row
-per runtime" — the drift is the same.
+Flow documents still carry a literal `runtime` / `model` per agent stage, and their
+prompts name the product ("with Grok Build"). That is why
+`flows/implement-spec-bootstrap.json` has `-grok`, `-pi` and `-claude` siblings.
+#709 made run-time choice possible; step 6 finishes the job so those copies can go.
 
-`configurables` cannot fix this: `applyFlowConfigurationTemplate` is applied only to
-`stage.prompt` and `stage.command`, never to `runtime` or `model`.
+`configurables` cannot fix this: `applyFlowConfigurationTemplate` only touches
+`stage.prompt` and `stage.command`.
 
 ## Goals
 
-1. An operator chooses the runtime (and optionally model) for a run when starting it,
-   from CLI, API and Console, without editing or copying the Flow.
+1. An operator chooses runtime/model/effort (and question policy) at run start from
+   CLI, API and Console, without editing or copying the Flow.
 2. The Flow document still declares defaults; no override means today's behavior.
-3. The exact effective choice is recorded in the run snapshot / reproducibility data.
-4. Overrides go through the same validation and preflight as the Flow's own values
-   (unknown runtime, invalid model, missing provider credentials).
+3. Source Flow and requested overrides are recorded so the run is reproducible.
+4. Overrides go through the same preflight as the Flow's own values.
 5. Retire the `implement-spec-bootstrap-{grok,pi,claude}` variants without breaking
-   existing work items, runs, or labels that reference them.
-6. Share one override mechanism with #709 (model/effort for evaluation) and the
-   deferred `--questions` override from #710.
+   existing work items, runs or labels.
+6. One override mechanism for #708, #709 and #710.
 
 ## Non-goals
 
 - Per-run editing of arbitrary stage fields (prompts, commands, DAG shape).
 - Automatic runtime routing / cost optimization.
-- The `effort` schema field and runtime argv mapping themselves (owned by #709); this
-  design only reserves the slot in the shared override object.
-- Per-stage overrides (deferred; the first cut is run-wide only, see Decisions).
-- An `allowedRuntimes` policy (deferred, see Decisions).
-- Choosing a *different Flow* at run start for an existing work item (work items keep
-  their `flowId` / template lineage; changing it stays an explicit edit).
+- Per-stage overrides (deferred; run-wide only, see Decisions).
+- An `allowedRuntimes` policy (deferred).
+- Choosing a different Flow for an existing work item at run start (changing a work
+  item's Flow identity stays an explicit edit).
 
-## Current behavior (main, after #43/#45/#48/#49)
+## Existing behavior (main, after #43/#45/#47/#48/#49)
 
-- **Catalog:** `src/flows/catalog.ts` — seeds from repo `flows/` then bundled seeds,
-  `resolveCatalogFlow`, enable/disable, reset, edited/upstream-update metadata,
-  `flowStoredMetadata()` derives metadata from the stored document.
-- **Templates / work items:** template inputs are declared ∪ inferred; work items keep
-  `templateId` lineage and `template:<id>` compatibility; `POST /api/work-items`
-  authorizes `flowId` against the target repository; disabled Flows block new and
-  existing template work.
-- **CLI:** `run`, `doctor`, `run-stage`, `rework-pr`, `pr-comments`, `ci-repair` all go
-  through `resolveRunFlowSource`; relative references anchor on `repoPath`; edited
-  built-ins run as edited; disabled ones are refused; explicit files still work.
-- **Repo scoping:** all `/api/flows*` routes go through `flowRequestScope` (query
-  `repoId` wins over body `repoId`); Console carries `repoId` in the route.
-- **Runtime choice:** stage `runtime`/`model`, plus an optional `runtimes[]` candidate
-  list that expresses *fallback* (emits `stage.runtime.fallback`), not operator choice.
-- **Question policy (#710):** Flow- and stage-level `questions` policy; run-time
-  override was deferred to #709's mechanism.
+- **Catalog / CLI resolution (#708 steps 1–5):** `run`, `doctor`, `run-stage`,
+  `rework-pr`, `pr-comments`, `ci-repair` resolve through `resolveRunFlowSource`;
+  relative references anchor on `repoPath`; edited built-ins run as edited; disabled
+  ones are refused; explicit files still work.
+- **Question policy (#710):** Flow- and stage-level `questions` (`ask`/`auto`/`deny`);
+  no run-time override yet.
+- **Shared override core (#709, `src/flow/overrides.ts`):**
+  - `RunOverrides { model?, effort?, runtime? }`; `normalizeRunOverrides()` rejects a
+    non-object, unknown fields, empty/non-string `model`/`runtime`, and an `effort`
+    outside `off|minimal|low|medium|high|xhigh|max` (`RunOverridesError`).
+  - `applyRunOverrides(flow, overrides)` returns a new Flow (the stored one is never
+    mutated) and only touches agent, judge and review-gate stages.
+  - Applied in `runFlow()` after `resolveRunFlowSource`, in preflight
+    (`evaluateRunPreflight`), and on resume from the recorded overrides.
+  - Work items/tasks store default `overrides`; a run request merges on top
+    field-by-field (`{ ...workItem.overrides, ...run.overrides }`).
+  - CLI: `nitely run --runtime/--model/--effort`, `nitely task create
+    --runtime/--model/--effort`.
+  - API: `POST /api/tasks` and `POST /api/tasks/:id/runs` accept `overrides`.
+  - Effort: requested / native / effective effort recorded per attempt
+    (`requestedEffort`, `nativeEffort`); `runtime-effort-unsupported` from preflight.
+  - Reproducibility and evidence record the overrides and effective selection.
 
 ## Options
 
 ### A. Extend configurables to `runtime` / `model`
-`"runtime": "{{config.runtime}}"`. Small change, reuses the configuration UI.
-Cons: every Flow becomes a template; per-run choice ends up in persisted Flow
-configuration; schema validation of `runtime` happens only after substitution; does not
-cover `effort` or `questions`. #709 already rejected this for model/effort.
+Every Flow becomes a template, per-run choice ends up in persisted configuration,
+validation happens after substitution, no `effort`/`questions`. Rejected (also by #709).
 
-### B. Explicit run-level overrides object (recommended)
-A typed `overrides` object supplied at run start and applied on top of the resolved
-stored document before preflight. Covers runtime, model, effort (#709) and questions
-(#710) with one validation/snapshot path.
-Cons: new surface on CLI/API/Console; must define precedence vs `runtimes[]`.
+### B. Explicit run-level overrides object (chosen; implemented by #709)
+A typed `overrides` object applied on top of the resolved source document before
+preflight. One validation, lineage and preflight path.
 
-### C. Keep variants, add a "runtime family" grouping in the catalog
-Catalog groups `-grok/-pi/-claude` under one entry with a picker.
-Cons: keeps the duplication and drift; every new runtime adds N rows. Rejected.
+### C. Keep variants, group them in the catalog
+Keeps duplication and drift. Rejected.
 
-## Recommended design (Option B)
+## Design (Option B)
 
 ### Data model
 
 ```ts
 type RunOverrides = {
-  runtime?: string;                       // run-wide
-  model?: string;
-  effort?: Effort;                        // reserved for #709
-  questions?: "ask" | "auto" | "deny";    // #710 deferred override
+  runtime?: string;  // established by #709
+  model?: string;    // established by #709
+  effort?: Effort;   // established by #709
+  questions?: "ask" | "auto" | "deny"; // proposed (step 6, deferred from #710)
 };
 ```
 
-- Applies only to agent, judge and review-gate stages; command stages ignore it.
-- Overrides are run-wide only in the first cut; there is no per-stage form.
-- Precedence per field, per stage: run override → work-item default override → stage
-  field → Flow default. Work-item defaults and run overrides merge field-by-field.
-- `runtimes[]` interaction: an explicit runtime override **replaces** the candidate
-  list; there is **no fallback** to `runtimes[]` if the chosen runtime fails (the stage
-  fails instead). A model-only override applies to the primary candidate only.
-  Rationale: silently falling back off an explicitly chosen runtime would defeat
-  evaluation (#709).
-- Setting `model` without `runtime` keeps the stage's runtime; a model invalid for that
-  runtime fails validation.
+Run-wide only; command stages are untouched.
+
+### Candidate (`runtimes[]`) semantics — existing, from #709
+
+- **Runtime override** replaces the stage's runtime / fallback candidate chain with a
+  single candidate. There is **no fallback** to the Flow's previous `runtimes[]`; if
+  the chosen runtime fails, the stage fails. When only `runtime` is overridden, the
+  model/effort carried over is the stage's own value or the first candidate's value.
+- **Model override** applies to **every** existing candidate, preserving order.
+- **Effort override** applies to **every** existing candidate, preserving order.
+- Preflight then decides which candidates are viable.
+
+Example:
+
+```text
+Flow candidates:            override model=new-model     override runtime=openrouter, model=qwen/foo
+1. glm   / model-a    ->    1. glm   / new-model    ->   1. openrouter / qwen/foo
+2. codex / model-b          2. codex / new-model         (original chain removed)
+```
+
+### Precedence — existing, from #709
+
+Per field: per-run override > work-item/task default override > Flow/stage value.
+Merge is field-by-field, not whole-object:
+
+```text
+task default: runtime=openrouter, effort=medium
+run override: model=qwen/foo
+effective:    runtime=openrouter, model=qwen/foo, effort=medium
+```
+
+`questions` (proposed) follows the same rule.
 
 ### Application point
 
-One pure function, `applyRunOverrides(document, overrides) → { document, effective }`,
-called after `resolveRunFlowSource` / `resolveCatalogFlow` and **before** preflight,
-stage extraction and execution, in every entry point (`run`, `run-stage`, `rework-pr`,
-`pr-comments`, `ci-repair`, Web task/run creation, scheduler). The stored catalog
-document is never mutated.
+`applyRunOverrides` runs after `resolveRunFlowSource` / catalog resolution and before
+preflight, stage extraction and execution. Proposed: every remaining execution entry
+point (`doctor`, `run-stage`, `rework-pr`, `pr-comments`, `ci-repair`, scheduler)
+passes overrides through the same function rather than re-implementing it.
 
-### Snapshot and lineage
+### Snapshot and lineage — existing, from #709
 
-`run.created` already snapshots the document actually executed and its sha256. Add:
-- `flow.sourceSha256` — stored/explicit document before overrides;
-- `workItemOverrides` — the work item's stored default overrides (if any);
-- `overrides` — the run-level request as given;
-- `effective` — per-stage `{ runtime, model, effort? }` after resolution;
-- the existing snapshot sha stays the sha of the *post-override* document.
+```text
+original stored/source Flow snapshot + recorded RunOverrides = effective execution configuration
+```
 
-`reproducibility.json` and evidence list the effective per-stage runtime/model. Run
-labels remain the Flow label (no runtime suffix), so labels stay stable.
+- `flowDocument` — immutable source Flow snapshot (stored catalog or explicit file);
+- `flowDocumentSha256` — `sha256(source Flow snapshot)`;
+- `overrides` — immutable run-level override request (merged with task defaults);
+- effective runtime/model/effort — recorded in runtime selection events, the run
+  projection, `reproducibility.json` and evidence.
+
+Resume reconstructs the effective Flow by applying the recorded `overrides` to the
+source snapshot. Run labels stay the Flow label. No `sourceSha256` field is added.
+Optional future addition: a derived `effectiveFlowSha256`; it must not change the
+meaning of `flowDocument`.
 
 ### Surface
 
-- **CLI:** `nitely run <flow> [--runtime <id>] [--model <id>] [--questions <policy>]`
-  (run-wide only, no `stage=value` forms); same flags on `run-stage`, `rework-pr`,
-  `pr-comments`, `ci-repair`, `task create`.
-  `doctor` accepts the same flags so it checks the same effective document.
-- **API:** `POST /api/tasks`, `POST /api/tasks/:id/runs`, `POST /api/work-items`
-  (stored as the work item's default overrides) accept `{ "overrides": RunOverrides }`.
-  Validation errors return 422 with the same report shape as Flow validation.
-- **Work items:** may store default `overrides`; a run request's overrides take
-  precedence over them field-by-field. Retries/reworks reuse the previous run's overrides unless the
-  request replaces them.
-- **Console:** a "Runtime" picker (default "As defined in Flow") on Run / new task,
-  listing runtimes registered on the server with credential status. Run detail shows effective runtime/model per stage.
+Existing (#709): `nitely run`, `nitely task create` (`--runtime/--model/--effort`);
+`POST /api/tasks`, `POST /api/tasks/:id/runs` (`overrides`); task default overrides.
+
+Proposed (step 6):
+- `--questions <ask|auto|deny>` and `overrides.questions` on the same surfaces.
+- Override flags on the remaining execution commands (`doctor`, `run-stage`,
+  `rework-pr`, `pr-comments`, `ci-repair`) so `doctor` checks the same effective
+  configuration as `run`. No `stage=value` forms.
+- **Console:** "Runtime" picker (default "As defined in Flow") on Run / new task that
+  sends the shared `overrides` object; run detail shows effective runtime/model/effort.
 
 ### Validation and preflight
 
-Overrides are validated with the same schema rules as stage fields (`validateModel`,
-known runtime registry). Preflight then runs on the effective document, so missing
-provider credentials surface as the existing runtime/credential diagnostics — no
-separate check. New diagnostic codes: `override-invalid` (bad shape / unknown field)
-and `runtime-unavailable` (runtime not installed/registered). These are distinct from
-`flow-invalid`, consistent with the decision to give configuration problems their own
-codes (the `verifyCommand` case moves to its own code in the same spirit).
+- **Malformed overrides → HTTP 400** (existing: `RunOverridesError` →
+  `WebInputError`): bad shape, unknown field, empty `model`/`runtime`, invalid `effort`.
+  Not 422.
+- **Well-formed but not executable → preflight report** using the existing
+  diagnostics: `runtime-unavailable`, `runtime-model-unsupported`,
+  `runtime-effort-unsupported`, and the existing credential diagnostics. No new
+  `override-invalid` / `runtime-not-allowed` codes.
 
 ### Permissions
 
-- Starting a run with overrides needs the same permission as starting the run
-  (`runs:execute` in the target repository); no Flow-management permission required,
-  because the stored Flow is not changed.
-- An `allowedRuntimes` policy is deferred; any registered runtime may be chosen.
-- **API tokens:** per the decision to let API tokens manage Flows, tokens with
-  `flows:manage` can use all `/api/flows*` operations (create/update/enable/reset/
-  delete) in repositories the token's owner can write; tokens with run permission can
-  pass overrides. Admin-only, interactive-only actions elsewhere are unchanged. All
-  token-driven Flow mutations and override use are written to the security audit log
-  with the token id.
+- Anyone authorized to start a run (`runs:start` on the target record) may supply
+  overrides; no Flow-management permission is needed because the stored Flow is not
+  changed. Override use is recorded in the run's lineage.
+- `allowedRuntimes` is deferred; any registered runtime may be chosen.
 
 ### Compatibility and migration
 
-1. No overrides → byte-identical effective document → identical behavior and sha.
-2. Variants: keep `implement-spec-bootstrap-{grok,pi,claude}` seeds for one release as
-   **deprecated aliases**: resolving one yields the base Flow plus an implicit
-   `runtime` override (recorded in the snapshot as `aliasOf`). Existing work items,
-   CLI invocations and run labels keep working. Customized variant rows are left
-   untouched and become ordinary user Flows on removal.
-3. Make the base prompts runtime-neutral (drop "with Grok Build" etc.) in the same
-   change so the alias is behaviour-equivalent apart from wording.
-4. After one release: remove the variant seeds; the catalog shows the upstream seed as
-   removed for untouched rows; the aliases resolve with a deprecation warning for one
-   more release, then fail with a hint to use `--runtime`.
+1. **No-override identity:** with no overrides the source snapshot is unchanged,
+   `applyRunOverrides` is semantically the identity, and execution behavior is
+   unchanged. This does not depend on serializing a separate post-override document.
+2. **Runtime-neutral prompts:** drop "with Grok Build" etc. from base prompts.
+3. **Variant aliases:** `implement-spec-bootstrap-{grok,pi,claude}` seeds stay one
+   release as deprecated aliases: resolving one yields the base Flow plus
+   alias-derived compatibility defaults (e.g. `runtime=claude`), recorded as `aliasOf`.
+   Precedence:
 
-## Relation to #709
+   ```text
+   base Flow -> alias-derived compatibility defaults -> work-item defaults -> per-run overrides
+   ```
 
-#709 needs exactly this object for `model`/`effort` across a batch of runs; #710
-deferred `--questions` to it. Step 6 should **implement the shared `RunOverrides`
-mechanism** (types, `applyRunOverrides`, snapshot fields, CLI/API plumbing) with
-`runtime`, `model` and `questions`. #709 then adds the `effort` schema field, argv
-mapping and `runtime-effort-unsupported`, plugging into the reserved slot. Order:
-step 6 core → #709 effort → variant removal.
+   So an alias implying `runtime=claude` run with `--runtime openrouter` runs on
+   openrouter. Customized existing variant rows stay independent user-managed Flows
+   and never become aliases.
+4. **Removal:** one release alias, one release deprecation warning, then fail with a
+   hint to use `--runtime`.
+
+## Separate: API-token Flow management
+
+Orthogonal to run overrides. Decision: API tokens may manage Flows (`/api/flows*`
+CRUD, enable/disable, reset) in repositories they can write, with security-audit
+rows. Implemented in its own PR, not part of the override mechanism.
 
 ## Test plan
 
-- Unit: `applyRunOverrides` precedence (run > work-item default > stage field > Flow
-  default), `runtimes[]` replacement with no fallback, model-only override, non-agent stages
-  ignored, no-override identity (same sha).
-- Preflight: override to runtime without credentials → existing credential
-  diagnostic; unknown runtime → `runtime-unavailable`; not `flow-invalid`.
-- CLI: `run`/`doctor`/`run-stage`/`ci-repair` with `--runtime` agree on the effective
-  document; flag parsing (no `stage=value` forms).
-- API: task/run creation with overrides, 422 on invalid, repo-scoped; API token with
-  run scope can override; API token with `flows:manage` can mutate Flows; audit rows.
-- Snapshot: `sourceSha256`, `workItemOverrides`, `overrides`, `effective` recorded; retry reuses overrides.
-- Compatibility: variant alias resolves to base + override; existing variant work
-  items still run; customized variant rows untouched.
-- Console: picker sends `overrides`; run detail shows effective runtime.
+Existing (#709) coverage to keep: `test/flow/run-overrides.test.ts`,
+`test/run/model-effort-overrides.test.ts`, `test/run/model-effort.test.ts`.
+Step 6 adds/extends:
+
+- **Candidate semantics:** runtime override replaces the fallback chain; model-only
+  and effort-only overrides apply to all candidates preserving order.
+- **Precedence:** run override > task default > Flow/stage value; field-by-field merge.
+- **Snapshot/reproducibility:** source snapshot unchanged; overrides recorded
+  separately; effective runtime/model/effort visible in events/reproducibility/
+  evidence; resume reapplies the same overrides; no-override identity.
+- **Validation:** malformed overrides → 400; non-executable → existing preflight codes.
+- **Questions:** task default policy; per-run override; run override beats default.
+- **CLI:** `doctor`/`run`/`run-stage`/`ci-repair` with the same flags agree.
+- **Variant compatibility:** legacy alias → base Flow + implicit runtime default;
+  explicit `--runtime` beats the alias runtime; customized legacy variant stays
+  independent; existing variant work items still run.
+- **Console:** picker sends the shared `overrides` object; run detail shows effective
+  runtime/model/effort.
 
 ## Rollout
 
-1. `RunOverrides` type, `applyRunOverrides`, snapshot fields, CLI flags (`run`,
-   `doctor`, `run-stage`, `rework-pr`, `pr-comments`, `ci-repair`), `--questions`.
-2. API + work-item default overrides + API-token Flow management + audit.
-3. Console picker and run-detail display.
-4. Runtime-neutral prompts; variants become deprecated aliases.
-5. #709 adds `effort`.
-6. Remove variant seeds after one release.
+Already established by #709: `RunOverrides` (runtime/model/effort),
+`applyRunOverrides`, task default + per-run overrides, `nitely run` / `task create`
+flags, `POST /api/tasks` and `/api/tasks/:id/runs`, preflight, resume, effort
+recording, reproducibility/evidence.
+
+Remaining step 6:
+1. Add `questions` to `RunOverrides` (CLI `--questions`, API, task default).
+2. Cover remaining CLI execution entry points with override flags.
+3. Console runtime picker and effective runtime/model/effort display.
+4. Runtime-neutral base prompts.
+5. Variants become deprecated aliases.
+6. Remove variant seeds on schedule.
 
 ## Decisions
 
-1. **No fallback:** an explicit runtime override replaces `runtimes[]`; if the chosen
-   runtime fails, the stage fails rather than falling back.
-2. **Run-wide only:** the first cut supports run-wide overrides only; per-stage
-   overrides are deferred. CLI flags are `--runtime`, `--model`, `--questions` without
-   `stage=value` forms.
-3. **Work-item defaults:** work items may store default overrides. Precedence: run
-   override > work-item default override > stage value > Flow default. The snapshot
-   records both the work-item defaults and the run-level overrides.
-4. **`allowedRuntimes`:** deferred to a later change.
-5. **Variant deprecation:** one release as deprecated aliases, one release with
-   warnings, then removal.
+1. **No fallback:** an explicit runtime override replaces `runtimes[]`; model/effort
+   overrides apply to every candidate in order.
+2. **Run-wide only:** per-stage overrides deferred; no `stage=value` CLI forms.
+3. **Work-item defaults:** stored default overrides; run override > work-item default
+   > Flow/stage value, field-by-field; both recorded.
+4. **`allowedRuntimes`:** deferred.
+5. **Variant deprecation:** one release alias, one release warning, then removal.
