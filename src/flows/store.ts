@@ -65,6 +65,8 @@ export interface FlowSeedReconciliation {
   preserved: string[];
   removed: string[];
   restored: string[];
+  /** Existing records whose shipped version did not change (customized or not). */
+  unchanged: string[];
 }
 
 export interface CreateFlowInput {
@@ -335,6 +337,17 @@ export class FlowStore {
    *   operator's customization or disabled state is not lost. It is restored
    *   if the seed ships again.
    */
+  #freeSystemFlowId(preferred: string): string {
+    const taken = this.#database.prepare("SELECT 1 FROM flows WHERE id = ?");
+    if (!taken.get(preferred)) return preferred;
+    for (let n = 2; n < 1000; n += 1) {
+      const suffix = `-${n}`;
+      const candidate = `${preferred.slice(0, 128 - suffix.length)}${suffix}`;
+      if (!taken.get(candidate)) return candidate;
+    }
+    throw new Error(`no free id for built-in flow ${preferred}`);
+  }
+
   reconcileSeeds(seeds: FlowSeed[], options: FlowStoreOptions = {}): FlowSeedReconciliation {
     const result: FlowSeedReconciliation = {
       inserted: [],
@@ -342,6 +355,7 @@ export class FlowStore {
       preserved: [],
       removed: [],
       restored: [],
+      unchanged: [],
     };
     const now = (options.now?.() ?? new Date()).toISOString();
     const keys = new Set(seeds.map((seed) => seed.key));
@@ -351,17 +365,23 @@ export class FlowStore {
         const hash = flowDocumentHash(seed.document);
         const existing = this.findBySeedKey(seed.key);
         if (!existing) {
-          this.#database
+          // The id is only a handle; the seed is identified by seed_key. A
+          // user Flow may already own the preferred id, so take the first free
+          // id in a deterministic sequence and never touch that row. This runs
+          // inside BEGIN IMMEDIATE, so the free id cannot be taken meanwhile,
+          // and the INSERT has no conflict clause: any failure aborts the sync
+          // instead of being silently skipped.
+          const id = this.#freeSystemFlowId(systemFlowIdForSeed(seed.key));
+          const inserted = this.#database
             .prepare(`
               INSERT INTO flows (
                 id, name, work_item_type, document, origin, enabled,
                 seed_key, seed_hash, seed_source, created_at, updated_at
               )
               VALUES (?, ?, ?, ?, 'system', 1, ?, ?, ?, ?, ?)
-              ON CONFLICT DO NOTHING
             `)
             .run(
-              systemFlowIdForSeed(seed.key),
+              id,
               seed.name,
               seed.workItemType ?? null,
               seed.document,
@@ -371,6 +391,9 @@ export class FlowStore {
               now,
               now,
             );
+          if (Number(inserted.changes) !== 1) {
+            throw new Error(`failed to seed built-in flow ${seed.key}`);
+          }
           result.inserted.push(seed.key);
           continue;
         }
@@ -387,6 +410,7 @@ export class FlowStore {
               .prepare("UPDATE flows SET seed_available_hash = NULL, seed_source = ? WHERE id = ?")
               .run(seed.source, existing.id);
           }
+          result.unchanged.push(seed.key);
           continue;
         }
         if (flowRecordCustomized(existing)) {

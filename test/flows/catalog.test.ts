@@ -139,6 +139,63 @@ describe("FlowStore seed reconciliation", () => {
   });
 });
 
+describe("seed id collisions with existing user Flows", () => {
+  it("never drops a seed or touches a user Flow that owns its id", async () => {
+    const { repoPath, bundledRoot } = await createRepo();
+    const mine = flowDocument("mine");
+    const mine2 = flowDocument("mine-2");
+    const store = openFlowStore(repoPath);
+    store.createFlow({ name: "mine", document: mine, ownerId: "usr_1" }, { createId: () => "system-shipped" });
+    store.createFlow({ name: "mine-2", document: mine2 }, { createId: () => "system-shipped-2" });
+
+    const first = await syncSystemFlows(store, repoPath, { bundledRoot });
+    expect(first).toEqual({
+      inserted: ["flows/bundled-only.json", "flows/shipped.json"].sort(),
+      upgraded: [],
+      preserved: [],
+      removed: [],
+      restored: [],
+      unchanged: [],
+    });
+    expect(store.getFlow("system-shipped")).toMatchObject({ origin: "user", document: mine, ownerId: "usr_1" });
+    expect(store.getFlow("system-shipped")).not.toHaveProperty("seed");
+    expect(store.getFlow("system-shipped-2")).toMatchObject({ origin: "user", document: mine2 });
+    const seeded = store.findBySeedKey("flows/shipped.json")!;
+    expect(seeded).toMatchObject({ id: "system-shipped-3", origin: "system" });
+    store.close();
+
+    await expect(resolveCatalogFlow(repoPath, "flows/shipped.json", { bundledRoot }))
+      .resolves.toMatchObject({ id: "flows/shipped.json", record: { id: "system-shipped-3" } });
+    expect((await listCatalogFlows(repoPath, { bundledRoot })).map(catalogFlowId))
+      .toContain("flows/shipped.json");
+
+    // A later sync finds it by seed key: an upgrade, not a second insert.
+    const v2 = flowDocument("shipped", "v2");
+    await writeFile(join(repoPath, "flows/shipped.json"), v2, "utf8");
+    const again = openFlowStore(repoPath);
+    try {
+      const second = await syncSystemFlows(again, repoPath, { bundledRoot });
+      expect(second).toMatchObject({
+        inserted: [],
+        upgraded: ["flows/shipped.json"],
+        unchanged: ["flows/bundled-only.json"],
+      });
+      const rows = again.listFlows();
+      expect(rows.filter((row) => row.seed?.key === "flows/shipped.json")).toHaveLength(1);
+      expect(rows).toHaveLength(4);
+      expect(again.findBySeedKey("flows/shipped.json")).toMatchObject({ id: "system-shipped-3", document: v2 });
+      expect(again.getFlow("system-shipped").document).toBe(mine);
+      expect(await syncSystemFlows(again, repoPath, { bundledRoot })).toMatchObject({
+        inserted: [],
+        upgraded: [],
+        unchanged: ["flows/bundled-only.json", "flows/shipped.json"].sort(),
+      });
+    } finally {
+      again.close();
+    }
+  });
+});
+
 describe("Flow catalog", () => {
   it("seeds repository and bundled Flows and lists them by seed key", async () => {
     const { repoPath, bundledRoot } = await createRepo();
