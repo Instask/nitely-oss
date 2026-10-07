@@ -56,6 +56,44 @@ const SPEC_TARGET_PATTERN =
 const IMPLEMENTATION_TARGET_PATTERN =
   /\b(implement|implementation|code|patch|diff|fix|solution|source|worktree)\b/i;
 
+// Lines that open a failing-test block in common runners: vitest/jest/mocha
+// FAIL or ×/✗/✖ markers, jest ●, pytest FAILED, and tsc diagnostics.
+const STRUCTURED_FAILURE_LINE =
+  /^\s*(FAIL\b|FAILED\b|●\s|[×✗✖]\s)|\berror TS\d+:/;
+const ERROR_LINE = /^\s*(Error:|[A-Z]\w*Error\b:)/;
+// Lines that end a block: a passing marker, a runner's console-output header,
+// a horizontal separator, or the run summary.
+const BLOCK_END_LINE =
+  /^\s*(✓|√|PASS\b|ok\b|stdout \||stderr \||[⎯─]{3,}|Test Files\b|Tests\b)/;
+const MAX_BLOCK_LINES = 12;
+
+/**
+ * Splits test-runner output into the blocks that describe failures, so a
+ * passing test whose name or console output happens to contain "network",
+ * "registry", "timeout" or a 5xx-looking number cannot decide how the failure
+ * is classified. Returns no blocks when the output has no recognizable
+ * failure markers; callers then fall back to the whole text.
+ */
+function failureBlocks(error: string): string[][] {
+  const lines = error.split(/\r?\n/);
+  const opener = lines.some((line) => STRUCTURED_FAILURE_LINE.test(line))
+    ? STRUCTURED_FAILURE_LINE
+    : ERROR_LINE;
+  const blocks: string[][] = [];
+  let current: string[] | undefined;
+  for (const line of lines) {
+    if (opener.test(line)) {
+      current = [line];
+      blocks.push(current);
+    } else if (current && (BLOCK_END_LINE.test(line) || current.length >= MAX_BLOCK_LINES)) {
+      current = undefined;
+    } else if (current) {
+      current.push(line);
+    }
+  }
+  return blocks;
+}
+
 function boundedText(value: string, limit = 700): string {
   const compacted = value.replace(/\s+/g, " ").trim();
   if (compacted.length <= limit) return compacted;
@@ -137,15 +175,18 @@ function preferredCandidate(
   );
 }
 
-function evidenceFor(input: DiagnoseVerificationFailureInput): string[] {
+function evidenceFor(
+  input: DiagnoseVerificationFailureInput,
+  blocks: string[][],
+): string[] {
+  const failureLines = blocks.length > 0 ? blocks.flat() : input.error.split(/\r?\n/);
   const evidence = [
     `${input.stage.type} stage ${input.stage.id} failed on attempt ${input.attempt}/${input.maxAttempts}.`,
     "command" in input.stage ? `Command: ${input.stage.command}` : undefined,
-    ...input.error
-      .split(/\r?\n/)
+    ...failureLines
       .map((line) => line.trim())
       .filter(Boolean)
-      .slice(0, 6)
+      .slice(0, blocks.length > 0 ? 12 : 6)
       .map((line) => `Failure: ${boundedText(line, 300)}`),
   ];
   return evidence.filter((line): line is string => line !== undefined);
@@ -185,11 +226,19 @@ export function diagnoseVerificationFailure(
     return undefined;
   }
 
-  const evidence = evidenceFor(input);
+  const blocks = failureBlocks(input.error);
+  const evidence = evidenceFor(input, blocks);
   const candidates = reworkCandidates(input);
-  const error = input.error;
+  // With recognizable failure blocks, the failure is environmental only when
+  // every failing block is; one code failure among them still needs rework.
+  const environmental = blocks.length > 0
+    ? blocks.every((block) => ENVIRONMENT_PATTERN.test(block.join("\n")))
+    : ENVIRONMENT_PATTERN.test(input.error);
+  const error = blocks.length > 0
+    ? blocks.map((block) => block.join("\n")).join("\n")
+    : input.error;
 
-  if (ENVIRONMENT_PATTERN.test(error)) {
+  if (environmental) {
     const repeated = repeatedFailure(input);
     const reason = repeated
       ? `verification failure appears environmental or flaky and repeated on ${input.stage.id}; escalate instead of reworking artifacts`
