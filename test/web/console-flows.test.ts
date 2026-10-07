@@ -7,7 +7,7 @@ const consolePath = join(process.cwd(), "src/web/static/console.dc.html");
 
 /** Extract a class member (`name(...) {`, `async name(...) {`, or `name = async (...) => {`). */
 function extractMember(source: string, name: string): string {
-  const markers = [`  ${name} = async (`, `  async ${name}(`, `  ${name}(`];
+  const markers = [`  ${name} = async (`, `  ${name} = (`, `  async ${name}(`, `  ${name}(`];
   const marker = markers.find((m) => source.includes(m));
   if (!marker) throw new Error(`member not found: ${name}`);
   const start = source.indexOf(marker);
@@ -20,7 +20,9 @@ function extractMember(source: string, name: string): string {
       if (depth === 0) {
         const text = source.slice(start, index + 1).trim();
         // Arrow members become plain methods for the object literal.
-        return text.replace(new RegExp(`^${name} = async \\((\\w*)\\) => \\{`), `async ${name}($1) {`);
+        return text
+          .replace(new RegExp(`^${name} = async \\((\\w*)\\) => \\{`), `async ${name}($1) {`)
+          .replace(new RegExp(`^${name} = \\((\\w*)\\) => \\{`), `${name}($1) {`);
       }
     }
   }
@@ -40,6 +42,50 @@ async function flowComponent(members: string[]): Promise<FlowComponent> {
 }
 
 const helpers = ["flowApiPath", "flowRepoBody", "flowErrorMessage"];
+
+const routing = [
+  ...helpers,
+  "routeFromPath",
+  "pathForRoute",
+  "applyRoute",
+  "navigate",
+  "fetchFlowCatalog",
+  "fetchFlowDetail",
+  "flowRepoResetPatch",
+  "flowRoute",
+  "selectFlowRepository",
+  "openFlow",
+  "newFlow",
+];
+
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+function stubLocation(path: string) {
+  const url = new URL(path, "http://console.test");
+  const location = { pathname: url.pathname, search: url.search };
+  const history = {
+    pushState: vi.fn((_s: unknown, _t: string, next: string) => {
+      const u = new URL(next, "http://console.test");
+      location.pathname = u.pathname;
+      location.search = u.search;
+    }),
+    replaceState: vi.fn((_s: unknown, _t: string, next: string) => {
+      const u = new URL(next, "http://console.test");
+      location.pathname = u.pathname;
+      location.search = u.search;
+    }),
+  };
+  vi.stubGlobal("window", { location, history });
+  return { location, history };
+}
+
+async function routedComponent(): Promise<FlowComponent> {
+  const c = await flowComponent(routing);
+  c.fetchTaskDetail = vi.fn();
+  c.fetchRunDetail = vi.fn();
+  c.fetchContextKnowledgeEntry = vi.fn();
+  return c;
+}
 
 describe("console Flow management", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -74,7 +120,8 @@ describe("console Flow management", () => {
   });
 
   it("switching repository reloads that repository's Flows and templates", async () => {
-    const c = await flowComponent([...helpers, "fetchFlowCatalog", "selectFlowRepository"]);
+    stubLocation("/flows");
+    const c = await routedComponent();
     c.state = { flowRepoId: "", flowDetails: { a: {} }, view: "flows" };
     const paths: string[] = [];
     c.api = async (path: string) => {
@@ -82,6 +129,7 @@ describe("console Flow management", () => {
       return path.includes("templates") ? { templates: [{ id: "t" }] } : { flows: [{ id: "f" }] };
     };
     await c.selectFlowRepository({ currentTarget: { value: "repo-b" } });
+    await flush();
     expect(paths.sort()).toEqual(["/api/flows/templates?repoId=repo-b", "/api/flows?repoId=repo-b"]);
     expect(c.state.flowDetails).toEqual({});
     expect(c.state.flows).toEqual([{ id: "f" }]);
@@ -135,7 +183,7 @@ describe("console Flow management", () => {
   });
 
   it("saving an editable built-in Flow replaces it in place with PUT", async () => {
-    const c = await flowComponent([...helpers, "saveFlow"]);
+    const c = await flowComponent([...helpers, "flowRoute", "saveFlow"]);
     c.state = {
       flowRepoId: "repo-b",
       flowDraftDocument: "{}",
@@ -152,6 +200,156 @@ describe("console Flow management", () => {
     expect(url).toBe("/api/flows/flows%2Ffoo.json");
     expect(init.method).toBe("PUT");
     expect(JSON.parse(String(init.body))).toEqual({ document: "{}", repoId: "repo-b" });
-    expect(c.navigate).toHaveBeenCalledWith({ view: "flow-detail", flowId: "flows/foo.json" });
+    expect(c.navigate).toHaveBeenCalledWith({ view: "flow-detail", flowId: "flows/foo.json", repoId: "repo-b" });
+  });
+
+  describe("repository in Flow routes", () => {
+    it("parses repoId from Flow URLs", async () => {
+      const c = await flowComponent(["routeFromPath"]);
+      expect(c.routeFromPath("/flows/flows%2Ffoo.json", "?repoId=repo-b")).toEqual({
+        view: "flow-detail",
+        flowId: "flows/foo.json",
+        repoId: "repo-b",
+      });
+      expect(c.routeFromPath("/flows", "?repoId=repo-b")).toEqual({ view: "flows", repoId: "repo-b" });
+      expect(c.routeFromPath("/flows/new", "?repoId=repo-b")).toEqual({ view: "flow-new", repoId: "repo-b" });
+      expect(c.routeFromPath("/flows", "")).toEqual({ view: "flows", repoId: "" });
+    });
+
+    it("writes repoId back into Flow URLs and omits it for home", async () => {
+      const c = await flowComponent(["pathForRoute"]);
+      expect(c.pathForRoute({ view: "flow-detail", flowId: "flows/foo.json", repoId: "repo-b" })).toBe(
+        "/flows/flows%2Ffoo.json?repoId=repo-b",
+      );
+      expect(c.pathForRoute({ view: "flows", repoId: "repo-b" })).toBe("/flows?repoId=repo-b");
+      expect(c.pathForRoute({ view: "flow-new", repoId: "repo-b" })).toBe("/flows/new?repoId=repo-b");
+      expect(c.pathForRoute({ view: "flows", repoId: "" })).toBe("/flows");
+      expect(c.pathForRoute({ view: "flow-detail", flowId: "flows/foo.json" })).toBe("/flows/flows%2Ffoo.json");
+    });
+
+    function twoRepoApi(paths: string[], missingInRepoB = false) {
+      return async (path: string) => {
+        paths.push(path);
+        if (path.startsWith("/api/flows/templates")) return { templates: [] };
+        if (path === "/api/flows/flows%2Ffoo.json") return { flow: { id: "flows/foo.json", document: "home custom" } };
+        if (path === "/api/flows/flows%2Ffoo.json?repoId=repo-b") {
+          return missingInRepoB ? null : { flow: { id: "flows/foo.json", document: "repo-b custom" } };
+        }
+        return { flows: [] };
+      };
+    }
+
+    it("deep link / refresh loads the Flow from the repository in the URL", async () => {
+      const { location } = stubLocation("/flows/flows%2Ffoo.json?repoId=repo-b");
+      const c = await routedComponent();
+      c.state = { flowRepoId: "", flowDetails: {}, configValues: {} };
+      const paths: string[] = [];
+      c.api = twoRepoApi(paths);
+      c.applyRoute(c.routeFromPath(location.pathname, location.search), { replace: true });
+      await flush();
+      expect(paths).toContain("/api/flows/flows%2Ffoo.json?repoId=repo-b");
+      expect(paths).not.toContain("/api/flows/flows%2Ffoo.json");
+      expect(c.state.flowRepoId).toBe("repo-b");
+      expect(c.state.flowDraftDocument).toBe("repo-b custom");
+      expect(c.state.flowDetails["flows/foo.json"].document).toBe("repo-b custom");
+      expect(location.search).toBe("?repoId=repo-b");
+    });
+
+    it("selector change updates the route and openFlow/newFlow keep the repo", async () => {
+      const { location, history } = stubLocation("/flows");
+      const c = await routedComponent();
+      c.state = { flowRepoId: "", flowDetails: {}, view: "flows", configValues: {} };
+      c.api = twoRepoApi([]);
+      await c.selectFlowRepository({ currentTarget: { value: "repo-b" } });
+      expect(history.pushState).toHaveBeenCalledWith({}, "", "/flows?repoId=repo-b");
+      expect(c.state.flowRepoId).toBe("repo-b");
+      c.openFlow({ currentTarget: { dataset: { id: "flows/foo.json" } } });
+      expect(location.pathname + location.search).toBe("/flows/flows%2Ffoo.json?repoId=repo-b");
+      c.newFlow();
+      expect(location.pathname + location.search).toBe("/flows/new?repoId=repo-b");
+      await c.selectFlowRepository({ currentTarget: { value: "" } });
+      expect(location.pathname + location.search).toBe("/flows/new");
+      await flush();
+    });
+
+    it("popstate (Back/Forward) restores the repository from the URL", async () => {
+      const { location } = stubLocation("/flows/flows%2Ffoo.json?repoId=repo-b");
+      const c = await routedComponent();
+      c.state = { flowRepoId: "", flowDetails: {}, configValues: {} };
+      c.api = twoRepoApi([]);
+      c.applyRoute(c.routeFromPath(location.pathname, location.search), { replace: true });
+      await flush();
+      // Back to the home-repo URL.
+      location.pathname = "/flows/flows%2Ffoo.json";
+      location.search = "";
+      c.applyRoute(c.routeFromPath(location.pathname, location.search), { replace: true });
+      await flush();
+      expect(c.state.flowRepoId).toBe("");
+      expect(c.state.flowDraftDocument).toBe("home custom");
+      // Forward again.
+      location.search = "?repoId=repo-b";
+      c.applyRoute(c.routeFromPath(location.pathname, location.search), { replace: true });
+      await flush();
+      expect(c.state.flowRepoId).toBe("repo-b");
+      expect(c.state.flowDraftDocument).toBe("repo-b custom");
+    });
+
+    it("switching repo on a detail page never shows the previous repo's Flow, even on 404", async () => {
+      stubLocation("/flows/flows%2Ffoo.json");
+      const c = await routedComponent();
+      c.state = {
+        view: "flow-detail",
+        flowRepoId: "",
+        selectedFlowId: "flows/foo.json",
+        selectedFlowStageId: "build",
+        flowDetails: { "flows/foo.json": { document: "home custom" } },
+        flowDraftDocument: "home edited draft",
+        flowDraftReport: { ok: true },
+        flowDraftStatus: "Saving...",
+        configValues: { "flows/foo.json::verifyCommand": "npm test", other: 1 },
+      };
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const base = twoRepoApi([], true);
+      c.api = async (path: string) => {
+        if (path.startsWith("/api/flows/flows%2Ffoo.json")) await gate;
+        return base(path);
+      };
+      const pending = c.selectFlowRepository({ currentTarget: { value: "repo-b" } });
+      // While loading: no stale home detail/draft.
+      expect(c.state.flowRepoId).toBe("repo-b");
+      expect(c.state.flowDetails).toEqual({});
+      expect(c.state.flowDraftDocument).toBe("");
+      expect(c.state.flowDraftReport).toBeNull();
+      expect(c.state.flowDraftStatus).toBe("");
+      expect(c.state.selectedFlowStageId).toBeNull();
+      expect(c.state.configValues).toEqual({ other: 1 });
+      release();
+      await pending;
+      await flush();
+      // Not found in repo-b: clear error, still nothing from home.
+      expect(c.state.flowDraftDocument).toBe("");
+      expect(c.state.flowDetails["flows/foo.json"]).toBeUndefined();
+      expect(c.state.flowDetailError).toContain("not found in repository repo-b");
+    });
+
+    it("drops a late detail response from a repository the user switched away from", async () => {
+      stubLocation("/flows/flows%2Ffoo.json?repoId=repo-b");
+      const c = await routedComponent();
+      c.state = { flowRepoId: "repo-b", selectedFlowId: "flows/foo.json", flowDetails: {}, configValues: {} };
+      c.api = twoRepoApi([]);
+      const pending = c.fetchFlowDetail("flows/foo.json", "repo-b");
+      c.state.flowRepoId = "";
+      await pending;
+      expect(c.state.flowDraftDocument).toBeUndefined();
+      expect(c.state.flowDetails).toEqual({});
+    });
+  });
+
+  it("shows the repository on the Flow detail header", async () => {
+    const html = await readFile(consolePath, "utf8");
+    expect(html).toContain('data-flow-repo-label="true"');
+    expect(html).toContain("{{ flowRepositoryLabel }}");
+    expect(html).toContain("{{ flowDetailError }}");
   });
 });

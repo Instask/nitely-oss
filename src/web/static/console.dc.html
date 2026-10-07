@@ -1552,6 +1552,8 @@
         <div class="mobile-page-head" style="display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-bottom:18px;">
           <div>
             <h1 style="margin:0 0 5px;font-size:23px;font-weight:600;letter-spacing:-.02em;color:var(--ink);">{{ flowEditorTitle }}</h1>
+            <div data-flow-repo-label="true" style="font-size:12px;color:var(--muted);">Repository: <span style="font-family:'Geist Mono',monospace;color:var(--ink);">{{ flowRepositoryLabel }}</span></div>
+            <sc-if value="{{ hasFlowDetailError }}" hint-placeholder-val="{{ false }}"><div role="alert" data-flow-detail-error="true" style="margin-top:6px;font-size:12.5px;color:var(--danger, #c0392b);">{{ flowDetailError }}</div></sc-if>
             <p style="margin:0;font-size:13px;color:var(--muted);">Edit JSON with schema-aware validation, then save and run.</p>
           </div>
           <div class="mobile-actions" style="display:flex;gap:8px;align-items:center;">
@@ -2960,6 +2962,7 @@ class Component extends DCLogic {
       flowTemplates: [],
       flowRepoId: "",
       flowManageError: "",
+      flowDetailError: "",
       selectedFlowId: null,
       selectedFlowStageId: null,
       flowDraftDocument: "",
@@ -3399,8 +3402,9 @@ class Component extends DCLogic {
     if (path === "/preview") return { view: "preview" };
     if (path === "/work-items") return { view: "tasks" };
     if (path === "/repositories") return { view: "repositories" };
-    if (path === "/flows") return { view: "flows" };
-    if (path === "/flows/new") return { view: "flow-new" };
+    const flowRepoId = new URLSearchParams(search).get("repoId") || "";
+    if (path === "/flows") return { view: "flows", repoId: flowRepoId };
+    if (path === "/flows/new") return { view: "flow-new", repoId: flowRepoId };
     if (path === "/skills") return { view: "skills" };
     if (path === "/providers") {
       const params = new URLSearchParams(search);
@@ -3412,7 +3416,7 @@ class Component extends DCLogic {
     }
     if (path === "/runs") return { view: "runs" };
     const flowMatch = path.match(/^\/flows\/(.+)$/);
-    if (flowMatch) return { view: "flow-detail", flowId: decodeURIComponent(flowMatch[1]) };
+    if (flowMatch) return { view: "flow-detail", flowId: decodeURIComponent(flowMatch[1]), repoId: flowRepoId };
     const taskMatch = path.match(/^\/tasks\/([^/]+)$/);
     if (taskMatch) return { view: "task-detail", taskId: decodeURIComponent(taskMatch[1]) };
     const runMatch = path.match(/^\/runs\/([^/]+)$/);
@@ -3432,9 +3436,11 @@ class Component extends DCLogic {
     if (route.view === "schedules") return "/schedules";
     if (route.view === "preview") return "/preview";
     if (route.view === "repositories") return "/repositories";
-    if (route.view === "flows") return "/flows";
-    if (route.view === "flow-new") return "/flows/new";
-    if (route.view === "flow-detail" && route.flowId) return "/flows/" + encodeURIComponent(route.flowId);
+    // Flow routes carry the repository explicitly; the home repo is omitted.
+    const flowRepoQuery = route.repoId ? "?repoId=" + encodeURIComponent(route.repoId) : "";
+    if (route.view === "flows") return "/flows" + flowRepoQuery;
+    if (route.view === "flow-new") return "/flows/new" + flowRepoQuery;
+    if (route.view === "flow-detail" && route.flowId) return "/flows/" + encodeURIComponent(route.flowId) + flowRepoQuery;
     if (route.view === "skills") return "/skills";
     if (route.view === "providers") return "/providers";
     if (route.view === "task-detail" && route.taskId) return "/tasks/" + encodeURIComponent(route.taskId);
@@ -3444,6 +3450,15 @@ class Component extends DCLogic {
 
   applyRoute(route, options) {
     const patch = { view: route.view, showNewTask: false };
+    const isFlowRoute = route.view === "flows" || route.view === "flow-new" || route.view === "flow-detail";
+    // The URL is the durable source of the Flow repository: switching repo
+    // drops every repository-specific cache so nothing leaks across repos.
+    const flowRepoId = isFlowRoute ? (route.repoId || "") : (this.state.flowRepoId || "");
+    const flowRepoChanged = isFlowRoute && flowRepoId !== (this.state.flowRepoId || "");
+    if (flowRepoChanged) {
+      Object.assign(patch, this.flowRepoResetPatch(), { flowRepoId });
+      this.fetchFlowCatalog(flowRepoId);
+    }
     if (route.view === "task-detail") {
       patch.selectedTaskId = route.taskId;
       patch.selectedRunId = null;
@@ -3454,7 +3469,12 @@ class Component extends DCLogic {
     } else if (route.view === "flow-detail") {
       patch.selectedFlowId = route.flowId;
       patch.selectedFlowStageId = null;
-      this.fetchFlowDetail(route.flowId);
+      patch.flowDetailError = "";
+      if (!this.state.flowDetails?.[route.flowId] || flowRepoChanged) {
+        patch.flowDraftDocument = "";
+        patch.flowDraftReport = null;
+      }
+      this.fetchFlowDetail(route.flowId, flowRepoId);
     } else if (route.view === "flow-new") {
       patch.selectedFlowId = null;
       patch.selectedFlowStageId = null;
@@ -3522,8 +3542,7 @@ class Component extends DCLogic {
 
   // Flow APIs are repository-scoped: every Flow request carries the selected
   // repoId (empty = the server's home repository).
-  flowApiPath(path) {
-    const repoId = this.state.flowRepoId || "";
+  flowApiPath(path, repoId = this.state.flowRepoId || "") {
     return repoId ? path + (path.includes("?") ? "&" : "?") + "repoId=" + encodeURIComponent(repoId) : path;
   }
 
@@ -3537,21 +3556,49 @@ class Component extends DCLogic {
     return (body && (body.error || body.message)) || (fallback + " (" + res.status + ")");
   }
 
-  async fetchFlowCatalog() {
+  async fetchFlowCatalog(repoId = this.state.flowRepoId || "") {
     const [flowsRes, templatesRes] = await Promise.all([
-      this.api(this.flowApiPath("/api/flows")),
-      this.api(this.flowApiPath("/api/flows/templates")),
+      this.api(this.flowApiPath("/api/flows", repoId)),
+      this.api(this.flowApiPath("/api/flows/templates", repoId)),
     ]);
+    // Drop responses for a repository the user has since switched away from.
+    if ((this.state.flowRepoId || "") !== repoId) return;
     this.setState({ flows: flowsRes?.flows ?? [], flowTemplates: templatesRes?.templates ?? [] });
+  }
+
+  // Repository-specific Flow state cleared whenever the selected repo changes.
+  flowRepoResetPatch() {
+    const configValues = {};
+    for (const [key, value] of Object.entries(this.state.configValues || {})) {
+      if (!key.includes("::")) configValues[key] = value;
+    }
+    return {
+      flowDetails: {},
+      flowDetailError: "",
+      flowManageError: "",
+      flows: [],
+      flowTemplates: [],
+      flowDraftDocument: "",
+      flowDraftReport: null,
+      flowDraftStatus: "",
+      selectedFlowStageId: null,
+      configValues,
+    };
+  }
+
+  flowRoute(view, extra) {
+    return Object.assign({ view, repoId: this.state.flowRepoId || "" }, extra);
   }
 
   selectFlowRepository = async (e) => {
     const repoId = e.currentTarget.value || "";
-    this.setState({ flowRepoId: repoId, flowDetails: {}, flowManageError: "", flows: [], flowTemplates: [] });
-    await this.fetchFlowCatalog();
-    if (this.state.selectedFlowId && this.state.view === "flow-detail") {
-      await this.fetchFlowDetail(this.state.selectedFlowId);
-    }
+    const view = this.state.view === "flow-new" || this.state.view === "flow-detail" ? this.state.view : "flows";
+    const route = { view, repoId };
+    // Re-resolve the same Flow id in the newly selected repository; a missing
+    // id surfaces as not-found rather than keeping the old repo's document.
+    if (view === "flow-detail" && this.state.selectedFlowId) route.flowId = this.state.selectedFlowId;
+    else if (view === "flow-detail") route.view = "flows";
+    this.navigate(route);
   };
 
   toggleFlowEnabled = async (e) => {
@@ -3594,21 +3641,39 @@ class Component extends DCLogic {
     await this.fetchFlowDetail(flowId);
   };
 
-  async fetchFlowDetail(flowId) {
-    const res = await this.api(this.flowApiPath("/api/flows/" + encodeURIComponent(flowId)));
+  async fetchFlowDetail(flowId, repoId = this.state.flowRepoId || "") {
+    const res = await this.api(this.flowApiPath("/api/flows/" + encodeURIComponent(flowId), repoId));
+    // Ignore a response for a repository or Flow the user has moved away from.
+    if ((this.state.flowRepoId || "") !== repoId || this.state.selectedFlowId !== flowId) {
+      if (res?.flow && (this.state.flowRepoId || "") === repoId) {
+        this.setState((s) => ({ flowDetails: Object.assign({}, s.flowDetails, { [flowId]: res.flow }) }));
+      }
+      return;
+    }
     if (res?.flow) {
       this.setState((s) => ({
         flowDetails: Object.assign({}, s.flowDetails, { [flowId]: res.flow }),
+        flowDetailError: "",
         flowDraftDocument: res.flow.document,
         flowDraftReport: null,
         flowDraftStatus: "",
       }));
+    } else {
+      const details = Object.assign({}, this.state.flowDetails);
+      delete details[flowId];
+      this.setState({
+        flowDetails: details,
+        flowDetailError: "Flow " + flowId + " was not found in repository " + (repoId || "Home") + ".",
+        flowDraftDocument: "",
+        flowDraftReport: null,
+        flowDraftStatus: "",
+      });
     }
   }
 
   openFlow = (e) => {
     const id = e.currentTarget.dataset.id;
-    this.navigate({ view: "flow-detail", flowId: id });
+    this.navigate(this.flowRoute("flow-detail", { flowId: id }));
   };
 
   selectFlowStage = (e) => {
@@ -3620,7 +3685,7 @@ class Component extends DCLogic {
   };
 
   newFlow = () => {
-    this.navigate({ view: "flow-new" });
+    this.navigate(this.flowRoute("flow-new"));
   };
 
   pickTemplate = (e) => {
@@ -3677,7 +3742,7 @@ class Component extends DCLogic {
     await this.fetchData();
     const savedId = isEdit ? editingId : body.flow.id;
     if (isEdit) await this.fetchFlowDetail(savedId);
-    this.navigate({ view: "flow-detail", flowId: savedId });
+    this.navigate(this.flowRoute("flow-detail", { flowId: savedId }));
   };
 
   flowConfigStateKey(flowId, key) {
@@ -7521,6 +7586,14 @@ class Component extends DCLogic {
       selectedFlowToggleLabel: selectedFlow?.enabled === false ? "Enable" : "Disable",
       flowTemplates: this.state.flowTemplates,
       taskFlowTemplates,
+      flowDetailError: this.state.flowDetailError || "",
+      hasFlowDetailError: !!this.state.flowDetailError,
+      flowRepositoryLabel: (() => {
+        const id = this.state.flowRepoId || "";
+        if (!id) return "Home";
+        const repo = (this.state.repositories || []).find((r) => r.id === id);
+        return (repo && (repo.name || repo.id)) || id;
+      })(),
       flowEditorTitle: view === "flow-new" ? "New flow" : (selectedFlow?.name || selectedFlowId || "Flow"),
       flowEditorEditable, flowEditorRunnable,
       flowEditorRunnableWithoutConfigurables,
