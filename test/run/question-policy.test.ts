@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { EventStore } from "../../src/events/store.js";
 import { FlowValidationError, loadFlow } from "../../src/flow/load.js";
@@ -14,10 +14,16 @@ import {
   AUTO_ANSWER_ACTOR,
   DEFAULT_QUESTION_TIMEOUT_MS,
   answerExpiredQuestions,
+  answerQuestion,
+  appendAutoAnswer,
   questionPolicyResumeDue,
   resolveQuestionPolicy,
 } from "../../src/run/questions.js";
 import { resumeRun, runFlow } from "../../src/run/run-flow.js";
+
+import { runSchedulerOnce } from "../../src/scheduler/run.js";
+import { listUnifiedWorkItems } from "../../src/work-items/access.js";
+import { runWebUsageLimitRecovery } from "../../src/web/server.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -295,7 +301,8 @@ describe("question policy runtime", () => {
     await expect(resumeRun({ repoPath: repo, runId }, { backend: agent })).rejects.toThrow();
     expect(prompts).toHaveLength(1);
     const types = events(repo, runId).map((event) => event.type);
-    expect(types).toContain("stage.failed");
+    expect(types.filter((type) => type === "stage.failed")).toHaveLength(1);
+    expect(projectRun(events(repo, runId)).status).toBe("failed");
   });
 
   it("does not auto-answer a question a human already answered or a non-ask policy", async () => {
@@ -317,5 +324,164 @@ describe("question policy runtime", () => {
     });
     // A second sweep is a no-op because the question is no longer pending.
     expect(answerExpiredQuestions({ repoPath: repo, runIds: [runId], now: late })).toEqual([]);
+  });
+});
+
+async function blockedQuestionRun(maxAttempts = 2, question: unknown = recommendedQuestion) {
+  const repo = await createRepo();
+  const flowPath = await writeFlow(repo, "recovery", { flow: { timeoutMs: 1000 } }, maxAttempts);
+  const runId = "run-recovery";
+  const prompts: string[] = [];
+  const agent = askThenImplement(repo, question, prompts);
+  await expect(runFlow({ flowPath, repoPath: repo, inputs: {} }, {
+    createRunId: () => runId, backend: agent,
+  })).rejects.toThrow(/awaiting_operator_answer/);
+  const pending = projectRun(events(repo, runId)).questions![0]!;
+  return { repo, runId, prompts, agent, pending, late: new Date(Date.parse(pending.expiresAt!) + 1) };
+}
+
+describe("question answer recovery invariants", () => {
+  it("scheduler discovers standalone runs repository-wide, leaves non-expired runs untouched, and resumes once", async () => {
+    const { repo, runId, prompts, agent, pending, late } = await blockedQuestionRun();
+    expect(await listUnifiedWorkItems(repo)).toEqual([]);
+    const resumer = vi.fn((input: Parameters<typeof resumeRun>[0]) => resumeRun(input, { backend: agent }));
+    await runSchedulerOnce({ repoPath: repo, now: () => new Date(Date.parse(pending.expiresAt!) - 1), resumeRun: resumer });
+    expect(resumer).not.toHaveBeenCalled();
+    expect(projectRun(events(repo, runId)).questions![0]!.status).toBe("pending");
+    await runSchedulerOnce({ repoPath: repo, now: () => late, resumeRun: resumer });
+    await runSchedulerOnce({ repoPath: repo, now: () => late, resumeRun: resumer });
+    expect(resumer).toHaveBeenCalledTimes(1);
+    expect(prompts[1]).toContain("Selected option: continue — Continue");
+    expect(projectRun(events(repo, runId)).status).toBe("completed");
+    expect(events(repo, runId).filter((e) => e.type === "operator.answer")).toHaveLength(1);
+  });
+
+  it.each(["human", "policy"] as const)("%s wins against another connection's stale pending observation", async (winner) => {
+    const { repo, runId, agent, prompts, pending, late } = await blockedQuestionRun();
+    const policyStore = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      // Both paths have observed pending before either claims the answer.
+      expect(projectRun(policyStore.list(runId)).questions![0]!.status).toBe("pending");
+      const human = () => answerQuestion({ repoPath: repo, runId, questionId: pending.id, answer: { optionId: "wait" }, actor: "human" });
+      const policy = () => appendAutoAnswer({ store: policyStore, runId, questionId: pending.id, reason: "timeout", now: late });
+      if (winner === "human") {
+        await human();
+        expect(policy()).toBeUndefined();
+      } else {
+        expect(policy()?.answer?.optionId).toBe("continue");
+        await expect(human()).rejects.toThrow(/already answered/);
+      }
+      expect(answerExpiredQuestions({ repoPath: repo, now: late })).toEqual([]);
+      const history = events(repo, runId);
+      expect(history.filter((e) => e.type === "operator.answer")).toHaveLength(1);
+      expect(history.filter((e) => e.type === "operator.question.auto-answered")).toHaveLength(winner === "policy" ? 1 : 0);
+      const label = winner === "human" ? "wait — Wait for permissions" : "continue — Continue";
+      await resumeRun({ repoPath: repo, runId }, { backend: agent });
+      expect(prompts[1]).toContain(`Selected option: ${label}`);
+      expect(projectRun(events(repo, runId)).questions![0]!.answer?.optionId).toBe(winner === "human" ? "wait" : "continue");
+      const evidence = await readFile(join(repo, ".nitely", "runs", runId, "evidence.md"), "utf8");
+      expect(evidence).toContain(winner === "human" ? "Wait for permissions" : "Continue");
+    } finally { policyStore.close(); }
+  });
+
+  it("rolls back the answer when writing its audit fails, then commits both together", async () => {
+    const { repo, runId, pending, late } = await blockedQuestionRun();
+    const store = new EventStore(join(repo, ".nitely", "events.db"));
+    const observer = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      const append = store.append.bind(store);
+      const spy = vi.spyOn(store, "append").mockImplementation((event) => {
+        if (event.type === "operator.question.auto-answered") {
+          expect(observer.list(runId).some((e) => e.type === "operator.answer")).toBe(false);
+          throw new Error("audit write failed");
+        }
+        return append(event);
+      });
+      expect(() => appendAutoAnswer({ store, runId, questionId: pending.id, reason: "timeout", now: late })).toThrow("audit write failed");
+      expect(observer.list(runId).filter((e) => e.type.startsWith("operator."))).toEqual([]);
+      spy.mockRestore();
+      appendAutoAnswer({ store, runId, questionId: pending.id, reason: "timeout", now: late });
+      expect(observer.list(runId).filter((e) => e.type.startsWith("operator.")).map((e) => e.type)).toEqual(["operator.answer", "operator.question.auto-answered"]);
+    } finally { store.close(); observer.close(); }
+  });
+
+  it("consumes timeout failure once and really runs the retry agent", async () => {
+    const { repo, runId, prompts, agent, late } = await blockedQuestionRun(3, unrecommendedQuestion);
+    answerExpiredQuestions({ repoPath: repo, now: late });
+    await resumeRun({ repoPath: repo, runId }, {
+      backend: agent,
+    });
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).not.toContain("## Operator Question And Answer");
+    const history = events(repo, runId);
+    expect(history.filter((e) => e.type === "stage.failed")).toHaveLength(1);
+    expect(history.find((e) => e.type === "orchestrator.decision")?.payload).toMatchObject({ action: "retry" });
+    expect(projectRun(history).status).toBe("completed");
+    expect(projectRun(history).questions![0]!.answer?.failStage).toBe(true);
+    expect(await readFile(join(repo, ".nitely", "runs", runId, "evidence.md"), "utf8")).toContain("stage failed");
+  });
+
+  it("redacts immediate auto audit from persisted runtime data, including backend secrets", async () => {
+    const repo = await createRepo();
+    const flowPath = await writeFlow(repo, "redacted-auto", { flow: { mode: "auto" } }, 2);
+    const secret = "runtime-only-private-value";
+    const prompts: string[] = [];
+    const agent = askThenImplement(repo, {
+      version: 1, question: `Continue with ${secret}?`, context: `Use ${secret}`,
+      options: [{ id: "continue", label: `Adopt ${secret}`, recommended: true }],
+    }, prompts);
+    agent.redactionSecrets = () => [secret];
+    const runId = "run-redacted-auto";
+    await runFlow({ flowPath, repoPath: repo, inputs: {} }, { createRunId: () => runId, backend: agent });
+    const history = events(repo, runId);
+    for (const type of ["stage.question", "operator.answer", "operator.question.auto-answered"]) {
+      const event = history.find((e) => e.type === type);
+      expect(event).toBeDefined();
+      expect(JSON.stringify(event)).not.toContain(secret);
+    }
+    expect(history.find((e) => e.type === "operator.question.auto-answered")?.payload).toMatchObject({
+      question: "Continue with [REDACTED]?", optionLabel: "Adopt [REDACTED]",
+    });
+    expect(prompts[1]).toContain("Adopt [REDACTED]");
+    expect(await readFile(join(repo, ".nitely", "runs", runId, "evidence.md"), "utf8")).not.toContain(secret);
+  });
+
+  it("Web and scheduler double observation claims a standalone continuation only once", async () => {
+    const { repo, runId, pending, agent, late } = await blockedQuestionRun();
+    // A sweep may have committed the answer and exited before dispatching resume.
+    expect(answerExpiredQuestions({ repoPath: repo, now: late })).toEqual([runId]);
+    let started!: () => void;
+    let release!: () => void;
+    const startedPromise = new Promise<void>((resolve) => { started = resolve; });
+    const releasePromise = new Promise<void>((resolve) => { release = resolve; });
+    const resumer = vi.fn(async (input: Parameters<typeof resumeRun>[0]) => {
+      started();
+      await releasePromise;
+      return resumeRun(input, { backend: agent });
+    });
+    const first = runSchedulerOnce({ repoPath: repo, now: () => late, resumeRun: resumer });
+    await startedPromise;
+    try {
+      await runWebUsageLimitRecovery({ repoPath: repo, repositories: [{ id: "test-repo", path: repo }], host: "127.0.0.1", port: 0, authMode: "local", resumeRun: resumer });
+      expect(resumer).toHaveBeenCalledTimes(1);
+    } finally { release(); await first; }
+    expect(projectRun(events(repo, runId)).status).toBe("completed");
+    expect(events(repo, runId).filter((e) => e.type === "operator.answer")).toHaveLength(1);
+    expect(events(repo, runId).filter((e) => e.type === "operator.question.auto-answered")).toHaveLength(1);
+    expect(pending.id).toBe("implement-1");
+  });
+
+  it("Web discovers and recovers an expired standalone pending question", async () => {
+    const { repo, runId, agent } = await blockedQuestionRun();
+    // Persist an expired timestamp without relying on a wall-clock sleep.
+    const store = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      const question = store.list(runId).find((e) => e.type === "stage.question")!;
+      store.append({ runId, stageId: question.stageId, attempt: question.attempt, type: "stage.question", payload: question.payload, createdAt: new Date(Date.now() - 2000).toISOString() });
+    } finally { store.close(); }
+    const resumer = vi.fn((input: Parameters<typeof resumeRun>[0]) => resumeRun(input, { backend: agent }));
+    await runWebUsageLimitRecovery({ repoPath: repo, repositories: [{ id: "test-repo", path: repo }], host: "127.0.0.1", port: 0, authMode: "local", resumeRun: resumer });
+    expect(resumer).toHaveBeenCalledTimes(1);
+    expect(projectRun(events(repo, runId)).status).toBe("completed");
   });
 });

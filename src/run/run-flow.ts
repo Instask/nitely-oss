@@ -4522,18 +4522,6 @@ async function executeAgentStage(input: {
             `stage ${input.stage.id} asked a question without a single recommended option under question policy auto`,
           );
         }
-        appendAutoAnswer({
-          store: input.eventStore,
-          runId: input.runId,
-          question: {
-            id: questionId,
-            stageId: input.stage.id,
-            attempt: selectedAttempt,
-            question: attemptQuestion.question.question,
-          },
-          option,
-          reason: "auto-policy",
-        });
       }
       const blocker: RunBlocker = {
         reason: "awaiting_operator_answer",
@@ -4559,6 +4547,14 @@ async function executeAgentStage(input: {
           attempt: selectedAttempt,
           blocker,
           context: input.context,
+        });
+      }
+      if (questionPolicy.mode === "auto") {
+        appendAutoAnswer({
+          store: input.eventStore,
+          runId: input.runId,
+          questionId,
+          reason: "auto-policy",
         });
       }
       const blockedError = new RunBlockedError(blocker, true);
@@ -15031,7 +15027,7 @@ async function resumeRunOnce(
       resumableStages,
       fallbackStageId: budgetResumeStageId,
     });
-    const answeredOperatorQuestion =
+    let answeredOperatorQuestion =
       projection.blocker?.reason === "awaiting_operator_answer"
         ? (projection.questions ?? []).find(
             (question) => question.id === projection.blocker?.questionId,
@@ -15662,6 +15658,10 @@ async function resumeRunOnce(
               if (stage.type === "agent") {
                 const contextControls = resolveStageContextControls(loaded.flow, stage);
               const readPolicy = resolveStageReadPolicy(loaded.flow.spec.reads, stage);
+                const operatorQuestion = answeredOperatorQuestion?.stageId === stage.id
+                  ? answeredOperatorQuestion : undefined;
+                // A timeout failure is one continuation failure, not a persistent retry veto.
+                if (operatorQuestion?.answer?.failStage) answeredOperatorQuestion = undefined;
                 const result = await withStageInstructionFiles({
                   stage,
                   controls: contextControls,
@@ -15694,10 +15694,7 @@ async function resumeRunOnce(
                     readPolicy,
                     contextKnowledge,
                     previousFailures,
-                    operatorQuestion:
-                      answeredOperatorQuestion?.stageId === stage.id
-                        ? answeredOperatorQuestion
-                        : undefined,
+                    operatorQuestion,
                     taskPlanPrompt: preparedTaskPlan?.promptContext,
                     agentSessions,
                     completedStages,

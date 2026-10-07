@@ -5,7 +5,12 @@ import { resolve } from "node:path";
 import { materializeDueSchedules } from "../schedules/materialize.js";
 
 import { EventStore } from "../events/store.js";
-import { AUTO_ANSWER_ACTOR, answerExpiredQuestions } from "../run/questions.js";
+import {
+  AUTO_ANSWER_ACTOR,
+  answerExpiredQuestions,
+  questionPolicyResumeRunIds,
+  questionPolicyResumeDue,
+} from "../run/questions.js";
 import { createScmProvider } from "../scm/registry.js";
 import type { ChangeRequestStatus, ScmProvider } from "../scm/types.js";
 import type { ProviderConnectionStore } from "../providers/types.js";
@@ -881,6 +886,50 @@ async function resumeDueUsageLimitRuns(input: {
   return resumed;
 }
 
+async function resumeStandaloneQuestionRuns(input: {
+  repoPath: string;
+  tasks: WorkItemRecord[];
+  now: Date;
+  attempted: Set<string>;
+  resumeRun: (input: ResumeRunInput) => Promise<RunFlowResult>;
+  executionBackend?: string;
+}): Promise<void> {
+  const attached = new Set(input.tasks.map((task) => task.latestRunId));
+  for (const runId of questionPolicyResumeRunIds(input.repoPath, input.now)) {
+    if (attached.has(runId) || input.attempted.has(runId)) continue;
+    const claims = new ResumeClaimStore(resumeClaimStorePath(input.repoPath));
+    const token = randomUUID();
+    try {
+      if (!claims.claim({ runId, token, now: new Date() })) continue;
+      const events = new EventStore(eventStorePath(input.repoPath));
+      let due: boolean;
+      try {
+        due = questionPolicyResumeDue(projectRun(events.list(runId)), input.now);
+      } finally {
+        events.close();
+      }
+      if (!due) continue;
+      input.attempted.add(runId);
+      const afterSequence = latestRunEventSequence(input.repoPath, runId);
+      try {
+        await input.resumeRun({
+          repoPath: input.repoPath,
+          runId,
+          ...(input.executionBackend ? { executionBackend: input.executionBackend } : {}),
+        });
+      } catch (error) {
+        terminalProjectionAfterRunnerError(input.repoPath, runId, error, afterSequence);
+      }
+    } finally {
+      try {
+        claims.release(runId, token);
+      } finally {
+        claims.close();
+      }
+    }
+  }
+}
+
 export async function runSchedulerOnce(
   input: RunSchedulerOnceInput,
 ): Promise<SchedulerRunSummary> {
@@ -916,6 +965,7 @@ export async function runSchedulerOnce(
   }
 
   const attempted = new Set<string>();
+  const attemptedStandaloneRuns = new Set<string>();
   while (true) {
     const { tasks, getStatus } = await loadSchedulerWorkItems({
       ...input,
@@ -942,13 +992,14 @@ export async function runSchedulerOnce(
       now,
       usageLimitCooldownMs,
     );
-    answerExpiredQuestions({
+    answerExpiredQuestions({ repoPath, now });
+    await resumeStandaloneQuestionRuns({
       repoPath,
-      runIds: tasks.flatMap((task) =>
-        task.latestRunId && (!candidateIds || candidateIds.has(task.id))
-          ? [task.latestRunId]
-          : []),
+      tasks,
       now,
+      attempted: attemptedStandaloneRuns,
+      resumeRun: resumer,
+      ...(input.executionBackend ? { executionBackend: input.executionBackend } : {}),
     });
     const resumed = await resumeDueUsageLimitRuns({
       repoPath,

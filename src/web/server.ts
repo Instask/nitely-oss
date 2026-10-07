@@ -56,7 +56,11 @@ import {
   type WorkItemRunAdmission,
 } from "../run/admission.js";
 import { resolveApproval } from "../run/approvals.js";
-import { answerQuestion, questionPolicyResumeDue } from "../run/questions.js";
+import {
+  answerQuestion,
+  questionPolicyResumeDue,
+  questionPolicyResumeRunIds,
+} from "../run/questions.js";
 import { submitOperatorReview } from "../run/operator-review.js";
 import {
   defaultGitHubIssueFetcher,
@@ -6216,7 +6220,7 @@ export async function runWebUsageLimitRecovery(input: StartWebServerInput): Prom
   const repositories = await loadWebRepositories(input.repoPath, input.repositories);
   for (const repository of repositories.filter((repo) => !repo.synthetic)) {
     const tasks = await listUnifiedWorkItems(repository.path);
-    if (!tasks.some((task) => task.latestRunId)) continue;
+    await mkdir(join(repository.path, ".nitely"), { recursive: true });
     const persisted = new Map(readSchedulerCooldowns(repository.path).map((entry) => [entry.runtime, new Date(entry.until)]));
     const now = new Date();
     const events = new EventStore(eventStorePath(repository.path));
@@ -6232,7 +6236,7 @@ export async function runWebUsageLimitRecovery(input: StartWebServerInput): Prom
         });
       } finally { events.close(); }
     })();
-    if (!candidates.length) continue;
+    if (!candidates.length && !questionPolicyResumeRunIds(repository.path, now).length) continue;
     await runSchedulerOnce({
       repoPath: repository.path,
       repoId: repository.id,

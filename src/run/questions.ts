@@ -151,46 +151,12 @@ export async function answerQuestion(input: {
 
   const store = new EventStore(eventStorePath(input.repoPath));
   try {
-    const events = store.list(input.runId);
-    if (events.length === 0) throw new Error(`run not found: ${input.runId}`);
-    const projection = projectRun(events);
-    const question = (projection.questions ?? []).find(
-      (candidate) => candidate.id === input.questionId,
-    );
-    if (!question) throw new Error(`question not found: ${input.questionId}`);
-    if (question.status !== "pending") {
-      throw new Error(`question ${input.questionId} is already answered`);
-    }
-    if (
-      projection.status !== "blocked" ||
-      projection.blocker?.reason !== "awaiting_operator_answer" ||
-      projection.blocker.questionId !== input.questionId
-    ) {
-      throw new Error(`question is not the active run blocker: ${input.questionId}`);
-    }
-    if (optionId && !question.options.some((option) => option.id === optionId)) {
-      throw new Error(`question option not found: ${optionId}`);
-    }
-
-    store.append({
+    return claimAndAnswerQuestion({
+      store,
       runId: input.runId,
-      stageId: question.stageId,
-      attempt: question.attempt,
-      type: "operator.answer",
-      payload: {
-        questionId: question.id,
-        actor,
-        ...(optionId ? { optionId } : {}),
-        ...(redactedText ? { text: redactedText } : {}),
-      },
-    });
-    const answered = (projectRun(store.list(input.runId)).questions ?? []).find(
-      (candidate) => candidate.id === input.questionId,
-    );
-    if (!answered) {
-      throw new Error(`question not found after answering: ${input.questionId}`);
-    }
-    return answered;
+      questionId: input.questionId,
+      answer: { actor, optionId, text: redactedText },
+    })!;
   } finally {
     store.close();
   }
@@ -258,45 +224,109 @@ export function singleRecommendedOption(
 
 export type AutoAnswerReason = "timeout" | "auto-policy";
 
+type PolicyAnswerClaim =
+  | { reason: "timeout"; now: Date }
+  | { reason: "auto-policy" };
+
 /**
- * Records a non-human answer for the active question blocker. With a chosen
- * option the next attempt receives it like a human answer; without one the
- * answer is recorded as `failStage`, so the resumed attempt fails and the
- * normal failure policy applies.
+ * All answer writers recheck the active pending question under SQLite's write lock.
+ * Policy audit text comes exclusively from the persisted, runtime-redacted question.
  */
+function claimAndAnswerQuestion(input: {
+  store: EventStore;
+  runId: string;
+  questionId: string;
+  answer?: { actor: string; optionId?: string; text?: string };
+  policy?: PolicyAnswerClaim;
+}): ProjectedOperatorQuestion | undefined {
+  return input.store.transaction(() => {
+    const events = input.store.list(input.runId);
+    if (!events.length) throw new Error(`run not found: ${input.runId}`);
+    const projection = projectRun(events);
+    const question = projection.questions?.find((q) => q.id === input.questionId);
+    if (!question) throw new Error(`question not found: ${input.questionId}`);
+    if (question.status !== "pending") {
+      if (input.policy) return undefined;
+      throw new Error(`question ${input.questionId} is already answered`);
+    }
+    if (
+      projection.status !== "blocked" ||
+      projection.blocker?.reason !== "awaiting_operator_answer" ||
+      projection.blocker.questionId !== question.id
+    ) {
+      if (input.policy) return undefined;
+      throw new Error(`question is not the active run blocker: ${input.questionId}`);
+    }
+    const policy = input.policy;
+    if (
+      policy?.reason === "timeout" &&
+      (question.policy?.mode !== "ask" || !question.expiresAt ||
+        !Number.isFinite(Date.parse(question.expiresAt)) ||
+        Date.parse(question.expiresAt) > policy.now.getTime())
+    ) return undefined;
+    if (policy?.reason === "auto-policy" && question.policy?.mode !== "auto") return undefined;
+    const option = policy &&
+      (policy.reason === "auto-policy" || question.policy?.onTimeout === "recommended")
+      ? singleRecommendedOption(question.options) : undefined;
+    if (policy?.reason === "auto-policy" && !option) {
+      throw new Error(`stage ${question.stageId} asked a question without a single recommended option under question policy auto`);
+    }
+    const answer: {
+      actor: string;
+      optionId?: string;
+      text?: string;
+      reason?: AutoAnswerReason;
+      failStage?: boolean;
+    } = policy ? {
+      actor: AUTO_ANSWER_ACTOR,
+      reason: policy.reason,
+      ...(option ? { optionId: option.id } : {
+        text: `No answer adopted (${policy.reason}); failing stage per question policy.`,
+        failStage: true,
+      }),
+    } : input.answer!;
+    if (answer.optionId && !question.options.some((o) => o.id === answer.optionId)) {
+      throw new Error(`question option not found: ${answer.optionId}`);
+    }
+    input.store.append({
+      runId: input.runId,
+      stageId: question.stageId,
+      attempt: question.attempt,
+      type: "operator.answer",
+      payload: { questionId: question.id, ...answer },
+    });
+    if (policy) {
+      input.store.append({
+        runId: input.runId,
+        stageId: question.stageId,
+        attempt: question.attempt,
+        type: "operator.question.auto-answered",
+        payload: {
+          questionId: question.id,
+          question: question.question,
+          reason: policy.reason,
+          ...(option
+            ? { optionId: option.id, optionLabel: option.label }
+            : { outcome: "fail-stage" }),
+        },
+      });
+    }
+    const answered = projectRun(input.store.list(input.runId)).questions?.find((q) => q.id === question.id);
+    if (!answered) throw new Error(`question not found after answering: ${question.id}`);
+    return answered;
+  });
+}
+
 export function appendAutoAnswer(input: {
   store: EventStore;
   runId: string;
-  question: { id: string; stageId: string; attempt: number; question: string };
-  option?: OperatorQuestionOption;
-  reason: AutoAnswerReason;
-}): void {
-  const { store, runId, question, option, reason } = input;
-  store.append({
-    runId,
-    stageId: question.stageId,
-    attempt: question.attempt,
-    type: "operator.answer",
-    payload: {
-      questionId: question.id,
-      actor: AUTO_ANSWER_ACTOR,
-      reason,
-      ...(option
-        ? { optionId: option.id }
-        : { text: `No answer adopted (${reason}); failing stage per question policy.`, failStage: true }),
-    },
-  });
-  store.append({
-    runId,
-    stageId: question.stageId,
-    attempt: question.attempt,
-    type: "operator.question.auto-answered",
-    payload: {
-      questionId: question.id,
-      question: question.question,
-      reason,
-      ...(option ? { optionId: option.id, optionLabel: option.label } : { outcome: "fail-stage" }),
-    },
+  questionId: string;
+} & PolicyAnswerClaim): ProjectedOperatorQuestion | undefined {
+  return claimAndAnswerQuestion({
+    store: input.store,
+    runId: input.runId,
+    questionId: input.questionId,
+    policy: input,
   });
 }
 
@@ -306,13 +336,13 @@ export function appendAutoAnswer(input: {
  */
 export function answerExpiredQuestions(input: {
   repoPath: string;
-  runIds: readonly string[];
+  runIds?: readonly string[];
   now: Date;
 }): string[] {
   const store = new EventStore(eventStorePath(input.repoPath));
   const ready: string[] = [];
   try {
-    for (const runId of input.runIds) {
+    for (const runId of input.runIds ?? store.listRunIds()) {
       const events = store.list(runId);
       if (events.length === 0) continue;
       const projection = projectRun(events);
@@ -328,12 +358,9 @@ export function answerExpiredQuestions(input: {
       if (!question || question.status !== "pending" || !question.policy) continue;
       if (question.policy.mode !== "ask" || !question.expiresAt) continue;
       if (Date.parse(question.expiresAt) > input.now.getTime()) continue;
-      const option =
-        question.policy.onTimeout === "recommended"
-          ? singleRecommendedOption(question.options)
-          : undefined;
-      appendAutoAnswer({ store, runId, question, option, reason: "timeout" });
-      ready.push(runId);
+      if (appendAutoAnswer({ store, runId, questionId: question.id, reason: "timeout", now: input.now })) {
+        ready.push(runId);
+      }
     }
   } finally {
     store.close();
@@ -365,4 +392,14 @@ export function questionPolicyResumeDue(
     question.expiresAt !== undefined &&
     Date.parse(question.expiresAt) <= now.getTime()
   );
+}
+
+/** Includes answered policy blockers so recovery can retry after an interrupted sweep. */
+export function questionPolicyResumeRunIds(repoPath: string, now: Date): string[] {
+  const store = new EventStore(eventStorePath(repoPath));
+  try {
+    return store.listRunIds().filter((runId) => questionPolicyResumeDue(projectRun(store.list(runId)), now));
+  } finally {
+    store.close();
+  }
 }
