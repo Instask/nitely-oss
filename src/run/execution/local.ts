@@ -1,4 +1,4 @@
-import { runtimeEffortSelection } from "./effort.js";
+import { effortContractFor, resolveRuntimeEffort, type RuntimeEffortContract } from "./effort.js";
 import { execFile, spawn } from "node:child_process";
 import { createWriteStream, mkdirSync, type WriteStream } from "node:fs";
 import {
@@ -39,7 +39,7 @@ import {
   resolveCommandMediation,
 } from "./command-mediation.js";
 import { effectiveCapabilityPolicy } from "../../flow/capabilities.js";
-import type { AgentCapabilityPolicy, Effort } from "../../flow/schema.js";
+import type { AgentCapabilityPolicy } from "../../flow/schema.js";
 import {
   requireCodexSandboxMode,
   type CodexSandboxMode,
@@ -83,7 +83,8 @@ export type ClaudePermissionMode = "acceptEdits" | "bypassPermissions";
 export interface AgentRuntimeLaunchInput {
   worktreePath: string;
   model?: string;
-  effort?: Effort;
+  /** CLI token from `resolveRuntimeEffort`, never a raw Nitely effort. */
+  nativeEffort?: string;
   prompt: string;
   env: RuntimeEnv;
   permissionMode?: ClaudePermissionMode;
@@ -132,7 +133,8 @@ export interface RuntimeSessionReuse {
 
 export interface AgentRuntimeLauncher {
   id: string;
-  supportsEffort?: boolean;
+  /** Present when this runtime can represent at least one Nitely effort. */
+  effort?: RuntimeEffortContract;
   requiredEnv?: string[][];
   /** Whether the runtime itself needs network access while executing. */
   networkAccess?: "none" | "required";
@@ -151,12 +153,6 @@ export interface AgentRuntimeLauncher {
    */
   describeFailure?(input: { model?: string; stdout: string; stderr: string }): string | undefined;
   build(input: AgentRuntimeLaunchInput): AgentRuntimeLaunchSpec;
-}
-
-export function runtimeEffortProblem(runtime: Pick<AgentRuntimeLauncher, "id" | "supportsEffort">, effort?: Effort): string | undefined {
-  return effort && !runtime.supportsEffort
-    ? `runtime-effort-unsupported: agent runtime ${runtime.id} has no effort mapping for ${effort}`
-    : undefined;
 }
 
 export interface AgentRuntimeRegistry {
@@ -398,7 +394,7 @@ export function createCodexExecArgs(
   model?: string,
   env: RuntimeEnv = process.env,
   jsonOutput = false,
-  effort?: Effort,
+  nativeEffort?: string,
 ): string[] {
   const sandbox = requireCodexSandboxMode(
     env.NITELY_CODEX_SANDBOX ??
@@ -410,7 +406,7 @@ export function createCodexExecArgs(
     "--sandbox",
     sandbox,
     ...(model ? ["-m", model] : []),
-    ...(effort ? ["-c", `model_reasoning_effort=${effort}`] : []),
+    ...(nativeEffort ? ["-c", `model_reasoning_effort=${nativeEffort}`] : []),
     ...(jsonOutput ? ["--json"] : []),
     "--cd",
     worktreePath,
@@ -422,7 +418,7 @@ export function createCodexResumeArgs(
   sessionId: string,
   model?: string,
   jsonOutput = true,
-  effort?: Effort,
+  nativeEffort?: string,
 ): string[] {
   // `codex exec resume` inherits the sandbox and working directory from the
   // session it resumes, and rejects --sandbox and --cd.
@@ -431,7 +427,7 @@ export function createCodexResumeArgs(
     "resume",
     sessionId,
     ...(model ? ["-m", model] : []),
-    ...(effort ? ["-c", `model_reasoning_effort=${effort}`] : []),
+    ...(nativeEffort ? ["-c", `model_reasoning_effort=${nativeEffort}`] : []),
     ...(jsonOutput ? ["--json"] : []),
     "-",
   ];
@@ -522,7 +518,7 @@ export function claudeAdditionalDirectories(input: {
 
 export function createClaudePrintArgs(input: {
   model?: string;
-  effort?: Effort;
+  nativeEffort?: string;
   permissionMode?: ClaudePermissionMode;
   additionalDirectories?: string[];
 }): string[] {
@@ -538,7 +534,7 @@ export function createClaudePrintArgs(input: {
       directory,
     ]),
     ...(input.model ? ["--model", input.model] : []),
-    ...(input.effort ? ["--effort", input.effort] : []),
+    ...(input.nativeEffort ? ["--effort", input.nativeEffort] : []),
   ];
 }
 
@@ -558,8 +554,8 @@ export function createGrokBuildArgs(
   ];
 }
 
-export function createPiAgentArgs(model?: string, effort?: Effort): string[] {
-  return ["-p", ...(model ? ["--model", model] : []), ...(effort ? ["--thinking", effort] : [])];
+export function createPiAgentArgs(model?: string, nativeEffort?: string): string[] {
+  return ["-p", ...(model ? ["--model", model] : []), ...(nativeEffort ? ["--thinking", nativeEffort] : [])];
 }
 
 class DefaultAgentRuntimeRegistry implements AgentRuntimeRegistry {
@@ -589,7 +585,7 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
   return new DefaultAgentRuntimeRegistry([
     {
       id: "codex",
-      supportsEffort: true,
+      effort: effortContractFor("codex"),
       networkAccess: "required",
       // Codex reads skills, plugins, packages, and rules from $CODEX_HOME.
       // An isolated CODEX_HOME that holds only auth.json and config.toml keeps
@@ -603,31 +599,31 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
       },
       sessionReuse: {
         parseSessionId: parseCodexSessionId,
-        buildResume: ({ model, effort, env, sessionId }) => ({
+        buildResume: ({ model, nativeEffort, env, sessionId }) => ({
           runtime: "codex",
           command: env.NITELY_CODEX_COMMAND ?? "codex",
-          args: createCodexResumeArgs(sessionId, model, true, effort),
+          args: createCodexResumeArgs(sessionId, model, true, nativeEffort),
           promptDelivery: "stdin",
         }),
       },
-      build: ({ worktreePath, model, effort, env }) => ({
+      build: ({ worktreePath, model, nativeEffort, env }) => ({
         runtime: "codex",
         command: env.NITELY_CODEX_COMMAND ?? "codex",
-        args: createCodexExecArgs(worktreePath, model, env, true, effort),
+        args: createCodexExecArgs(worktreePath, model, env, true, nativeEffort),
         promptDelivery: "stdin",
       }),
     },
     {
       id: "claude",
-      supportsEffort: true,
+      effort: effortContractFor("claude"),
       requiredEnv: [["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]],
       networkAccess: "required",
-      build: ({ model, effort, env, permissionMode, additionalDirectories }) => ({
+      build: ({ model, nativeEffort, env, permissionMode, additionalDirectories }) => ({
         runtime: "claude",
         command: env.NITELY_CLAUDE_COMMAND ?? "claude",
         args: createClaudePrintArgs({
           model,
-          effort,
+          nativeEffort,
           permissionMode,
           additionalDirectories,
         }),
@@ -660,26 +656,26 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
       // openrouter provider, so stages keep Pi's file and shell tools on any
       // model family. The key reaches Pi only through the environment.
       id: "openrouter",
-      supportsEffort: true,
+      effort: effortContractFor("openrouter"),
       requiredEnv: [[OPENROUTER_API_KEY_ENV]],
       networkAccess: "required",
       validateModel: openRouterModelProblem,
       describeFailure: ({ model, stderr }) => describeOpenRouterFailure({ model, stderr }),
-      build: ({ model, effort, env }) => ({
+      build: ({ model, nativeEffort, env }) => ({
         runtime: "openrouter",
         command: env.NITELY_PI_COMMAND ?? "pi",
-        args: createOpenRouterAgentArgs(model, effort),
+        args: createOpenRouterAgentArgs(model, nativeEffort),
         promptDelivery: "stdin",
       }),
     },
     {
       id: "pi",
-      supportsEffort: true,
+      effort: effortContractFor("pi"),
       networkAccess: "required",
-      build: ({ model, effort, env }) => ({
+      build: ({ model, nativeEffort, env }) => ({
         runtime: "pi",
         command: env.NITELY_PI_COMMAND ?? "pi",
-        args: createPiAgentArgs(model, effort),
+        args: createPiAgentArgs(model, nativeEffort),
         promptDelivery: "stdin",
       }),
     },
@@ -688,15 +684,15 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
       // Together provider, so stages keep Pi's file and shell tools. The key
       // reaches Pi only through the environment, never through argv.
       id: "together",
-      supportsEffort: true,
+      effort: effortContractFor("together"),
       requiredEnv: [[TOGETHER_API_KEY_ENV]],
       networkAccess: "required",
       validateModel: togetherModelProblem,
       describeFailure: ({ model, stderr }) => describeTogetherFailure({ model, stderr }),
-      build: ({ model, effort, env }) => ({
+      build: ({ model, nativeEffort, env }) => ({
         runtime: "together",
         command: env.NITELY_PI_COMMAND ?? "pi",
-        args: createTogetherAgentArgs(model, effort),
+        args: createTogetherAgentArgs(model, nativeEffort),
         promptDelivery: "stdin",
       }),
     },
@@ -1461,8 +1457,12 @@ export class LocalExecutionBackend implements ExecutionBackend {
       };
     }
     await assertRuntimeConfigured(runtime, runtimeEnv);
-    const effortProblem = runtimeEffortProblem(runtime, input.stage.effort);
-    if (effortProblem) throw new Error(`stage ${input.stage.id}: ${effortProblem}`);
+    const effortDecision = resolveRuntimeEffort({
+      runtime: runtime.id,
+      model: input.stage.model,
+      effort: input.stage.effort,
+    });
+    if (effortDecision.problem) throw new Error(`stage ${input.stage.id}: ${effortDecision.problem}`);
     const modelProblem = runtime.validateModel?.(input.stage.model);
     if (modelProblem) {
       throw new Error(`stage ${input.stage.id}: ${modelProblem}`);
@@ -1488,7 +1488,7 @@ export class LocalExecutionBackend implements ExecutionBackend {
     const launchInput = {
       worktreePath: cwd,
       model: input.stage.model,
-      effort: runtimeEffortSelection(input.stage).effort,
+      nativeEffort: effortDecision.selection.nativeEffort,
       prompt: input.prompt,
       env: runtimeEnv,
       ...claudeLaunch,
@@ -1742,7 +1742,11 @@ export class LocalExecutionBackend implements ExecutionBackend {
         missingConfig: missing.flat(),
       };
     }
-    const effortProblem = runtimeEffortProblem(runtime, input.stage.effort);
+    const effortProblem = resolveRuntimeEffort({
+      runtime: runtime.id,
+      model: input.stage.model,
+      effort: input.stage.effort,
+    }).problem;
     if (effortProblem) return { available: false, reason: effortProblem };
     const modelProblem = runtime.validateModel?.(input.stage.model);
     if (modelProblem) {

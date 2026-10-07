@@ -1,5 +1,3 @@
-import type { Effort } from "../../flow/schema.js";
-
 /**
  * Together AI agent runtime.
  *
@@ -49,10 +47,10 @@ export function togetherModelProblem(model: string | undefined): string | undefi
   return undefined;
 }
 
-export function createTogetherAgentArgs(model?: string, effort?: Effort): string[] {
+export function createTogetherAgentArgs(model?: string, nativeEffort?: string): string[] {
   return [
     "-p",
-    ...(effort ? ["--thinking", effort] : []),
+    ...(nativeEffort ? ["--thinking", nativeEffort] : []),
     "--provider",
     TOGETHER_PI_PROVIDER,
     ...(model ? ["--model", model.trim()] : []),

@@ -1,4 +1,9 @@
-import { runtimeEffortSelection, type RuntimeEffortSelection } from "./execution/effort.js";
+import {
+  formatRuntimeEffort,
+  isEffort,
+  resolveRuntimeEffort,
+  type ResolvedRuntimeEffort,
+} from "./execution/effort.js";
 import { execFile } from "node:child_process";
 import {
   mkdir,
@@ -11129,14 +11134,14 @@ async function writeEvidence(input: {
             if (agent.candidates.length === 1) {
               const candidate = agent.candidates[0]!;
               return [
-                `- ${agent.stageId} (${agent.stageKind}): runtime ${candidate.runtime}, model ${candidate.model ?? "default"}, effort ${runtimeEffortSelection(candidate).effort ?? runtimeEffortSelection(candidate).effortStatus}`,
+                `- ${agent.stageId} (${agent.stageKind}): runtime ${candidate.runtime}, model ${candidate.model ?? "default"}, effort ${effortEvidenceText(candidate)}`,
                 ...capabilityLines,
               ].join("\n");
             }
             const chain = agent.candidates
               .map(
                 (candidate) =>
-                  `${candidate.runtime}/${candidate.model ?? "default"} (effort ${runtimeEffortSelection(candidate).effort ?? runtimeEffortSelection(candidate).effortStatus})`,
+                  `${candidate.runtime}/${candidate.model ?? "default"} (effort ${effortEvidenceText(candidate)})`,
               )
               .join(" -> ");
             return [
@@ -11694,7 +11699,7 @@ async function writeEvidence(input: {
     "",
     agentRuntimeLines,
     ...(input.reproducibility?.runtimes.flatMap((stage) => stage.selected
-      ? [`Selected ${stage.stageId}: runtime ${stage.selected.runtime}, model ${stage.selected.model ?? "default"}, effort ${stage.selected.effort ?? stage.selected.effortStatus ?? "default"}${stage.selected.requestedEffort ? ` (requested ${stage.selected.requestedEffort})` : ""}`]
+      ? [`Selected ${stage.stageId}: runtime ${stage.selected.runtime}, model ${stage.selected.model ?? "default"}, effort ${effortEvidenceText(stage.selected)}`]
       : []) ?? []),
     "",
     "## Stage Context Controls",
@@ -11827,6 +11832,49 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+/** Formats a stored selection. Resolves only when the event did not record one. */
+function effortEvidenceText(selection: RuntimeCandidate & Partial<ResolvedRuntimeEffort>): string {
+  if (
+    selection.effortStatus === "configured" ||
+    selection.effortStatus === "default" ||
+    selection.effortStatus === "not-applicable"
+  ) {
+    return formatRuntimeEffort({
+      effortStatus: selection.effortStatus,
+      ...(selection.requestedEffort ? { requestedEffort: selection.requestedEffort } : {}),
+      ...(selection.nativeEffort ? { nativeEffort: selection.nativeEffort } : {}),
+    });
+  }
+  return formatRuntimeEffort(resolveRuntimeEffort(selection).selection);
+}
+
+/**
+ * Copies requested effort, native token, and status from the runtime event.
+ * Events that predate native tokens are resolved again so the manifest matches
+ * the argv the current mapping would send.
+ */
+function recordedEffortSelection(
+  payload: Record<string, unknown>,
+  fallback: { runtime?: string; model?: string },
+): ResolvedRuntimeEffort {
+  const status = stringValue(payload.effortStatus);
+  const requestedRaw = stringValue(payload.requestedEffort) ?? stringValue(payload.effort);
+  const requestedEffort = isEffort(requestedRaw) ? requestedRaw : undefined;
+  const nativeEffort = stringValue(payload.nativeEffort);
+  if (status === "not-applicable" || status === "default" || (status === "configured" && nativeEffort)) {
+    return {
+      effortStatus: status,
+      ...(requestedEffort ? { requestedEffort } : {}),
+      ...(nativeEffort ? { nativeEffort } : {}),
+    };
+  }
+  return resolveRuntimeEffort({
+    runtime: fallback.runtime,
+    model: fallback.model,
+    effort: requestedEffort,
+  }).selection;
 }
 
 function numberValue(value: unknown): number | undefined {
@@ -12045,27 +12093,27 @@ function reproducibilityRuntimeStages(input: {
   stages: Stage[];
   events: StoredRunEvent[];
 }): ReproducibilityManifest["runtimes"] {
-  const selectedByStage = new Map<string, RuntimeCandidate & Partial<RuntimeEffortSelection>>();
+  const selectedByStage = new Map<string, RuntimeCandidate & ResolvedRuntimeEffort>();
   for (const event of input.events) {
     if (event.type !== "stage.runtime.selected" || !event.stageId) continue;
     const payload = asRecord(event.payload);
     const runtime = stringValue(payload.runtime);
     if (!runtime) continue;
+    const model = stringValue(payload.model);
     selectedByStage.set(event.stageId, {
       runtime,
-      ...(stringValue(payload.model) ? { model: stringValue(payload.model) } : {}),
-      ...runtimeEffortSelection({
-        runtime,
-        model: stringValue(payload.model),
-        effort: (payload.requestedEffort ?? payload.effort) as RuntimeCandidate["effort"],
-      }),
+      ...(model ? { model } : {}),
+      ...recordedEffortSelection(payload, { runtime, model }),
     });
   }
   return collectAgentRuntimeEvidence(input.stages).map((stage) => ({
     stageId: stage.stageId,
     kind: stage.stageKind,
-    candidates: stage.candidates.map(({ effort, ...candidate }) => ({ ...candidate, ...runtimeEffortSelection({ ...candidate, effort }) })),
-    ...(selectedByStage.get(stage.stageId)
+    candidates: stage.candidates.map(({ effort, ...candidate }) => ({
+      ...candidate,
+      ...resolveRuntimeEffort({ ...candidate, effort }).selection,
+    })),
+    ...(selectedByStage.has(stage.stageId)
       ? { selected: selectedByStage.get(stage.stageId) }
       : {}),
   }));

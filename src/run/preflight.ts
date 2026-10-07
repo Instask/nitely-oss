@@ -34,7 +34,8 @@ import type {
 import { normalizeFlowConfiguration } from "../flows/configurables.js";
 import { loadProjectInstructions } from "./project-instructions.js";
 import { checkOciReadiness, normalizeExecutionBackendName, type ExecutionBackendName } from "./execution/backend.js";
-import { createDefaultAgentRuntimeRegistry, runtimeEffortProblem } from "./execution/local.js";
+import { resolveRuntimeEffort } from "./execution/effort.js";
+import { createDefaultAgentRuntimeRegistry } from "./execution/local.js";
 import type { OciReadinessIssue } from "./execution/oci.js";
 import type { WorkItemRecord } from "../work-items/types.js";
 
@@ -225,41 +226,62 @@ function runtimeProvider(runtime: string): ProviderId | undefined {
 const runtimeRegistry = createDefaultAgentRuntimeRegistry();
 
 /**
- * Flags candidates whose model the runtime itself rejects, such as an
- * `openrouter` or `together` stage without a usable model id. A lone candidate
- * blocks; an ordered candidate only warns, because execution falls back past it.
+ * Classifies each candidate, then sets severity for the stage. One viable
+ * candidate keeps invalid siblings as warnings. Zero viable candidates block.
+ * Viability is a known runtime with a usable model and a representable effort,
+ * not the length of the candidate list.
  */
 function runtimeModelIssues(
   stageId: string,
   candidates: RuntimeCandidate[],
 ): RunPreflightIssue[] {
-  const issues: RunPreflightIssue[] = [];
-  for (const candidate of candidates) {
-    let problem: string | undefined;
-    let effortProblem: string | undefined;
+  const checks = candidates.map((candidate) => {
+    let known = true;
+    let modelProblem: string | undefined;
     try {
       const runtime = runtimeRegistry.resolve(candidate.runtime);
-      problem = runtime.validateModel?.(candidate.model);
-      effortProblem = runtimeEffortProblem(runtime, candidate.effort);
+      modelProblem = runtime.validateModel?.(candidate.model);
     } catch {
-      effortProblem = runtimeEffortProblem({ id: candidate.runtime }, candidate.effort);
+      known = false;
     }
-    if (effortProblem) {
-      issues.push(issue(candidates.length > 1 ? "warning" : "blocking",
-        "runtime-effort-unsupported", `stage ${stageId}: ${effortProblem}`,
-        "Remove effort or choose a runtime with an effort mapping.",
-        { stageId, runtime: candidate.runtime }));
+    const effortProblem = resolveRuntimeEffort({
+      runtime: candidate.runtime,
+      model: candidate.model,
+      effort: candidate.effort,
+    }).problem;
+    return {
+      candidate,
+      modelProblem,
+      effortProblem,
+      viable: known && modelProblem === undefined && effortProblem === undefined,
+    };
+  });
+  const anyViable = checks.some((check) => check.viable);
+  const severity = anyViable ? "warning" : "blocking";
+  const zeroViableNote = anyViable ? "" : " Stage has zero viable runtime candidates.";
+  const issues: RunPreflightIssue[] = [];
+  for (const check of checks) {
+    if (check.effortProblem) {
+      issues.push(issue(
+        severity,
+        "runtime-effort-unsupported",
+        `stage ${stageId}: ${check.effortProblem}${zeroViableNote}`,
+        anyViable
+          ? "Execution will skip this candidate. Remove effort or choose a runtime with an effort mapping to use it."
+          : "Remove effort or choose a runtime with an effort mapping. No remaining candidate can run this stage.",
+        { stageId, runtime: check.candidate.runtime },
+      ));
     }
-    if (!problem) continue;
-    issues.push(
-      issue(
-        candidates.length > 1 ? "warning" : "blocking",
-        "runtime-model-unsupported",
-        `stage ${stageId}: ${problem}`,
-        "Set a model id the runtime supports in the stage's model field.",
-        { stageId, runtime: candidate.runtime },
-      ),
-    );
+    if (!check.modelProblem) continue;
+    issues.push(issue(
+      severity,
+      "runtime-model-unsupported",
+      `stage ${stageId}: ${check.modelProblem}${zeroViableNote}`,
+      anyViable
+        ? "Execution will skip this candidate. Set a model id the runtime supports to use it."
+        : "Set a model id the runtime supports. No remaining candidate can run this stage.",
+      { stageId, runtime: check.candidate.runtime },
+    ));
   }
   return issues;
 }

@@ -11,6 +11,7 @@ const runtimeCandidateSchema = z.object({
   model: z.string().min(1).optional(),
   effort: effortSchema.optional(),
   requestedEffort: effortSchema.optional(),
+  nativeEffort: z.string().min(1).optional(),
   effortStatus: z.enum(["configured", "default", "not-applicable"]).optional(),
 }).strict();
 

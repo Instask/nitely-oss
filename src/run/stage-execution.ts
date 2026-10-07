@@ -1,4 +1,4 @@
-import { runtimeEffortSelection } from "./execution/effort.js";
+import { resolveRuntimeEffort, type ResolvedRuntimeEffort } from "./execution/effort.js";
 import { join } from "node:path";
 
 import type { EventStore } from "../events/store.js";
@@ -53,15 +53,12 @@ export function runtimeCandidateEventPayload(input: {
 }): {
   runtime: string;
   model?: string;
-  effort?: import("../flow/schema.js").Effort;
-  requestedEffort?: import("../flow/schema.js").Effort;
-  effortStatus: "configured" | "default" | "not-applicable";
   runtimeCandidateIndex: number;
   runtimeCandidateCount: number;
-} {
+} & ResolvedRuntimeEffort {
   return {
     runtime: input.candidate.runtime,
-    ...runtimeEffortSelection(input.candidate),
+    ...resolveRuntimeEffort(input.candidate).selection,
     ...(input.candidate.model ? { model: input.candidate.model } : {}),
     runtimeCandidateIndex: input.index,
     runtimeCandidateCount: input.count,

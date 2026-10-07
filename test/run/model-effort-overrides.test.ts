@@ -68,12 +68,10 @@ describe("run model and effort override evidence", () => {
     const selected = events.filter((event) => event.type === "stage.runtime.selected");
     expect(selected).toHaveLength(3);
     for (const event of selected) {
-      expect(event.payload).toMatchObject({ model, effortStatus });
-      if (effortStatus === "configured") expect(event.payload).toMatchObject({ effort: "high" });
-      else {
-        expect(event.payload).toMatchObject({ requestedEffort: "high" });
-        expect(event.payload).not.toHaveProperty("effort");
-      }
+      expect(event.payload).toMatchObject({ model, effortStatus, requestedEffort: "high" });
+      expect(event.payload).not.toHaveProperty("effort");
+      if (effortStatus === "configured") expect(event.payload).toMatchObject({ nativeEffort: "high" });
+      else expect(event.payload).not.toHaveProperty("nativeEffort");
     }
     const runDirectory = join(repoPath, ".nitely", "runs", "run-model-effort");
     const reproducibility = JSON.parse(await readFile(join(runDirectory, "reproducibility.json"), "utf8"));
@@ -81,16 +79,79 @@ describe("run model and effort override evidence", () => {
     expect(reproducibility.runtimes).toHaveLength(3);
     for (const recorded of reproducibility.runtimes) {
       for (const choice of [recorded.selected, ...recorded.candidates]) {
-        expect(choice).toMatchObject({ model, effortStatus });
-        if (effortStatus === "configured") expect(choice).toMatchObject({ effort: "high" });
-        else {
-          expect(choice).toMatchObject({ requestedEffort: "high" });
-          expect(choice).not.toHaveProperty("effort");
-        }
+        expect(choice).toMatchObject({ model, effortStatus, requestedEffort: "high" });
+        expect(choice).not.toHaveProperty("effort");
+        if (effortStatus === "configured") expect(choice).toMatchObject({ nativeEffort: "high" });
+        else expect(choice).not.toHaveProperty("nativeEffort");
       }
     }
     const evidence = await readFile(join(runDirectory, "evidence.md"), "utf8");
     expect(evidence).toContain(model);
     expect(evidence).toMatch(effortStatus === "configured" ? /effort[^\n]*high/i : /effort[^\n]*not-applicable/i);
+  });
+
+  it("records Codex off as native none in events, projection, reproducibility, and evidence", async () => {
+    const { repoPath, flowPath, flowDocument, original } = await fixture();
+    const local = new LocalExecutionBackend();
+    const backend: ExecutionBackend = {
+      createWorkspace: local.createWorkspace.bind(local),
+      runCommand: local.runCommand.bind(local),
+      commitAll: local.commitAll.bind(local),
+      async runAgent(_workspace, { stage, attemptDirectory }) {
+        const name = stage.id === "implement" ? "implementation.md" : stage.id === "judge" ? "judge-result.json" : "review.md";
+        const content = stage.id === "judge" ? JSON.stringify({ verdict: "PASS", findings: [], evidence: ["implementation"] }) : stage.id === "review" ? "Review verdict: pass\nNo findings.\n" : "Implemented.\n";
+        await writeFile(join(attemptDirectory, name), content);
+        return { stdout: content, stderr: "" };
+      },
+    };
+    const overrides = { runtime: "codex" as const, model: "gpt-5", effort: "off" as const };
+    await runFlow({ repoPath, flowPath, inputs: {}, overrides }, { createRunId: () => "run-codex-off", backend });
+    expect(await readFile(flowPath, "utf8")).toBe(flowDocument);
+    const store = new EventStore(join(repoPath, ".nitely", "events.db"));
+    const events = store.list("run-codex-off");
+    store.close();
+    const recorded = events.filter((event) => event.type === "stage.started" || event.type === "stage.runtime.selected");
+    expect(recorded.length).toBeGreaterThan(0);
+    for (const event of recorded) {
+      expect(event.payload).toMatchObject({
+        runtime: "codex",
+        model: "gpt-5",
+        requestedEffort: "off",
+        nativeEffort: "none",
+        effortStatus: "configured",
+      });
+      expect(event.payload).not.toHaveProperty("effort");
+    }
+    const projection = projectRun(events);
+    const attempts = projection.stages.flatMap((stage) => stage.attempts).filter((attempt) => attempt.runtime);
+    expect(attempts.length).toBeGreaterThan(0);
+    for (const attempt of attempts) {
+      expect(attempt).toMatchObject({
+        requestedEffort: "off",
+        nativeEffort: "none",
+        effortStatus: "configured",
+      });
+    }
+    const created = events.find((event) => event.type === "run.created");
+    const createdPayload = created?.payload as { flowDocument: string };
+    expect(JSON.parse(createdPayload.flowDocument)).toEqual(original);
+    const runDirectory = join(repoPath, ".nitely", "runs", "run-codex-off");
+    const reproducibility = JSON.parse(await readFile(join(runDirectory, "reproducibility.json"), "utf8"));
+    expect(reproducibility.flow.overrides).toEqual(overrides);
+    for (const recordedRuntime of reproducibility.runtimes) {
+      for (const choice of [recordedRuntime.selected, ...recordedRuntime.candidates]) {
+        expect(choice).toMatchObject({
+          runtime: "codex",
+          requestedEffort: "off",
+          nativeEffort: "none",
+          effortStatus: "configured",
+        });
+        expect(choice).not.toHaveProperty("effort");
+      }
+    }
+    const evidence = await readFile(join(runDirectory, "evidence.md"), "utf8");
+    expect(evidence).toMatch(/native none/);
+    expect(evidence).toMatch(/requested off/);
+    expect(evidence).not.toMatch(/model_reasoning_effort=off/);
   });
 });

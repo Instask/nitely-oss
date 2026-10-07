@@ -453,12 +453,26 @@ when their provider account, policy, or cost boundary differs.
 ## Model and effort overrides
 
 Agent, judge, and review-gate stages can declare `effort` alongside `runtime`
-and `model`, or on each `runtimes` candidate. Accepted levels are `off`,
-`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Omitting it uses the
-runtime's default. Pi, OpenRouter, and Together pass `--thinking <level>`;
-Claude passes `--effort <level>`; Codex passes
-`-c model_reasoning_effort=<level>`. A runtime without an effort mapping blocks
-preflight with `runtime-effort-unsupported` when effort is supplied.
+and `model`, or on each `runtimes` candidate. Accepted Nitely levels are
+`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Omitting it
+uses the runtime's default. Nitely validates the level for that runtime and
+sends the runtime's own token:
+
+- Codex `model_reasoning_effort`: `off` becomes `none`; `minimal`, `low`,
+  `medium`, `high`, `xhigh`, and `max` pass through.
+- Claude `--effort`: `low`, `medium`, `high`, `xhigh`, and `max`. `off` and
+  `minimal` have no Claude token and block with `runtime-effort-unsupported`.
+- Pi, OpenRouter, and Together `--thinking`: the Nitely level passes through
+  where Pi accepts it. OpenRouter models whose bundled catalog entry reports
+  no reasoning support keep the requested effort, send no `--thinking` flag,
+  and record `not-applicable`.
+
+A runtime with no effort mapping, or a level that runtime cannot represent,
+blocks preflight with `runtime-effort-unsupported` before any process starts.
+An ordered `runtimes` stage stays runnable when at least one candidate can
+represent the requested model and effort; the others warn. When every
+candidate is invalid, preflight blocks and reports zero viable runtime
+candidates.
 
 Choose a model and effort per run without editing the stored Flow:
 
@@ -487,7 +501,9 @@ not supported.
 
 Overrides pass flow and runtime preflight validation. The Run stores the
 original Flow document and applied overrides separately, and resume reapplies
-the recorded overrides. Run events, `reproducibility.json`, and evidence record
-model, requested effort, and effective effort status. Known models without
-reasoning support record `not-applicable` and omit the thinking flag; see
-[OpenRouter models](openrouter.md).
+the recorded overrides. Run events, the run projection, `reproducibility.json`,
+and evidence record three distinct facts: the requested Nitely effort, the
+native token sent to the CLI, and the effective status (`configured`,
+`default`, or `not-applicable`). A Codex run requested at `off` records native
+`none`. Known models without reasoning support record `not-applicable` and
+omit the thinking flag; see [OpenRouter models](openrouter.md).

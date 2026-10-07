@@ -101,17 +101,33 @@ when the stored Flow uses a different runtime. API callers use
 See [running flows](running-flows.md#model-and-effort-overrides) for scope and
 snapshot behavior.
 
-For applicable models, Nitely passes a separate `--thinking <level>` to Pi.
-Do not append `:high` to a model id: OpenRouter's `:free` and `:batch` variants
-are part of the model id and are preserved.
+For applicable models, Nitely passes a separate `--thinking <level>` to Pi,
+using the Nitely level when Pi accepts it. Do not append `:high` to a model
+id: OpenRouter's `:free` and `:batch` variants are part of the model id and
+are preserved. The model string passed to Pi is not rewritten for capability
+lookup.
 
-The bundled capability metadata identifies `qwen/qwen3-coder-next` (including
-its variant suffixes) as not supporting reasoning, based on OpenRouter's
-[model catalog](https://openrouter.ai/api/v1/models). For that model, effort is
-optional; even if a batch requests effort, Nitely omits `--thinking`, retains
-`requestedEffort`, and records `effortStatus: "not-applicable"`. Other models
-use the requested level, or the CLI default when effort is omitted. The
-bundled capability entry is a snapshot, rather than a live catalog lookup.
+The bundled capability metadata identifies `qwen/qwen3-coder-next` as not
+supporting reasoning, based on OpenRouter's
+[model catalog](https://openrouter.ai/api/v1/models). Capability matching
+canonicalizes an id by stripping one leading `openrouter/` prefix, one leading
+`~` alias, and a `:variant` suffix. These ids therefore share one capability
+id, `qwen/qwen3-coder-next`:
+
+- `qwen/qwen3-coder-next`
+- `qwen/qwen3-coder-next:free`
+- `~qwen/qwen3-coder-next`
+- `~qwen/qwen3-coder-next:free`
+- `openrouter/qwen/qwen3-coder-next:free`
+
+The leading `openrouter/` form is recognized only for capability identity. A
+stage model remains an author/slug id, optionally with `~` or `:variant`.
+
+For that capability, effort is optional. A requested effort stays in
+`requestedEffort`, `--thinking` is omitted, no native effort is sent, and
+`effortStatus` is `not-applicable`. Other models use the requested level, or
+the CLI default when effort is omitted. The bundled capability entry is a
+snapshot, rather than a live catalog lookup.
 
 ## Credential precedence
 
@@ -147,7 +163,7 @@ exits.
 | Situation | Where it surfaces | Outcome |
 | --- | --- | --- |
 | No key configured | run preflight, agent preflight, before spawn | `agent runtime openrouter is not configured. Set OPENROUTER_API_KEY.` An ordered `runtimes` stage moves to the next candidate. |
-| Missing or malformed `model` | run preflight (`runtime-model-unsupported`), agent preflight, before spawn | Names the problem, an example id, and the model list. Run preflight blocks a lone candidate and warns for an ordered one; at execution an ordered stage moves to the next candidate. |
+| Missing or malformed `model` | run preflight (`runtime-model-unsupported`), agent preflight, before spawn | Names the problem, an example id, and the model list. Run preflight warns when another candidate can still run and blocks when none can; at execution an ordered stage moves to the next candidate. |
 | Key rejected (401) | stage exit | `OpenRouter rejected the API key (401)…`; the run blocks with `agent_credentials_invalid` and can be resumed after the key is replaced. |
 | Out of credits or key limit reached (402) | stage exit | `OpenRouter quota exceeded…`; blocks with `agent_usage_limit` (or falls back to the next candidate). |
 | Rate limited (429) | stage exit | `OpenRouter rate limit reached for model …`; blocks with `agent_usage_limit` (or falls back to the next candidate). |
