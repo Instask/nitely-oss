@@ -327,6 +327,10 @@ describe("run eligibility", () => {
     expect(codes(supplied)).not.toContain("preflight.missing-input");
     expect(supplied.decision).toBe("blocked");
     expect(supplied.blockers.some((b) => /verifyCommand/.test(b.message))).toBe(true);
+    const setting = supplied.blockers.find((b) => b.code === "preflight.missing-setting")!;
+    expect(setting.message).toBe("missing required configurable: verifyCommand");
+    expect(setting.remediation).toMatch(/Set verifyCommand/);
+    expect(codes(supplied)).not.toContain("preflight.flow-invalid");
     expect(template.document).toContain("tech-design");
   });
 

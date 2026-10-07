@@ -87,7 +87,12 @@ repositories every `nitely flow` subcommand targets (default: home).
 renamed, or removed on the instance shows up immediately. Each line prints the
 Flow id, its source (`builtin` or `user`), whether it is runnable, and its name.
 The id is exactly what `task create --flow` accepts. An API token needs the
-`tasks:read` capability to read the catalog. Newer servers append the Flow's
+`tasks:read` capability to read the catalog (`list`, `show`, templates,
+validate) and the high-impact `flows:manage` capability to change it (create,
+`update`, `enable`, `disable`, `reset`, `delete`). A token acts as its owner:
+the same repository visibility, Flow ownership, and organization
+`flows:manage` role checks apply as in that user's Console session, so
+built-in Flows can only be changed or reset by an administrator's token. Newer servers append the Flow's
 state in brackets, such as `[disabled,edited,newer-shipped-version]`. The
 other `nitely flow` commands (`show`, `enable`, `disable`, `update`, `reset`,
 `delete`) are described in [user-defined-flows.md](user-defined-flows.md#cli).

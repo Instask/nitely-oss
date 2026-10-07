@@ -206,7 +206,11 @@ repository（默认 home）。
 `flow list` 每次调用都会请求 `GET /api/flows`，所以实例上新增、改名或删除的
 Flow 会立刻反映出来。每行输出 Flow id、来源（`builtin` 或 `user`）、是否可运行
 以及名称。其中的 id 正是 `task create --flow` 接受的值。API token 需要
-`tasks:read` capability 才能读取该目录。
+`tasks:read` capability 才能读取该目录（`list`、`show`、模板、校验），修改目录
+（创建、`update`、`enable`、`disable`、`reset`、`delete`）需要高影响的
+`flows:manage` capability。token 以其 owner 的身份执行：repository 可见性、Flow
+归属和组织 `flows:manage` 角色检查与该用户在 Console 中完全相同，因此只有管理员
+的 token 才能修改或重置内置 Flow。
 
 也可以只用一个 intake source 创建 draft task，而不必先写好 spec 与 technical
 design：

@@ -99,7 +99,10 @@ the repository's configured `setupCommand` in that run's worktree, on local and 
 backends, and produces the `dependencies` artifact. Verification depends on
 that artifact, so it cannot accidentally rely on parent-checkout dependencies.
 Set `setupCommand` and `verifyCommand` in `.nitely/instructions.json`
-`configuration`, or supply the flow configurables on the task.
+`configuration`, or supply the flow configurables on the task. While one is
+unset, `doctor` and run eligibility block with `missing-setting`
+(`preflight.missing-setting`) naming the key; `flow-invalid` is reserved for
+problems in the Flow itself.
 
 A command stage may declare `networkDomains: ["registry.npmjs.org"]`. OCI
 uses the same internal-only network and allowlist gateway as agent stages,

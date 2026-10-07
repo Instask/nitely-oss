@@ -10,6 +10,18 @@ export class FlowConfigurationError extends Error {
   }
 }
 
+/**
+ * A required configurable has no value on the task, in the repository
+ * defaults, or as a Flow default. The Flow is valid; the setting is unset.
+ */
+export class FlowConfigurationMissingError extends FlowConfigurationError {
+  readonly key: string;
+  constructor(key: string) {
+    super(`missing required configurable: ${key}`);
+    this.key = key;
+  }
+}
+
 export function flowConfigurables(flow: Flow): ConfigurableInput[] {
   return flow.metadata.configurables ?? [];
 }
@@ -86,9 +98,7 @@ export function normalizeFlowConfiguration(
         : configurable.default;
     if (!hasConfigurationValue(rawValue)) {
       if (configurable.required) {
-        throw new FlowConfigurationError(
-          `missing required configurable: ${configurable.key}`,
-        );
+        throw new FlowConfigurationMissingError(configurable.key);
       }
       continue;
     }

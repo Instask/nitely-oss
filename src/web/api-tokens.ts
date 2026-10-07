@@ -24,6 +24,7 @@ export const API_TOKEN_CAPABILITIES = [
   "preview:read",
   "preview:control",
   "preview:compare",
+  "flows:manage",
 ] as const;
 
 export type ApiTokenCapability = (typeof API_TOKEN_CAPABILITIES)[number];
@@ -37,6 +38,7 @@ const highImpactCapabilities = new Set<ApiTokenCapability>([
   "spec:approve",
   "preview:control",
   "preview:compare",
+  "flows:manage",
 ]);
 
 interface StoredApiTokenRecord {
