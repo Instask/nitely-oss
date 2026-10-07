@@ -3553,7 +3553,15 @@ class Component extends DCLogic {
 
   async flowErrorMessage(res, fallback) {
     const body = await res.json().catch(() => ({}));
-    return (body && (body.error || body.message)) || (fallback + " (" + res.status + ")");
+    const error = body && body.error;
+    let message = "";
+    if (error && typeof error === "object") {
+      message = typeof error.message === "string" && error.message ? error.message : (typeof error.code === "string" ? error.code : "");
+    } else if (typeof error === "string") {
+      message = error;
+    }
+    if (!message && body && typeof body.message === "string") message = body.message;
+    return message || (fallback + " (" + res.status + ")");
   }
 
   async fetchFlowCatalog(repoId = this.state.flowRepoId || "") {

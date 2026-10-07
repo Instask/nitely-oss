@@ -104,6 +104,17 @@ describe("console Flow management", () => {
     expect(html).toContain('selectedFlowCanReset = selectedFlowCanToggle && selectedFlow.source === "builtin"');
   });
 
+  it("extracts Flow API error messages from nested, string, and plain bodies", async () => {
+    const c = await flowComponent(helpers);
+    const res = (status: number, body: unknown) => ({ status, json: async () => body });
+    await expect(c.flowErrorMessage(res(403, { error: { code: "forbidden", message: "Flow management requires admin" } }), "Save failed")).resolves.toBe("Flow management requires admin");
+    await expect(c.flowErrorMessage(res(403, { error: { code: "forbidden" } }), "Save failed")).resolves.toBe("forbidden");
+    await expect(c.flowErrorMessage(res(403, { error: {} }), "Save failed")).resolves.toBe("Save failed (403)");
+    await expect(c.flowErrorMessage(res(400, { error: "bad flow" }), "Save failed")).resolves.toBe("bad flow");
+    await expect(c.flowErrorMessage(res(400, { message: "plain message" }), "Save failed")).resolves.toBe("plain message");
+    await expect(c.flowErrorMessage({ status: 500, json: async () => { throw new Error("x"); } }, "Reset failed")).resolves.toBe("Reset failed (500)");
+  });
+
   it("scopes Flow and template API paths to the selected repository", async () => {
     const c = await flowComponent(helpers);
     c.state = { flowRepoId: "" };
