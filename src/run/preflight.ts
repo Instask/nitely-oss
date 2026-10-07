@@ -13,7 +13,13 @@ import {
   type Flow,
   type Stage,
 } from "../flow/schema.js";
-import { openFlowStore } from "../flows/store.js";
+import {
+  CatalogFlowNotFoundError,
+  catalogFlowRunLabel,
+  isFlowSeedKey,
+  resolveCatalogFlow,
+  type ResolvedCatalogFlow,
+} from "../flows/catalog.js";
 import { getFlowTemplate } from "../flows/templates.js";
 import { resolveRepositoryFlowPath } from "../flows/paths.js";
 import { resolveProviderStore } from "../providers/index.js";
@@ -37,6 +43,7 @@ export interface RunPreflightIssue {
     | "repo-unavailable"
     | "flow-unreadable"
     | "flow-invalid"
+    | "flow-disabled"
     | "missing-input"
     | "input-unreadable"
     | "missing-provider"
@@ -639,22 +646,49 @@ export async function evaluateRunPreflight(
 export async function evaluateWorkItemRunPreflight(
   input: EvaluateWorkItemRunPreflightInput,
 ): Promise<RunPreflightReport> {
-  if (input.workItem.flowId) {
-    const flowStore = openFlowStore(input.repoPath);
+  const catalogReference = input.workItem.flowId
+    ?? (isFlowSeedKey(input.workItem.flowPath) ? input.workItem.flowPath : undefined);
+  if (catalogReference !== undefined) {
+    let resolved: ResolvedCatalogFlow | undefined;
     try {
-      const flow = flowStore.getFlow(input.workItem.flowId);
-      return evaluateRunPreflight({
+      resolved = await resolveCatalogFlow(input.repoPath, catalogReference, {
+        requireEnabled: false,
+      });
+    } catch (error) {
+      // A missing built-in key falls through to the file check below, which
+      // reports the same error it always has; a missing stored Flow throws.
+      if (!(error instanceof CatalogFlowNotFoundError) || input.workItem.flowId) {
+        throw error;
+      }
+    }
+    if (resolved) {
+      const report = await evaluateRunPreflight({
         repoPath: input.repoPath,
-        flowPath: input.workItem.flowId,
-        flowDocument: flow.document,
+        flowPath: input.workItem.flowId
+          ? input.workItem.flowId
+          : await catalogFlowRunLabel(input.repoPath, resolved),
+        flowDocument: resolved.document,
         inputs: input.workItem.inputs,
         configuration: input.workItem.configuration,
         providerStore: input.providerStore,
         executionBackend: input.executionBackend,
         env: input.env,
       });
-    } finally {
-      flowStore.close();
+      if (resolved.record.enabled) return report;
+      const { status: _status, summary: _summary, ...base } = report;
+      return summarizePreflight({
+        ...base,
+        issues: [
+          issue(
+            "blocking",
+            "flow-disabled",
+            `flow is disabled: ${catalogReference}`,
+            "Enable the Flow in the Flow catalog, or choose another Flow.",
+            { path: catalogReference },
+          ),
+          ...report.issues,
+        ],
+      });
     }
   }
   if (input.workItem.template) {

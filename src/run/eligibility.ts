@@ -14,7 +14,12 @@ import {
 import { derivePlanningExecutionState } from "../work-items/planning.js";
 import type { WorkItemRecord } from "../work-items/types.js";
 import { evaluateWorkItemTypeGovernance } from "../work-items/governance.js";
-import { openFlowStore } from "../flows/store.js";
+import {
+  CatalogFlowDisabledError,
+  catalogFlowRunLabel,
+  isFlowSeedKey,
+  resolveCatalogFlow,
+} from "../flows/catalog.js";
 import { getFlowTemplate } from "../flows/templates.js";
 import { resolveRepositoryFlowPath } from "../flows/paths.js";
 import type { RunFlowInput } from "./run-flow.js";
@@ -110,12 +115,7 @@ async function resolveWorkItemRunFlow(
   let flowDocument: string;
   try {
     if (workItem.flowId) {
-      const store = openFlowStore(repoPath);
-      try {
-        flowDocument = store.getFlow(workItem.flowId).document;
-      } finally {
-        store.close();
-      }
+      flowDocument = (await resolveCatalogFlow(repoPath, workItem.flowId)).document;
       flowPath = workItem.flowId;
     } else if (workItem.template) {
       const template = getFlowTemplate(workItem.template.templateId);
@@ -123,7 +123,14 @@ async function resolveWorkItemRunFlow(
         throw new Error(`flow template not found: ${workItem.template.templateId}`);
       }
       flowDocument = template.document;
+    } else if (isFlowSeedKey(workItem.flowPath)) {
+      // Catalog Flows run the stored document, so a customized or upgraded
+      // system Flow takes effect without a file change.
+      const resolved = await resolveCatalogFlow(repoPath, workItem.flowPath);
+      flowDocument = resolved.document;
+      flowPath = await catalogFlowRunLabel(repoPath, resolved);
     } else {
+      // Any other path is an explicit file, read as given.
       flowPath = (
         await resolveRepositoryFlowPath(repoPath, workItem.flowPath)
       ).absolutePath;
@@ -140,6 +147,17 @@ async function resolveWorkItemRunFlow(
       },
     };
   } catch (error) {
+    if (error instanceof CatalogFlowDisabledError) {
+      return {
+        reason: {
+          code: "preflight.flow-disabled",
+          kind: "preflight",
+          message: error.message,
+          remediation: "Enable the Flow in the Flow catalog, or choose another Flow.",
+          overridePolicy: "never",
+        },
+      };
+    }
     const invalid = error instanceof FlowValidationError;
     const message = invalid
       ? error.errors[0] ?? error.message
