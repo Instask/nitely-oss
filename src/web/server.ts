@@ -10693,7 +10693,10 @@ async function handleApiRequest(
 
   const resetFlowId = request.method === "POST" ? apiFlowResetId(url.pathname) : undefined;
   if (resetFlowId) {
-    const { user, repository } = await flowRequestScope(request, input, homeRepoPath, repositories, url);
+    // Reset is destructive: resolve repoId from query or body like the other
+    // POST Flow routes so it never falls back to the home repository.
+    const body = requireObject(await readRequestJson(request));
+    const { user, repository } = await flowRequestScope(request, input, homeRepoPath, repositories, url, { body });
     const existing = await requireCatalogFlowAccess(repository.path, resetFlowId, user);
     // Only built-in Flows have a shipped version; they have no owner, so this
     // admits local mode and administrators only.

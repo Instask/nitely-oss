@@ -22,6 +22,7 @@ import {
 } from "../flows/catalog.js";
 import { flowTemplateEntry } from "../flows/templates.js";
 import { resolveRepositoryFlowPath } from "../flows/paths.js";
+import { inferExternalInputs } from "../flows/validate.js";
 import { resolveProviderStore } from "../providers/index.js";
 import type {
   ProviderConnectionStatus,
@@ -176,14 +177,15 @@ function emptyReport(input: {
 
 async function loadPreflightFlow(
   input: EvaluateRunPreflightInput & { repoPath: string },
-  externalInputs: string[],
 ): Promise<LoadedFlow | RunPreflightIssue> {
   try {
-    if (input.flowDocument !== undefined) {
-      return parseFlowDocument(input.flowDocument, { externalInputs });
-    }
-    const flowPath = resolve(input.repoPath, input.flowPath);
-    return parseFlowDocument(await readFile(flowPath, "utf8"), { externalInputs });
+    const document = input.flowDocument !== undefined
+      ? input.flowDocument
+      : await readFile(resolve(input.repoPath, input.flowPath), "utf8");
+    // External inputs come from the Flow itself (declared + unproduced stage
+    // inputs), so a valid Flow is never reported invalid because the run did
+    // not supply an input; checkInputFiles reports those as missing-input.
+    return parseFlowDocument(document, { externalInputs: inferExternalInputs(document) });
   } catch (error) {
     if (error instanceof FlowValidationError) {
       return issue(
@@ -580,7 +582,7 @@ export async function evaluateRunPreflight(
   }
 
   const inputs = input.inputs ?? {};
-  const loaded = await loadPreflightFlow(input, Object.keys(inputs));
+  const loaded = await loadPreflightFlow(input);
   if ("severity" in loaded) {
     return emptyReport({
       flowPath: input.flowPath,

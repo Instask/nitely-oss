@@ -22,6 +22,7 @@ import {
 } from "../flows/catalog.js";
 import { flowTemplateEntry } from "../flows/templates.js";
 import { resolveRepositoryFlowPath } from "../flows/paths.js";
+import { inferExternalInputs } from "../flows/validate.js";
 import type { RunFlowInput } from "./run-flow.js";
 import {
   evaluateRunPreflight,
@@ -138,8 +139,10 @@ async function resolveWorkItemRunFlow(
       ).absolutePath;
       flowDocument = await readFile(flowPath, "utf8");
     }
+    // Parse the graph with the Flow's own external inputs; inputs the Work
+    // item did not supply are reported later as missing-input by preflight.
     const loaded = parseFlowDocument(flowDocument, {
-      externalInputs: Object.keys(workItem.inputs),
+      externalInputs: inferExternalInputs(flowDocument),
     });
     return {
       resolved: {

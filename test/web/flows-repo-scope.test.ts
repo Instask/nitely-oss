@@ -261,3 +261,41 @@ describe("remote nitely flow against a non-home repository", () => {
     }, { env: {} })).toBe(1);
   });
 });
+
+describe("repository-scoped Flow reset", () => {
+  const foo = encodeURIComponent("flows/foo.json");
+  async function setup() {
+    const home = await createRepo("home");
+    const b = await createRepo("b");
+    for (const repo of [home, b]) {
+      await writeFile(join(repo, "flows/foo.json"), flow({ name: "foo", description: "shipped" }), "utf8");
+    }
+    const server = await start(home, b);
+    const customize = async (query: string, description: string) =>
+      expect((await call(server, "PUT", `/api/flows/${foo}${query}`, {
+        document: flow({ name: "foo", description }),
+      })).status).toBe(200);
+    await customize("", "home custom");
+    await customize("?repoId=repo-b", "repo-b custom");
+    const doc = async (query: string) =>
+      (await call(server, "GET", `/api/flows/${foo}${query}`)).body.flow.document as string;
+    return { server, doc };
+  }
+
+  it("resets only the repository named by repoId in the JSON body", async () => {
+    const { server, doc } = await setup();
+    const reset = await call(server, "POST", `/api/flows/${foo}/reset`, { repoId: "repo-b" });
+    expect(reset.status).toBe(200);
+    expect(await doc("?repoId=repo-b")).toContain("\"shipped\"");
+    expect(await doc("?repoId=repo-b")).not.toContain("repo-b custom");
+    expect(await doc("")).toContain("home custom");
+  });
+
+  it("still resolves repoId from the query string", async () => {
+    const { server, doc } = await setup();
+    expect((await call(server, "POST", `/api/flows/${foo}/reset?repoId=repo-b`)).status).toBe(200);
+    expect(await doc("?repoId=repo-b")).not.toContain("repo-b custom");
+    expect(await doc("")).toContain("home custom");
+    expect((await call(server, "POST", `/api/flows/${foo}/reset`, { repoId: "nope" })).status).toBe(404);
+  });
+});

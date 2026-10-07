@@ -286,6 +286,50 @@ describe("run eligibility", () => {
     });
   });
 
+  it("reports a legacy rework-pr item's missing tech-design as a missing input", async () => {
+    const repoPath = await createRepo();
+    await writeFile(join(repoPath, "spec.md"), "Spec.", "utf8");
+    await writeFile(join(repoPath, "design.md"), "Design.", "utf8");
+    const template = (await getFlowTemplate(repoPath, "rework-pr"))!;
+    const legacy = (inputs: WorkItemRecord["inputs"], configuration?: WorkItemRecord["configuration"]) =>
+      workItem("legacy-rework", {
+        workItemType: "dev.pr",
+        flowPath: "template:rework-pr",
+        template: { templateId: "rework-pr", templateVersion: "1", source: "builtin" },
+        inputs,
+        ...(configuration ? { configuration } : {}),
+      });
+    const evaluate = async (item: WorkItemRecord) =>
+      (await evaluateWorkItemRunStarts({ repoPath, workItems: [item], intent: { kind: "automatic" } }))
+        .eligibility[item.id]!;
+    const codes = (decision: { blockers: Array<{ code: string }> }) =>
+      decision.blockers.map((blocker) => blocker.code);
+
+    // verifyCommand is configured so the only gap is the missing input.
+    const missing = await evaluate(legacy(
+      { spec: { connector: "local-file", uri: "spec.md" } },
+      { verifyCommand: "true" },
+    ));
+    expect(missing.decision).toBe("blocked");
+    expect(codes(missing)).toContain("preflight.missing-input");
+    expect(codes(missing)).not.toContain("preflight.flow-invalid");
+    const missingInput = missing.blockers.find((b) => b.code === "preflight.missing-input")!;
+    expect(missingInput.message).toBe("required input is missing: tech-design");
+    expect(missingInput.remediation).toMatch(/Attach the input/);
+    expect(JSON.stringify(missing)).not.toMatch(/unknown artifact/);
+
+    // With tech-design supplied, the graph parses and the next requirement
+    // (verifyCommand configuration) is reported through normal preflight.
+    const supplied = await evaluate(legacy({
+      spec: { connector: "local-file", uri: "spec.md" },
+      "tech-design": { connector: "local-file", uri: "design.md" },
+    }));
+    expect(codes(supplied)).not.toContain("preflight.missing-input");
+    expect(supplied.decision).toBe("blocked");
+    expect(supplied.blockers.some((b) => /verifyCommand/.test(b.message))).toBe(true);
+    expect(template.document).toContain("tech-design");
+  });
+
   it("treats governance denial as a hard blocker with no runner input", async () => {
     const repoPath = await createRepo([], "some.experimental");
     await mkdir(join(repoPath, ".nitely"), { recursive: true });
