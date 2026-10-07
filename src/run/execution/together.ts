@@ -47,9 +47,10 @@ export function togetherModelProblem(model: string | undefined): string | undefi
   return undefined;
 }
 
-export function createTogetherAgentArgs(model?: string): string[] {
+export function createTogetherAgentArgs(model?: string, nativeEffort?: string): string[] {
   return [
     "-p",
+    ...(nativeEffort ? ["--thinking", nativeEffort] : []),
     "--provider",
     TOGETHER_PI_PROVIDER,
     ...(model ? ["--model", model.trim()] : []),

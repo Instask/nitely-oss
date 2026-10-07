@@ -1,3 +1,4 @@
+import { normalizeRunOverrides, type RunOverrides } from "../flow/overrides.js";
 import type { ResourceReference } from "../connectors/types.js";
 import { loadFlow, parseFlowDocument } from "../flow/load.js";
 import { flowWorkItemType } from "../flow/schema.js";
@@ -37,6 +38,7 @@ export interface CreateFlowWorkItemInput {
   flowId?: string;
   inputs: Record<string, ResourceReference>;
   configuration?: Record<string, unknown>;
+  overrides?: RunOverrides;
   issueUrl?: string;
   workItemType?: string;
   dependsOn?: string[];
@@ -151,6 +153,7 @@ export async function createFlowWorkItem(
       ...(flowId ? { flowId } : {}),
       ...(template ? { template } : {}),
       inputs: input.inputs ?? {},
+      ...(normalizeRunOverrides(input.overrides) ? { overrides: normalizeRunOverrides(input.overrides) } : {}),
       ...(Object.keys(configuration).length > 0 ? { configuration } : {}),
       ...(input.issueUrl ? { issueUrl: input.issueUrl } : {}),
       ...(input.priority ? { priority: input.priority } : {}),

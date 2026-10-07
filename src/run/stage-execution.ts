@@ -1,3 +1,4 @@
+import { resolveRuntimeEffort, type ResolvedRuntimeEffort } from "./execution/effort.js";
 import { join } from "node:path";
 
 import type { EventStore } from "../events/store.js";
@@ -54,9 +55,10 @@ export function runtimeCandidateEventPayload(input: {
   model?: string;
   runtimeCandidateIndex: number;
   runtimeCandidateCount: number;
-} {
+} & ResolvedRuntimeEffort {
   return {
     runtime: input.candidate.runtime,
+    ...resolveRuntimeEffort(input.candidate).selection,
     ...(input.candidate.model ? { model: input.candidate.model } : {}),
     runtimeCandidateIndex: input.index,
     runtimeCandidateCount: input.count,
@@ -71,6 +73,7 @@ export function stageWithRuntimeCandidate<T extends AgentRunnableStage>(
     ...stage,
     runtime: candidate.runtime,
     ...(candidate.model ? { model: candidate.model } : { model: undefined }),
+    effort: candidate.effort,
   };
 }
 

@@ -1,3 +1,4 @@
+import { normalizeRunOverrides } from "../flow/overrides.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -133,6 +134,7 @@ export async function createWorkItem(
     flowPath: input.flowPath,
     inputs: input.inputs ?? {},
     ...(input.configuration ? { configuration: input.configuration } : {}),
+    ...(normalizeRunOverrides(input.overrides) ? { overrides: normalizeRunOverrides(input.overrides) } : {}),
     priority: normalizePriority(input.priority),
     dependsOn: normalizeDependencyIds(input.dependsOn, id),
     suggestedDependencies: normalizeSuggestedDependencies(

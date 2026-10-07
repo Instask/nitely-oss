@@ -1728,6 +1728,77 @@ describe("OciExecutionBackend", () => {
     expect(backend.describeExecution().network).toContain("allowlist(openrouter.ai)");
   });
 
+  it("sends runtime-native effort from OCI and omits thinking for Qwen aliases", async () => {
+    const fixture = await createFixture();
+    const openRouterCalls: SandboxProcessInput[] = [];
+    const openRouter = new OciExecutionBackend(openRouterOciOptions(openRouterCalls));
+    await openRouter.runAgent(
+      { runId: "openrouter-effort", path: fixture.worktree },
+      {
+        stage: { ...openRouterOciStage("openai/gpt-oss-120b"), effort: "high" },
+        prompt: "Implement.",
+        attemptDirectory: fixture.attempt,
+      },
+    );
+    for (const model of [
+      "qwen/qwen3-coder-next",
+      "qwen/qwen3-coder-next:free",
+      "~qwen/qwen3-coder-next",
+      "~qwen/qwen3-coder-next:free",
+    ]) {
+      await openRouter.runAgent(
+        { runId: "openrouter-qwen", path: fixture.worktree },
+        {
+          stage: { ...openRouterOciStage(model), effort: "high" },
+          prompt: "Implement.",
+          attemptDirectory: fixture.attempt,
+        },
+      );
+    }
+    const launches = openRouterCalls.filter((call) => call.args[0] === "run");
+    expect(launches).toHaveLength(5);
+    expect(launches[0]?.args).toContain("--thinking");
+    expect(valueAfter(launches[0]!.args, "--thinking")).toBe("high");
+    expect(launches[0]?.args).toContain("openrouter/openai/gpt-oss-120b");
+    for (const [index, model] of [
+      "qwen/qwen3-coder-next",
+      "qwen/qwen3-coder-next:free",
+      "~qwen/qwen3-coder-next",
+      "~qwen/qwen3-coder-next:free",
+    ].entries()) {
+      expect(launches[index + 1]?.args).not.toContain("--thinking");
+      expect(launches[index + 1]?.args).toContain(`openrouter/${model}`);
+    }
+
+    const codexCalls: SandboxProcessInput[] = [];
+    const codex = {
+      ...createDefaultAgentRuntimeRegistry().resolve("codex"),
+      networkAccess: "none" as const,
+    };
+    const backend = new OciExecutionBackend({
+      image: "nitely-runner:test",
+      processRunner: successfulRunner(codexCalls),
+      runtimeRegistry: {
+        supportedIds: () => ["codex"],
+        resolve: (candidate) => {
+          if (candidate !== "codex") throw new Error(`unsupported agent runtime: ${candidate}`);
+          return codex;
+        },
+      },
+    });
+    await backend.runAgent(
+      { runId: "codex-off", path: fixture.worktree },
+      {
+        stage: { ...agentStage(sandboxCapabilities()), model: "gpt-5", effort: "off" },
+        prompt: "Implement.",
+        attemptDirectory: fixture.attempt,
+      },
+    );
+    const codexLaunch = codexCalls.find((call) => call.args[0] === "run");
+    expect(codexLaunch?.args).toContain("model_reasoning_effort=none");
+    expect(codexLaunch?.args.join(" ")).not.toContain("model_reasoning_effort=off");
+  });
+
   it("explains OpenRouter failures from inside the container without exposing the key", async () => {
     const fixture = await createFixture();
     const run = async (stderr: string) => {
