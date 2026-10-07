@@ -193,6 +193,81 @@ describe("console Flow management", () => {
     expect(c.fetchFlowDetail).toHaveBeenCalledWith("flows/foo.json");
   });
 
+  it("renders a confirmed Delete control only for editable custom Flows", async () => {
+    const html = await readFile(consolePath, "utf8");
+    expect(html).toContain('onClick="{{ deleteFlow }}"');
+    expect(html).toContain('selectedFlowCanDelete = selectedFlowCanToggle && selectedFlow.source === "user"');
+  });
+
+  it("delete asks for confirmation, targets the selected repository, and returns to the list", async () => {
+    const c = await flowComponent([...helpers, "flowRoute", "deleteFlow"]);
+    c.state = { flowRepoId: "repo-b", flowDetails: { "user/x": { name: "Mine", source: "user" }, "flows/foo.json": { name: "Foo", source: "builtin" } } };
+    c.fetchFlowCatalog = vi.fn(async () => {});
+    c.navigate = vi.fn();
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({}) }));
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("window", { confirm });
+
+    await c.deleteFlow({ currentTarget: { dataset: { id: "flows/foo.json" } } });
+    expect(confirm).not.toHaveBeenCalled();
+    await c.deleteFlow({ currentTarget: { dataset: { id: "user/x" } } });
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Mine"));
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    confirm.mockReturnValue(true);
+    await c.deleteFlow({ currentTarget: { dataset: { id: "user/x" } } });
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("/api/flows/user%2Fx?repoId=repo-b");
+    expect(init.method).toBe("DELETE");
+    expect(c.state.flowDetails["user/x"]).toBeUndefined();
+    expect(c.navigate).toHaveBeenCalledWith({ view: "flows", repoId: "repo-b" });
+    expect(c.fetchFlowCatalog).toHaveBeenCalledWith("repo-b");
+  });
+
+  it("delete surfaces API errors and keeps the Flow", async () => {
+    const c = await flowComponent([...helpers, "flowRoute", "deleteFlow"]);
+    c.state = { flowRepoId: "", flowDetails: { "user/x": { name: "Mine", source: "user" } } };
+    c.navigate = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 403, json: async () => ({ error: { code: "forbidden", message: "not yours" } }) })));
+    vi.stubGlobal("window", { confirm: () => true });
+    await c.deleteFlow({ currentTarget: { dataset: { id: "user/x" } } });
+    expect(c.state.flowManageError).toBe("not yours");
+    expect(c.state.flowDetails["user/x"]).toBeDefined();
+    expect(c.navigate).not.toHaveBeenCalled();
+  });
+
+  it("New task template picker loads templates from the task's repository", async () => {
+    const html = await readFile(consolePath, "utf8");
+    expect(html.match(/onChange="\{\{ selectTaskRepository \}\}"/g)?.length).toBe(2);
+    const c = await flowComponent([...helpers, "selectTaskRepository"]);
+    c.state = { flowRepoId: "", flowTemplates: [{ id: "home-t" }] };
+    const paths: string[] = [];
+    c.api = async (path: string) => {
+      paths.push(path);
+      return { templates: [{ id: path.includes("repo-b") ? "b-t" : "other" }] };
+    };
+    await c.selectTaskRepository({ currentTarget: { value: "repo-b" } });
+    expect(paths).toEqual(["/api/flows/templates?repoId=repo-b"]);
+    expect(c.state.taskTemplateRepoId).toBe("repo-b");
+    expect(c.state.taskTemplates).toEqual([{ id: "b-t" }]);
+    // The Flows page selection is untouched.
+    expect(c.state.flowTemplates).toEqual([{ id: "home-t" }]);
+
+    // A late response for a repository the form moved away from is dropped.
+    let release: (v: unknown) => void = () => {};
+    c.api = (path: string) => new Promise((resolve) => {
+      if (path.includes("repo-c")) release = () => resolve({ templates: [{ id: "c-t" }] });
+      else resolve({ templates: [{ id: "d-t" }] });
+    });
+    const slow = c.selectTaskRepository({ currentTarget: { value: "repo-c" } });
+    await c.selectTaskRepository({ currentTarget: { value: "repo-d" } });
+    release(undefined);
+    await slow;
+    expect(c.state.taskTemplateRepoId).toBe("repo-d");
+    expect(c.state.taskTemplates).toEqual([{ id: "d-t" }]);
+  });
+
   it("saving an editable built-in Flow replaces it in place with PUT", async () => {
     const c = await flowComponent([...helpers, "flowRoute", "saveFlow"]);
     c.state = {
