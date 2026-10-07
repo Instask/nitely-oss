@@ -39,6 +39,8 @@ per runtime" — the drift is the same.
 - Automatic runtime routing / cost optimization.
 - The `effort` schema field and runtime argv mapping themselves (owned by #709); this
   design only reserves the slot in the shared override object.
+- Per-stage overrides (deferred; the first cut is run-wide only, see Decisions).
+- An `allowedRuntimes` policy (deferred, see Decisions).
 - Choosing a *different Flow* at run start for an existing work item (work items keep
   their `flowId` / template lineage; changing it stays an explicit edit).
 
@@ -85,25 +87,24 @@ Cons: keeps the duplication and drift; every new runtime adds N rows. Rejected.
 
 ```ts
 type RunOverrides = {
-  runtime?: string;                       // flow-wide
+  runtime?: string;                       // run-wide
   model?: string;
   effort?: Effort;                        // reserved for #709
   questions?: "ask" | "auto" | "deny";    // #710 deferred override
-  stages?: Record<string, {               // per-stage, wins over flow-wide
-    runtime?: string; model?: string; effort?: Effort;
-  }>;
 };
 ```
 
 - Applies only to agent, judge and review-gate stages; command stages ignore it.
-- Precedence per stage: `stages[id]` → flow-wide override → stage field → Flow default.
+- Overrides are run-wide only in the first cut; there is no per-stage form.
+- Precedence per field, per stage: run override → work-item default override → stage
+  field → Flow default. Work-item defaults and run overrides merge field-by-field.
 - `runtimes[]` interaction: an explicit runtime override **replaces** the candidate
-  list for that stage (operator choice beats authored fallback). A model-only override
-  applies to the primary candidate only. Rationale: silently falling back off an
-  explicitly chosen runtime would defeat evaluation (#709).
+  list; there is **no fallback** to `runtimes[]` if the chosen runtime fails (the stage
+  fails instead). A model-only override applies to the primary candidate only.
+  Rationale: silently falling back off an explicitly chosen runtime would defeat
+  evaluation (#709).
 - Setting `model` without `runtime` keeps the stage's runtime; a model invalid for that
   runtime fails validation.
-- Unknown stage ids in `stages` fail validation (no silent typos).
 
 ### Application point
 
@@ -117,7 +118,8 @@ document is never mutated.
 
 `run.created` already snapshots the document actually executed and its sha256. Add:
 - `flow.sourceSha256` — stored/explicit document before overrides;
-- `overrides` — the request as given;
+- `workItemOverrides` — the work item's stored default overrides (if any);
+- `overrides` — the run-level request as given;
 - `effective` — per-stage `{ runtime, model, effort? }` after resolution;
 - the existing snapshot sha stays the sha of the *post-override* document.
 
@@ -126,26 +128,25 @@ labels remain the Flow label (no runtime suffix), so labels stay stable.
 
 ### Surface
 
-- **CLI:** `nitely run <flow> --runtime <id> [--model <id>]`, per-stage
-  `--runtime implement=claude` (repeatable); same flags on `run-stage`, `rework-pr`,
-  `pr-comments`, `ci-repair`, `task create`. `--questions` lands here too.
+- **CLI:** `nitely run <flow> [--runtime <id>] [--model <id>] [--questions <policy>]`
+  (run-wide only, no `stage=value` forms); same flags on `run-stage`, `rework-pr`,
+  `pr-comments`, `ci-repair`, `task create`.
   `doctor` accepts the same flags so it checks the same effective document.
 - **API:** `POST /api/tasks`, `POST /api/tasks/:id/runs`, `POST /api/work-items`
   (stored as the work item's default overrides) accept `{ "overrides": RunOverrides }`.
   Validation errors return 422 with the same report shape as Flow validation.
-- **Work items:** may store default `overrides`; a run request's overrides merge over
-  them field-by-field. Retries/reworks reuse the previous run's overrides unless the
+- **Work items:** may store default `overrides`; a run request's overrides take
+  precedence over them field-by-field. Retries/reworks reuse the previous run's overrides unless the
   request replaces them.
 - **Console:** a "Runtime" picker (default "As defined in Flow") on Run / new task,
-  listing runtimes registered on the server with credential status; advanced per-stage
-  disclosure. Run detail shows effective runtime/model per stage.
+  listing runtimes registered on the server with credential status. Run detail shows effective runtime/model per stage.
 
 ### Validation and preflight
 
 Overrides are validated with the same schema rules as stage fields (`validateModel`,
 known runtime registry). Preflight then runs on the effective document, so missing
 provider credentials surface as the existing runtime/credential diagnostics — no
-separate check. New diagnostic codes: `override-invalid` (bad shape / unknown stage)
+separate check. New diagnostic codes: `override-invalid` (bad shape / unknown field)
 and `runtime-unavailable` (runtime not installed/registered). These are distinct from
 `flow-invalid`, consistent with the decision to give configuration problems their own
 codes (the `verifyCommand` case moves to its own code in the same spirit).
@@ -155,8 +156,7 @@ codes (the `verifyCommand` case moves to its own code in the same spirit).
 - Starting a run with overrides needs the same permission as starting the run
   (`runs:execute` in the target repository); no Flow-management permission required,
   because the stored Flow is not changed.
-- Organizations can restrict the allowed set via an optional repository/org policy
-  `allowedRuntimes` (default: all registered). Disallowed → `runtime-not-allowed`.
+- An `allowedRuntimes` policy is deferred; any registered runtime may be chosen.
 - **API tokens:** per the decision to let API tokens manage Flows, tokens with
   `flows:manage` can use all `/api/flows*` operations (create/update/enable/reset/
   delete) in repositories the token's owner can write; tokens with run permission can
@@ -189,16 +189,16 @@ step 6 core → #709 effort → variant removal.
 
 ## Test plan
 
-- Unit: `applyRunOverrides` precedence (stage > flow-wide > field > default),
-  `runtimes[]` replacement, model-only override, unknown stage id, non-agent stages
+- Unit: `applyRunOverrides` precedence (run > work-item default > stage field > Flow
+  default), `runtimes[]` replacement with no fallback, model-only override, non-agent stages
   ignored, no-override identity (same sha).
 - Preflight: override to runtime without credentials → existing credential
   diagnostic; unknown runtime → `runtime-unavailable`; not `flow-invalid`.
 - CLI: `run`/`doctor`/`run-stage`/`ci-repair` with `--runtime` agree on the effective
-  document; per-stage flag parsing.
+  document; flag parsing (no `stage=value` forms).
 - API: task/run creation with overrides, 422 on invalid, repo-scoped; API token with
   run scope can override; API token with `flows:manage` can mutate Flows; audit rows.
-- Snapshot: `sourceSha256`, `overrides`, `effective` recorded; retry reuses overrides.
+- Snapshot: `sourceSha256`, `workItemOverrides`, `overrides`, `effective` recorded; retry reuses overrides.
 - Compatibility: variant alias resolves to base + override; existing variant work
   items still run; customized variant rows untouched.
 - Console: picker sends `overrides`; run detail shows effective runtime.
@@ -213,12 +213,16 @@ step 6 core → #709 effort → variant removal.
 5. #709 adds `effort`.
 6. Remove variant seeds after one release.
 
-## Open questions
+## Decisions
 
-1. Should an explicit runtime override replace `runtimes[]` fallback (proposed) or
-   keep fallback after the chosen runtime?
-2. Is per-stage override needed in the first cut, or flow-wide only (simpler)?
-3. Should work items store default overrides, or only individual runs?
-4. Do we want an `allowedRuntimes` policy now, or later?
-5. Deprecation window for the `-grok/-pi/-claude` variants (proposed: one release as
-   aliases, one release with warnings).
+1. **No fallback:** an explicit runtime override replaces `runtimes[]`; if the chosen
+   runtime fails, the stage fails rather than falling back.
+2. **Run-wide only:** the first cut supports run-wide overrides only; per-stage
+   overrides are deferred. CLI flags are `--runtime`, `--model`, `--questions` without
+   `stage=value` forms.
+3. **Work-item defaults:** work items may store default overrides. Precedence: run
+   override > work-item default override > stage value > Flow default. The snapshot
+   records both the work-item defaults and the run-level overrides.
+4. **`allowedRuntimes`:** deferred to a later change.
+5. **Variant deprecation:** one release as deprecated aliases, one release with
+   warnings, then removal.
