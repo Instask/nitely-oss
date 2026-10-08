@@ -468,6 +468,8 @@ import {
   invalidateUserSessions,
   listPublicUsers,
   readSessionUser,
+  selectSessionOrganization,
+  listSessionOrganizations,
   verifyUserPassword,
   type PublicUser,
 } from "./users.js";
@@ -7297,6 +7299,56 @@ async function handleApiRequest(
     sendJsonWithHeaders(response, 200, { ok: true }, {
       "set-cookie": clearSessionCookie(secureCookieForInput(input)),
     });
+    return true;
+  }
+  if (
+    (request.method === "GET" && url.pathname === "/api/session/organizations") ||
+    (request.method === "PUT" && url.pathname === "/api/session/organization")
+  ) {
+    // Workspace selection belongs to browser sessions. Local mode has no
+    // organizations to switch and API tokens carry their own owner scope.
+    if (authMode === "local" || authorizedApiTokenRequests.has(request)) {
+      return false;
+    }
+    const sessionId = parseCookies(request.headers.cookie).nitely_session;
+    const sessionUser = sessionId ? await readSessionUser(homeRepoPath, sessionId, { touch: false }) : null;
+    if (!sessionId || !sessionUser) {
+      throw new WebUnauthorizedError();
+    }
+    if (request.method === "GET") {
+      const organizations = await listSessionOrganizations(homeRepoPath, sessionId);
+      if (!organizations) throw new WebUnauthorizedError();
+      sendJson(response, 200, organizations);
+      return true;
+    }
+    const body = requireObject(await readRequestJson(request));
+    const organizationId = body.organizationId;
+    if (typeof organizationId !== "string" || !organizationId.trim()) {
+      throw new WebInputError("organizationId must be a non-empty string");
+    }
+    const result = await selectSessionOrganization(homeRepoPath, sessionId, organizationId);
+    if (result === "invalid_session") {
+      throw new WebUnauthorizedError();
+    }
+    const allowed = result === "selected" || result === "unchanged";
+    await appendSecurityAuditBestEffort(homeRepoPath, {
+      action: "auth.organization.switch",
+      decision: allowed ? "allow" : "deny",
+      outcome: allowed ? "success" : "error",
+      httpStatus: allowed ? 200 : 403,
+      reasonCode: allowed ? "ok" : result,
+      actor: securityAuditActorForUser(publicContext(sessionUser, authMode)),
+      target: { type: "organization", id: organizationId },
+    });
+    if (result === "sso_session_bound") {
+      throw new WebForbiddenError("SSO sessions stay bound to the organization they signed in to", "sso_session_bound");
+    }
+    if (result === "forbidden") {
+      throw new WebForbiddenError("organization access required");
+    }
+    const organizations = await listSessionOrganizations(homeRepoPath, sessionId);
+    if (!organizations) throw new WebUnauthorizedError();
+    sendJson(response, 200, organizations);
     return true;
   }
 

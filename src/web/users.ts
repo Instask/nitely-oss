@@ -67,6 +67,7 @@ export interface SessionRecord {
   expiresAt: string;
   authenticationMethod?: "password" | "oidc" | "saml";
   organizationId?: string;
+  selectedOrganizationId?: string;
   organizationVersions?: Record<string, { organization: number; user: number }>;
   lastActivityAt?: string;
   organizationActivity?: Record<string, string>;
@@ -987,13 +988,25 @@ export async function readSessionUser(
     if (!user) return null;
     if ((session.authenticationMethod === "oidc" || session.authenticationMethod === "saml") && !user.memberships?.some((member) => member.organizationId === session.organizationId)) return null;
     const scopes = await organizationSessionScopes(repoPath, user.id, user.role === "admin");
-    const requested = options.organizationId ?? session.organizationId ?? user.currentOrganizationId;
+    // SSO sessions stay bound to session.organizationId; password sessions use
+    // the persisted selection. Removing a member bumps that user's revocation
+    // version, so a selection of the former workspace is denied below and falls
+    // back like any other unusable request.
+    const requested = options.organizationId ?? session.organizationId ?? session.selectedOrganizationId ?? user.currentOrganizationId;
     const decisions = scopes.map((scope) => ({ ...scope, decision: evaluateOrganizationSession({ ...scope, session, now,
       breakGlass: options.breakGlass === true && user.role === "admin" && scope.organizationId === requested }) }));
     const selected = decisions.find((scope) => scope.organizationId === requested);
     if (options.organizationId && selected && !selected.decision.allowed) return null;
     const current = selected?.decision.allowed ? selected : decisions.find((scope) => scope.decision.allowed && user.memberships?.some((member) => member.organizationId === scope.organizationId));
     if (!current && user.memberships?.length) return null;
+    // A selection that did not become current is stale (membership removed or
+    // policy now denies it). Clear it even on non-touching reads: this revokes
+    // a grant rather than recording activity. A per-request override says
+    // nothing about the persisted choice, so it never clears it.
+    if (session.selectedOrganizationId && !options.organizationId && current?.organizationId !== session.selectedOrganizationId) {
+      delete session.selectedOrganizationId;
+      await writeJsonAtomic(path, session);
+    }
     if (current?.decision.breakGlass && options.auditBreakGlass !== false) {
       await appendSecurityAuditEvent(repoPath, { action: "auth.break-glass", decision: "allow", outcome: "success", httpStatus: 200,
         reasonCode: "sso_policy_recovery", actor: { type: "user", id: user.id, globalRole: "admin", organizationId: current.organizationId }, target: { type: "organization", id: current.organizationId } });
@@ -1010,6 +1023,83 @@ export async function readSessionUser(
       ...(current ? { currentOrganizationId: current.organizationId, currentOrganizationRole: role } : {}),
       ...(current?.decision.breakGlass ? { breakGlassOrganizationId: current.organizationId } : {}) };
   });
+}
+
+/**
+ * Persists a password session's current organization. SSO sessions stay bound
+ * to the organization they signed in to. Membership and the organization's
+ * session policy are checked under the session lease so the decision and the
+ * write cannot interleave with logout or revocation.
+ */
+export async function selectSessionOrganization(
+  repoPath: string,
+  sessionId: string,
+  organizationId: string,
+  options?: { now?: () => Date },
+): Promise<"selected" | "unchanged" | "forbidden" | "sso_session_bound" | "invalid_session"> {
+  let path: string;
+  try { path = sessionPath(repoPath, sessionId); } catch { return "invalid_session"; }
+  return await withKnowledgeLease({ path: path + ".lock", waitMs: 10_000 }, async () => {
+    const session = await readSession(repoPath, sessionId);
+    if (!session) return "invalid_session";
+    const now = options?.now?.() ?? new Date();
+    if (!Number.isFinite(Date.parse(session.expiresAt)) || Date.parse(session.expiresAt) <= now.getTime()) {
+      await unlink(path);
+      return "invalid_session";
+    }
+    const user = await getPublicUser(repoPath, session.userId);
+    if (!user) return "invalid_session";
+    // SSO sessions cannot switch to a different organization
+    if (session.authenticationMethod === "oidc" || session.authenticationMethod === "saml") {
+      if (organizationId === session.organizationId) return "unchanged";
+      return "sso_session_bound";
+    }
+    // Check membership and session policy
+    const isMember = user.memberships?.some((member) => member.organizationId === organizationId);
+    if (!isMember) return "forbidden";
+    const scopes = await organizationSessionScopes(repoPath, user.id, user.role === "admin");
+    const scope = scopes.find((s) => s.organizationId === organizationId);
+    if (!scope) return "forbidden";
+    const decision = evaluateOrganizationSession({ ...scope, session, now });
+    if (!decision.allowed) return "forbidden";
+    // If already selected, return unchanged
+    if (session.selectedOrganizationId === organizationId) return "unchanged";
+    // Update the session's selectedOrganizationId
+    session.selectedOrganizationId = organizationId;
+    await writeJsonAtomic(path, session);
+    return "selected";
+  });
+}
+
+export interface SessionOrganizations {
+  currentOrganizationId: string | null;
+  organizations: Array<{
+    organizationId: string;
+    organizationName: string;
+    role: PublicOrganizationMembership["role"];
+    current: boolean;
+  }>;
+}
+
+/**
+ * The organizations this session may use right now (member and allowed by the
+ * organization's session policy) and which one is current. Null when the
+ * session is missing or expired.
+ */
+export async function listSessionOrganizations(
+  repoPath: string,
+  sessionId: string,
+  options?: { now?: () => Date },
+): Promise<SessionOrganizations | null> {
+  const user = await readSessionUser(repoPath, sessionId, { now: options?.now, touch: false });
+  if (!user) return null;
+  const organizations = user.memberships?.map((member) => ({
+    organizationId: member.organizationId,
+    organizationName: member.organizationName,
+    role: member.role,
+    current: member.organizationId === user.currentOrganizationId,
+  })) ?? [];
+  return { currentOrganizationId: user.currentOrganizationId ?? null, organizations };
 }
 
 export async function deleteSession(repoPath: string, sessionId: string): Promise<void> {

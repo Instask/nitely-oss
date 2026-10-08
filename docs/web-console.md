@@ -249,6 +249,8 @@ The local JSON API exposes:
 - `GET /api/session`
 - `POST /api/session`
 - `DELETE /api/session`
+- `GET /api/session/organizations`
+- `PUT /api/session/organization`
 - `DELETE /api/users/:userId/sessions` (global admin)
 - `GET /api/security/audit` (global admin)
 
@@ -285,6 +287,30 @@ Live updates request summaries for the currently active ids with repeated
 transition. They do not reload historical pages or start during the initial
 workspace load. Concurrent page and full-history requests share in-flight
 summary reads; settled results are discarded so external writes remain visible.
+
+### Current workspace
+
+A browser session belonging to several organizations has one current
+organization. Task creation, provider scoping, and other organization-scoped
+writes use it when a request names no organization; reads already span every
+organization the user may use.
+
+- `GET /api/session/organizations` returns `currentOrganizationId` and
+  `organizations` (`organizationId`, `organizationName`, `role`, `current`),
+  limited to organizations the user belongs to whose session policy allows this
+  session.
+- `PUT /api/session/organization` with `{ "organizationId": "…" }` makes it
+  current for the rest of the session. It returns the same body, `403
+  forbidden` for an organization the user cannot use, and `400` for a missing
+  id. Each attempt is audited as `auth.organization.switch`.
+
+The selection is stored in the session. If the user is later removed from that
+organization or its policy stops allowing the session, the next request falls
+back to another usable organization and the stale selection is cleared. A
+per-request `x-nitely-organization-id` header still overrides one request
+without changing the stored selection. OIDC and SAML sessions stay bound to the
+organization they signed in to and get `403 sso_session_bound` for any other.
+Both endpoints are browser-session only: local mode and API tokens get `404`.
 
 Organization membership administration requires a browser session in required
 authentication mode. Members can inspect their own organization's member list;
