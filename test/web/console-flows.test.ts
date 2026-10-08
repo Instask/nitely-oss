@@ -237,35 +237,316 @@ describe("console Flow management", () => {
     expect(c.navigate).not.toHaveBeenCalled();
   });
 
-  it("New task template picker loads templates from the task's repository", async () => {
-    const html = await readFile(consolePath, "utf8");
-    expect(html.match(/onChange="\{\{ selectTaskRepository \}\}"/g)?.length).toBe(2);
-    const c = await flowComponent([...helpers, "selectTaskRepository"]);
-    c.state = { flowRepoId: "", flowTemplates: [{ id: "home-t" }] };
-    const paths: string[] = [];
-    c.api = async (path: string) => {
-      paths.push(path);
-      return { templates: [{ id: path.includes("repo-b") ? "b-t" : "other" }] };
-    };
-    await c.selectTaskRepository({ currentTarget: { value: "repo-b" } });
-    expect(paths).toEqual(["/api/flows/templates?repoId=repo-b"]);
-    expect(c.state.taskTemplateRepoId).toBe("repo-b");
-    expect(c.state.taskTemplates).toEqual([{ id: "b-t" }]);
-    // The Flows page selection is untouched.
-    expect(c.state.flowTemplates).toEqual([{ id: "home-t" }]);
+  describe("Planner and New Task template pickers", () => {
+    const repos = [
+      { id: "repo-a", name: "A" },
+      { id: "repo-b", name: "B" },
+      { id: "repo-c", name: "C" },
+      { id: "repo-d", name: "D" },
+    ];
 
-    // A late response for a repository the form moved away from is dropped.
-    let release: (v: unknown) => void = () => {};
-    c.api = (path: string) => new Promise((resolve) => {
-      if (path.includes("repo-c")) release = () => resolve({ templates: [{ id: "c-t" }] });
-      else resolve({ templates: [{ id: "d-t" }] });
+    function taskTemplate(id: string, name: string, document: string) {
+      return {
+        id,
+        name,
+        document,
+        flowPath: `flows/${id}.json`,
+        inputs: [{ id: "spec" }, { id: "tech-design" }],
+      };
+    }
+
+    function sliceBetween(html: string, start: string, end: string) {
+      const from = html.indexOf(start);
+      const to = html.indexOf(end, from + start.length);
+      expect(from).toBeGreaterThan(-1);
+      expect(to).toBeGreaterThan(from);
+      return html.slice(from, to);
+    }
+
+    async function picker() {
+      const c = await flowComponent([
+        ...helpers,
+        "taskFormFlowTemplates",
+        "selectPlannerRepository",
+        "selectNewTaskRepository",
+        "ensurePlannerRepository",
+        "toggleNewTask",
+      ]);
+      c.state = {
+        repositories: repos,
+        plannerTemplateRepoId: "",
+        plannerTemplates: null,
+        newTaskTemplateRepoId: "",
+        newTaskTemplates: null,
+        showNewTask: false,
+        flowRepoId: "repo-flows",
+        flowTemplates: [{ id: "flow-page" }],
+      };
+      return c;
+    }
+
+    function formStub(fields: Record<string, string>) {
+      const nodes: Record<string, { value: string; checked: boolean; focus: () => void }> = {};
+      return {
+        fields,
+        querySelector(selector: string) {
+          nodes[selector] ??= { value: "", checked: false, focus() {} };
+          return nodes[selector];
+        },
+      };
+    }
+
+    it("renders each form from its own repository and template list", async () => {
+      const html = await readFile(consolePath, "utf8");
+      const planner = sliceBetween(html, 'ref="{{ plannerForm }}"', "</form>");
+      const drawer = sliceBetween(html, 'ref="{{ newTaskForm }}"', "</form>");
+      expect(planner).toContain('value="{{ plannerTemplateRepoId }}"');
+      expect(planner).toContain('onChange="{{ selectPlannerRepository }}"');
+      expect(planner).toContain('list="{{ plannerFlowTemplates }}"');
+      expect(planner).not.toContain("newTask");
+      expect(drawer).toContain('value="{{ newTaskTemplateRepoId }}"');
+      expect(drawer).toContain('onChange="{{ selectNewTaskRepository }}"');
+      expect(drawer).toContain('list="{{ newTaskFlowTemplates }}"');
+      expect(drawer).not.toContain("planner");
+      expect(html).not.toContain("selectTaskRepository");
+      expect(html).not.toContain("taskFlowTemplates");
+      expect(html).not.toContain("taskTemplateRepoId");
     });
-    const slow = c.selectTaskRepository({ currentTarget: { value: "repo-c" } });
-    await c.selectTaskRepository({ currentTarget: { value: "repo-d" } });
-    release(undefined);
-    await slow;
-    expect(c.state.taskTemplateRepoId).toBe("repo-d");
-    expect(c.state.taskTemplates).toEqual([{ id: "d-t" }]);
+
+    it("initializes the Planner from the first repository and preserves a later selection", async () => {
+      const c = await picker();
+      const paths: string[] = [];
+      c.api = async (path: string) => {
+        paths.push(path);
+        return { templates: [taskTemplate("a-t", "A template", "doc-a")] };
+      };
+      await c.ensurePlannerRepository();
+      expect(paths).toEqual(["/api/flows/templates?repoId=repo-a"]);
+      expect(c.state.plannerTemplateRepoId).toBe("repo-a");
+      expect(c.state.plannerTemplates).toEqual([taskTemplate("a-t", "A template", "doc-a")]);
+      expect(c.taskFormFlowTemplates(c.state.plannerTemplates)).toEqual(c.state.plannerTemplates);
+      expect(c.state.newTaskTemplateRepoId).toBe("");
+      expect(c.state.newTaskTemplates).toBeNull();
+      expect(c.state.flowRepoId).toBe("repo-flows");
+      expect(c.state.flowTemplates).toEqual([{ id: "flow-page" }]);
+
+      paths.length = 0;
+      c.state.plannerTemplateRepoId = "repo-b";
+      c.state.plannerTemplates = [taskTemplate("b-t", "B template", "doc-b")];
+      await c.ensurePlannerRepository();
+      expect(paths).toEqual([]);
+      expect(c.state.plannerTemplateRepoId).toBe("repo-b");
+      expect(c.state.plannerTemplates).toEqual([taskTemplate("b-t", "B template", "doc-b")]);
+
+      c.state.repositories = [{ id: "repo-a", name: "A" }];
+      c.state.plannerTemplateRepoId = "repo-gone";
+      await c.ensurePlannerRepository();
+      expect(c.state.plannerTemplateRepoId).toBe("repo-a");
+      expect(paths).toEqual(["/api/flows/templates?repoId=repo-a"]);
+    });
+
+    it("loads Planner templates after repositories load, without resetting a valid selection", async () => {
+      const c = await flowComponent([
+        ...helpers,
+        "dashboardApiPath",
+        "dashboardFromResponse",
+        "fetchData",
+        "ensurePlannerRepository",
+        "selectPlannerRepository",
+      ]);
+      c.showSyncIndicatorWhenSlow = () => {};
+      c.hideSyncIndicator = () => {};
+      c.state = {
+        dashboardFilters: {},
+        flowRepoId: "",
+        repositories: [],
+        plannerTemplateRepoId: "",
+        plannerTemplates: null,
+        newTaskTemplateRepoId: "repo-b",
+        newTaskTemplates: [taskTemplate("kept", "Kept", "kept")],
+        flowTemplates: [{ id: "home-t" }],
+      };
+      const paths: string[] = [];
+      c.api = async (path: string) => {
+        if (path === "/api/repositories") return { repositories: [{ id: "repo-a" }, { id: "repo-b" }] };
+        if (path.startsWith("/api/flows/templates")) {
+          paths.push(path);
+          const id = path.includes("repo-a") ? "a-t" : "home-t";
+          return { templates: [taskTemplate(id, id, id)] };
+        }
+        return {};
+      };
+      await c.fetchData();
+      expect(c.state.plannerTemplateRepoId).toBe("repo-a");
+      expect(c.state.plannerTemplates).toEqual([taskTemplate("a-t", "a-t", "a-t")]);
+      expect(paths).toContain("/api/flows/templates?repoId=repo-a");
+      expect(c.state.newTaskTemplateRepoId).toBe("repo-b");
+      expect(c.state.newTaskTemplates).toEqual([taskTemplate("kept", "Kept", "kept")]);
+
+      paths.length = 0;
+      c.state.plannerTemplateRepoId = "repo-b";
+      c.state.plannerTemplates = [taskTemplate("b-t", "B template", "doc-b")];
+      await c.fetchData();
+      expect(c.state.plannerTemplateRepoId).toBe("repo-b");
+      expect(c.state.plannerTemplates).toEqual([taskTemplate("b-t", "B template", "doc-b")]);
+      expect(paths.some((path) => path.includes("repoId="))).toBe(false);
+    });
+
+    it("opening New Task does not change the Planner or the Flows page", async () => {
+      const c = await picker();
+      c.state.plannerTemplateRepoId = "repo-b";
+      c.state.plannerTemplates = [taskTemplate("b-template", "B", "doc-b")];
+      const paths: string[] = [];
+      c.api = async (path: string) => {
+        paths.push(path);
+        return { templates: [taskTemplate("a-template", "A", "doc-a")] };
+      };
+      await c.toggleNewTask();
+      expect(c.state.showNewTask).toBe(true);
+      expect(paths).toEqual(["/api/flows/templates?repoId=repo-a"]);
+      expect(c.state.newTaskTemplateRepoId).toBe("repo-a");
+      expect(c.state.newTaskTemplates).toEqual([taskTemplate("a-template", "A", "doc-a")]);
+      expect(c.state.plannerTemplateRepoId).toBe("repo-b");
+      expect(c.state.plannerTemplates).toEqual([taskTemplate("b-template", "B", "doc-b")]);
+      expect(c.state.flowRepoId).toBe("repo-flows");
+      expect(c.state.flowTemplates).toEqual([{ id: "flow-page" }]);
+    });
+
+    it("changing New Task repository does not change the Planner", async () => {
+      const c = await picker();
+      c.state.plannerTemplateRepoId = "repo-b";
+      c.state.plannerTemplates = [taskTemplate("b-template", "B", "doc-b")];
+      c.state.newTaskTemplateRepoId = "repo-a";
+      c.state.newTaskTemplates = [taskTemplate("a-template", "A", "doc-a")];
+      c.state.showNewTask = true;
+      c.api = async () => ({ templates: [taskTemplate("c-template", "C", "doc-c")] });
+      await c.selectNewTaskRepository({ currentTarget: { value: "repo-c" } });
+      expect(c.state.newTaskTemplateRepoId).toBe("repo-c");
+      expect(c.state.newTaskTemplates).toEqual([taskTemplate("c-template", "C", "doc-c")]);
+      expect(c.state.plannerTemplateRepoId).toBe("repo-b");
+      expect(c.state.plannerTemplates).toEqual([taskTemplate("b-template", "B", "doc-b")]);
+      expect(c.state.flowTemplates).toEqual([{ id: "flow-page" }]);
+    });
+
+    it("changing the Planner repository does not change New Task", async () => {
+      const c = await picker();
+      c.state.plannerTemplateRepoId = "repo-b";
+      c.state.plannerTemplates = [taskTemplate("b-template", "B", "doc-b")];
+      c.state.newTaskTemplateRepoId = "repo-a";
+      c.state.newTaskTemplates = [taskTemplate("a-template", "A", "doc-a")];
+      c.api = async () => ({ templates: [taskTemplate("c-template", "C", "doc-c")] });
+      await c.selectPlannerRepository({ currentTarget: { value: "repo-c" } });
+      expect(c.state.plannerTemplateRepoId).toBe("repo-c");
+      expect(c.state.plannerTemplates).toEqual([taskTemplate("c-template", "C", "doc-c")]);
+      expect(c.state.newTaskTemplateRepoId).toBe("repo-a");
+      expect(c.state.newTaskTemplates).toEqual([taskTemplate("a-template", "A", "doc-a")]);
+      expect(c.state.flowRepoId).toBe("repo-flows");
+    });
+
+    it("drops late template responses independently for each form", async () => {
+      const c = await picker();
+      const resolvers: Array<(value: unknown) => void> = [];
+      c.api = () => new Promise((resolve) => { resolvers.push(resolve); });
+
+      const plannerSlow = c.selectPlannerRepository({ currentTarget: { value: "repo-b" } });
+      const newTaskSlow = c.selectNewTaskRepository({ currentTarget: { value: "repo-d" } });
+      const plannerFast = c.selectPlannerRepository({ currentTarget: { value: "repo-c" } });
+      const newTaskFast = c.selectNewTaskRepository({ currentTarget: { value: "repo-a" } });
+      resolvers[2]({ templates: [taskTemplate("c-fast", "C", "doc-c")] });
+      resolvers[3]({ templates: [taskTemplate("a-fast", "A", "doc-a")] });
+      await plannerFast;
+      await newTaskFast;
+      resolvers[0]({ templates: [taskTemplate("b-late", "B late", "doc-b-late")] });
+      resolvers[1]({ templates: [taskTemplate("d-late", "D late", "doc-d-late")] });
+      await plannerSlow;
+      await newTaskSlow;
+
+      expect(c.state.plannerTemplateRepoId).toBe("repo-c");
+      expect(c.state.plannerTemplates).toEqual([taskTemplate("c-fast", "C", "doc-c")]);
+      expect(c.state.newTaskTemplateRepoId).toBe("repo-a");
+      expect(c.state.newTaskTemplates).toEqual([taskTemplate("a-fast", "A", "doc-a")]);
+    });
+
+    it("does not accept a stale response just because the other form selected that repository", async () => {
+      const c = await picker();
+      const resolvers: Array<(value: unknown) => void> = [];
+      c.api = () => new Promise((resolve) => { resolvers.push(resolve); });
+
+      const plannerSlow = c.selectPlannerRepository({ currentTarget: { value: "repo-b" } });
+      const plannerFast = c.selectPlannerRepository({ currentTarget: { value: "repo-c" } });
+      const newTask = c.selectNewTaskRepository({ currentTarget: { value: "repo-b" } });
+      resolvers[1]({ templates: [taskTemplate("planner-c", "Planner C", "doc-c")] });
+      resolvers[2]({ templates: [taskTemplate("new-task-b", "New Task B", "doc-b")] });
+      await plannerFast;
+      await newTask;
+      resolvers[0]({ templates: [taskTemplate("planner-b-late", "Stale B", "doc-stale")] });
+      await plannerSlow;
+
+      expect(c.state.plannerTemplateRepoId).toBe("repo-c");
+      expect(c.state.plannerTemplates).toEqual([taskTemplate("planner-c", "Planner C", "doc-c")]);
+      expect(c.state.newTaskTemplateRepoId).toBe("repo-b");
+      expect(c.state.newTaskTemplates).toEqual([taskTemplate("new-task-b", "New Task B", "doc-b")]);
+    });
+
+    it("shows each repository's own copy when both forms use the same template id", async () => {
+      const c = await picker();
+      c.api = async (path: string) => ({
+        templates: [taskTemplate("dev-pr", path.includes("repo-b") ? "Variant B" : "Variant A", path.includes("repo-b") ? "document-b" : "document-a")],
+      });
+      await c.selectPlannerRepository({ currentTarget: { value: "repo-b" } });
+      await c.selectNewTaskRepository({ currentTarget: { value: "repo-a" } });
+      expect(c.taskFormFlowTemplates(c.state.plannerTemplates)).toEqual([
+        taskTemplate("dev-pr", "Variant B", "document-b"),
+      ]);
+      expect(c.taskFormFlowTemplates(c.state.newTaskTemplates)).toEqual([
+        taskTemplate("dev-pr", "Variant A", "document-a"),
+      ]);
+    });
+
+    it("submits each form's own repository and template together", async () => {
+      const c = await flowComponent([
+        ...helpers,
+        "taskFormFlowTemplates",
+        "planWork",
+        "createTask",
+      ]);
+      c.state = {
+        plannerTemplateRepoId: "repo-b",
+        plannerTemplates: [taskTemplate("dev-pr", "Variant B", "document-b")],
+        newTaskTemplateRepoId: "repo-a",
+        newTaskTemplates: [taskTemplate("dev-pr", "Variant A", "document-a")],
+        showNewTask: true,
+      };
+      c.plannerForm = { current: formStub({ sourceType: "prompt", intake: "ship the fix", repoId: "repo-b", templateId: "dev-pr", title: "", guidance: "", documentBody: "", documentVersion: "" }) };
+      c.newTaskForm = { current: formStub({ title: "Independent task", repoId: "repo-a", templateId: "dev-pr", issueUrl: "", spec: "spec", techDesign: "design" }) };
+      c.fetchData = vi.fn(async () => {});
+      c.navigate = vi.fn();
+      c.refresh = vi.fn(async () => {});
+      const bodies: Array<{ path: string; body: Record<string, unknown> }> = [];
+      c.api = async (path: string, options: { body: string }) => {
+        bodies.push({ path, body: JSON.parse(options.body) });
+        return { task: { id: "task-1" } };
+      };
+      vi.stubGlobal("FormData", class {
+        form: { fields: Record<string, string> };
+        constructor(form: { fields: Record<string, string> }) { this.form = form; }
+        entries() { return Object.entries(this.form.fields); }
+      });
+
+      await c.planWork({ preventDefault() {} });
+      await c.createTask({ preventDefault() {} });
+
+      expect(bodies[0]).toEqual({
+        path: "/api/draft-specs",
+        body: expect.objectContaining({ repoId: "repo-b", templateId: "dev-pr", prompt: "ship the fix" }),
+      });
+      expect(bodies[1]).toEqual({
+        path: "/api/tasks",
+        body: expect.objectContaining({ repoId: "repo-a", templateId: "dev-pr", title: "Independent task" }),
+      });
+      expect(c.taskFormFlowTemplates(c.state.plannerTemplates)[0].name).toBe("Variant B");
+      expect(c.taskFormFlowTemplates(c.state.newTaskTemplates)[0].name).toBe("Variant A");
+    });
   });
 
   it("saving an editable built-in Flow replaces it in place with PUT", async () => {

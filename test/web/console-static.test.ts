@@ -84,7 +84,8 @@ describe("Design Component console shell", () => {
     expect(html).toContain("/api/flows");
     expect(html).toContain("/api/flows/validate");
     expect(html).toContain("/api/flows/templates");
-    expect(html).toContain("taskFlowTemplates");
+    expect(html).toContain("plannerFlowTemplates");
+    expect(html).toContain("newTaskFlowTemplates");
     expect(html).toContain('name="templateId"');
     expect(html).toContain('ref="{{ flowSkillForm }}"');
     expect(html).toContain("addSkillToFlowStage");
