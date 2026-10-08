@@ -1,5 +1,5 @@
 import { normalizeRunOverrides, type RunOverrides } from "./flow/overrides.js";
-import { resolveRunFlowSource } from "./flows/catalog.js";
+import { applyResolvedFlowSelection, resolveRunFlowSource } from "./flows/catalog.js";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { bundledFlowsRoot, resolveBuiltinFlowPath } from "./flows/paths.js";
 import { hostname } from "node:os";
@@ -1276,6 +1276,7 @@ export const TASK_COMMAND_USAGE =
 class TaskCommandUsageError extends Error {}
 
 interface TaskCreateOptions {
+  questions?: string;
   model?: string;
   effort?: string;
   runtime?: string;
@@ -1311,6 +1312,7 @@ function parseTaskCreateOptions(argv: string[], label: string): TaskCreateOption
     "--model": "model",
     "--effort": "effort",
     "--runtime": "runtime",
+    "--questions": "questions",
     "--server": "serverFlag",
     "--title": "title",
     "--spec": "specPath",
@@ -1926,11 +1928,16 @@ async function inputReferencesFromDirectory(
   return references;
 }
 
+function isRunOverrideOption(arg: string | undefined): arg is string {
+  return ["--runtime", "--model", "--effort", "--questions"].includes(arg ?? "");
+}
+
 async function readSingleStageFlow(input: {
   repoPath: string;
   flowPath: string;
   stageId: string;
-}): Promise<{ document: string; stage: Record<string, unknown>; inputIds: string[] }> {
+  overrides?: RunOverrides;
+}): Promise<{ document: string; effectiveDocument: string; stage: Record<string, unknown>; inputIds: string[]; overrides?: RunOverrides; aliasOf?: string }> {
   // Resolve through the repository's Flow catalog like `run`: edited
   // built-ins replay the stored document and disabled Flows are refused.
   const source = await resolveRunFlowSource(input.repoPath, input.flowPath);
@@ -1954,7 +1961,21 @@ async function readSingleStageFlow(input: {
     },
     spec: { ...spec, stages: [stage] },
   });
-  return { document, stage, inputIds: stageInputIds(stage) };
+  const overrides = normalizeRunOverrides({ ...source.overrides, ...input.overrides });
+  const externalInputs = stages.flatMap((candidate) => stageInputIds(recordValue(candidate) ?? {}));
+  const effective = applyResolvedFlowSelection(parseFlowDocument(source.flowDocument, { externalInputs }).flow, {
+    aliasOf: source.aliasOf,
+    overrides,
+  });
+  const effectiveStage = effective.spec.stages.find((candidate) => candidate.id === input.stageId)!;
+  const effectiveDocument = JSON.stringify({
+    ...effective,
+    metadata: { ...effective.metadata, name: `${effective.metadata.name}-${input.stageId}-replay` },
+    spec: { ...effective.spec, stages: [effectiveStage] },
+  });
+  return { document, effectiveDocument, stage, inputIds: stageInputIds(stage), overrides,
+    ...(source.aliasOf ? { aliasOf: source.aliasOf } : {}) };
+
 }
 
 function printStageDryRun(
@@ -1995,11 +2016,21 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
         return 1;
       }
       let repoPath = ".";
+      const overrideOptions: Record<string, string> = {};
       let executionBackend: string | undefined;
       const inputs: EvaluateRunPreflightInput["inputs"] = {};
       try {
         for (let index = 2; index < argv.length; index += 1) {
           const arg = argv[index];
+          if (isRunOverrideOption(arg)) {
+            const value = argv[++index] ?? "";
+            if (!value || value.startsWith("--")) {
+              io.stderr(`Missing value for ${arg}`);
+              return 1;
+            }
+            overrideOptions[arg.slice(2)] = value;
+            continue;
+          }
           if (arg === "--repo") {
             repoPath = argv[++index] ?? "";
             if (!repoPath) throw new Error("Missing value for --repo");
@@ -2027,6 +2058,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
           repoPath,
           flowPath,
           inputs,
+          overrides: normalizeRunOverrides(overrideOptions),
           ...(executionBackend ? { executionBackend } : {}),
         });
         printRunPreflightReport(io, report);
@@ -2160,6 +2192,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
       }
 
       let repoPath = ".";
+      const overrideOptions: Record<string, string> = {};
       let inputDirectory: string | undefined;
       let dryRun = false;
       let executionBackend: string | undefined;
@@ -2167,6 +2200,15 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
       try {
         for (let index = 3; index < argv.length; index += 1) {
           const arg = argv[index];
+          if (isRunOverrideOption(arg)) {
+            const value = argv[++index] ?? "";
+            if (!value || value.startsWith("--")) {
+              io.stderr(`Missing value for ${arg}`);
+              return 1;
+            }
+            overrideOptions[arg.slice(2)] = value;
+            continue;
+          }
           if (arg === "--repo") {
             repoPath = argv[++index] ?? "";
             if (!repoPath) throw new Error("Missing value for --repo");
@@ -2196,8 +2238,9 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
           return 1;
         }
 
-        const replay = await readSingleStageFlow({ repoPath, flowPath, stageId });
-        const loaded = parseFlowDocument(replay.document, {
+        const overrides = normalizeRunOverrides(overrideOptions);
+        const replay = await readSingleStageFlow({ repoPath, flowPath, stageId, overrides });
+        const loaded = parseFlowDocument(replay.effectiveDocument, {
           externalInputs: replay.inputIds,
         });
         if (inputDirectory) {
@@ -2225,6 +2268,8 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
         const result = await (dependencies.runFlow ?? runFlow)({
           flowPath,
           flowDocument: replay.document,
+          overrides: replay.overrides,
+          ...(replay.aliasOf ? { aliasOf: replay.aliasOf } : {}),
           repoPath,
           inputs,
           ...(executionBackend ? { executionBackend } : {}),
@@ -2583,7 +2628,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
             inputs[name] = reference;
             continue;
           }
-          if (arg === "--model" || arg === "--effort" || arg === "--runtime") {
+          if (isRunOverrideOption(arg)) {
             const value = argv[++index] ?? "";
             if (!value || value.startsWith("--")) throw new Error(`Missing value for ${arg}`);
             overrideOptions[arg.slice(2)] = value;
@@ -2619,11 +2664,12 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
       }
 
       try {
+        const overrides = normalizeRunOverrides(overrideOptions);
         const result = await (dependencies.runFlow ?? runFlow)({
           flowPath,
           repoPath,
           inputs,
-          ...(normalizeRunOverrides(overrideOptions) ? { overrides: normalizeRunOverrides(overrideOptions) } : {}),
+          ...(overrides ? { overrides } : {}),
           ...(Object.keys(configuration).length > 0 ? { configuration } : {}),
           ...(taskScope ? { taskScope } : {}),
           ...(executionBackend ? { executionBackend } : {}),
@@ -2992,12 +3038,22 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
       }
 
       let repoPath = ".";
+      const overrideOptions: Record<string, string> = {};
       let flowPath = "";
       let provider: "github" | "github-cli" = "github-cli";
       const inputs: RunFlowInput["inputs"] = {};
       try {
         for (let index = 2; index < argv.length; index += 1) {
           const arg = argv[index];
+          if (isRunOverrideOption(arg)) {
+            const value = argv[++index] ?? "";
+            if (!value || value.startsWith("--")) {
+              io.stderr(`Missing value for ${arg}`);
+              return 1;
+            }
+            overrideOptions[arg.slice(2)] = value;
+            continue;
+          }
           if (arg === "--repo") {
             repoPath = argv[++index] ?? "";
             continue;
@@ -3040,6 +3096,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
           flowPath,
           repoPath,
           inputs,
+          overrides: normalizeRunOverrides(overrideOptions),
           changeRequestTarget: {
             provider,
             target,
@@ -3069,6 +3126,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
       }
 
       let repoPath = ".";
+      const overrideOptions: Record<string, string> = {};
       let flowPath = "flows/rework-pr-bootstrap.json";
       let dryRun = false;
       const allowAuthors: string[] = [];
@@ -3080,6 +3138,15 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
       const routeOverrides: NonNullable<ProcessPullRequestCommentsInput["routeOverrides"]> = {};
       for (let index = 2; index < argv.length; index += 1) {
         const arg = argv[index];
+        if (isRunOverrideOption(arg)) {
+          const value = argv[++index] ?? "";
+          if (!value || value.startsWith("--")) {
+            io.stderr(`Missing value for ${arg}`);
+            return 1;
+          }
+          overrideOptions[arg.slice(2)] = value;
+          continue;
+        }
         if (arg === "--repo") {
           repoPath = argv[++index] ?? "";
           continue;
@@ -3183,6 +3250,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
           repoPath,
           target,
           flowPath,
+          overrides: normalizeRunOverrides(overrideOptions),
           ...(Object.keys(routeFlowPaths).length > 0 ? { routeFlowPaths } : {}),
           ...(Object.keys(routeOverrides).length > 0 ? { routeOverrides } : {}),
           ...(dryRun ? { dryRun } : {}),
@@ -4140,7 +4208,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
       const label = action === "plan" ? "task plan" : "task create";
       try {
         const options = parseTaskCreateOptions(argv, label);
-        const overrides = normalizeRunOverrides({ model: options.model, effort: options.effort, runtime: options.runtime });
+        const overrides = normalizeRunOverrides({ model: options.model, effort: options.effort, runtime: options.runtime, questions: options.questions });
         const remote = await resolveRemoteTarget({
           env,
           ...(options.serverFlag ? { flag: options.serverFlag } : {}),
@@ -4533,6 +4601,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
         return 1;
       }
       const observationPath = argv[2];
+      const overrideOptions: Record<string, string> = {};
       let repoPath = ".";
       let currentHeadSha = "";
       let flowPath = "";
@@ -4542,6 +4611,15 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
       try {
         for (let index = 3; index < argv.length; index += 1) {
           const arg = argv[index];
+          if (isRunOverrideOption(arg)) {
+            const value = argv[++index] ?? "";
+            if (!value || value.startsWith("--")) {
+              io.stderr(`Missing value for ${arg}`);
+              return 1;
+            }
+            overrideOptions[arg.slice(2)] = value;
+            continue;
+          }
           if (arg === "--repo") {
             repoPath = argv[++index] ?? "";
             if (!repoPath) throw new Error("Missing value for --repo");
@@ -4575,6 +4653,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
           throw new Error(`Unknown ci-repair option: ${arg}`);
         }
         if (!flowPath) throw new Error("Missing value for --flow");
+        const overrides = normalizeRunOverrides(overrideOptions);
         const observation = parseCiFailureObservation(
           JSON.parse(await readFile(resolve(observationPath), "utf8")) as unknown,
         );
@@ -4593,6 +4672,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
             repoPath,
             flowPath,
             inputs,
+            ...(overrides ? { overrides } : {}),
             pullRequestTarget,
           }),
         });

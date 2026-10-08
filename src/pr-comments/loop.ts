@@ -1,3 +1,4 @@
+import type { RunOverrides } from "../flow/overrides.js";
 import { resolve } from "node:path";
 
 import { createScmProvider } from "../scm/registry.js";
@@ -46,6 +47,7 @@ const defaultAllowedAssociations = new Set([
 ]);
 
 export interface ProcessPullRequestCommentsInput {
+  overrides?: RunOverrides;
   repoPath: string;
   target: string;
   flowPath: string;
@@ -661,6 +663,7 @@ export async function processPullRequestComments(
       const selectedFlowPath = flowPathForFeedback(input, feedback);
       const run = await (input.runFlow ?? defaultRunFlow)({
         flowPath: selectedFlowPath,
+        overrides: input.overrides,
         repoPath,
         inputs: materialized.inputs,
         changeRequestTarget: {

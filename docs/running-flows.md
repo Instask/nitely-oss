@@ -120,45 +120,27 @@ nitely ci-repair decide <idempotency-key> \
   another checkout, for example:
   `nitely run ... --repo /other/repo --input spec=./local-spec.md`.
 
-To dogfood the same bootstrap path with Grok Build instead of Codex, use the
-Grok variant. A real run requires the local `grok` CLI (`grok login` or
-`XAI_API_KEY`); the flow leaves `model` unset so the CLI default remains
-authoritative:
+Choose another runtime on the same bootstrap Flow. A Grok Build run needs the
+local `grok` CLI (`grok login` or `XAI_API_KEY`). A Claude Code run needs the
+local `claude` CLI and `ANTHROPIC_API_KEY`. A Pi run through OpenRouter needs
+the `pi` CLI and `OPENROUTER_API_KEY`; pass an OpenRouter model id. See
+[OpenRouter setup](openrouter.md).
 
 ```bash
-nitely run flows/implement-spec-bootstrap-grok.json \
+nitely run flows/implement-spec-bootstrap.json \
   --repo . \
   --input spec=./spec.md \
-  --input tech-design=./tech-design.md
+  --input tech-design=./tech-design.md \
+  --runtime grok
 ```
 
-To dogfood the same bootstrap path with Pi instead of Codex, use the Pi variant.
-The Pi variant pins all agent stages to `qwen/qwen3-coder-next` through
-OpenRouter. A real run requires the `pi` CLI and an `OPENROUTER_API_KEY`
-configured through Nitely; the local Pi default does not select the model.
-See [OpenRouter setup](openrouter.md), including OCI requirements. The flow
-keeps its existing id for compatibility. Spec and tech-design inputs can be
-any local files:
-
-```bash
-nitely run flows/implement-spec-bootstrap-pi.json \
-  --repo . \
-  --input spec=./spec.md \
-  --input tech-design=./tech-design.md
-```
-
-To dogfood the same bootstrap path with Claude Code instead of Codex, use the
-Claude variant. A real run requires the local `claude` CLI and `ANTHROPIC_API_KEY`;
-the flow leaves `model` unset so the CLI default remains authoritative. Unlike
-the Grok and Pi variants, this one mirrors the Codex baseline in full: it keeps
-the blocking `review` gate and the final `reflect` stage.
-
-```bash
-nitely run flows/implement-spec-bootstrap-claude.json \
-  --repo . \
-  --input spec=./spec.md \
-  --input tech-design=./tech-design.md
-```
+`flows/implement-spec-bootstrap-grok.json`, `-claude.json`, and `-pi.json`
+remain for one release as deprecated aliases of that base Flow. Resolving an
+unedited alias runs the current base document, including the review gate and
+reflect stage, and records `aliasOf`. The Grok and Claude aliases select that
+runtime and leave the model to the provider default. The Pi alias selects
+OpenRouter with `qwen/qwen3-coder-next`. An explicit `--runtime` on the same
+command wins. A catalog row that has been edited stays that independent Flow.
 
 Nitely will:
 
@@ -520,17 +502,20 @@ nitely task create --server http://localhost:4173 --repo-id my-repo \
   --model openai/gpt-oss-120b --effort high
 ```
 
-`--model`, `--effort`, and optional `--runtime` override every agent, judge,
-and review-gate stage. Model and effort overrides apply to every existing
-fallback candidate; a runtime override replaces the fallback chain with that
-runtime. Command and approval stages are unaffected. Per-stage overrides are
-not supported.
+`--model`, `--effort`, `--questions`, and optional `--runtime` override every
+agent, judge, and review-gate stage. `--questions` is `ask`, `auto`, or
+`deny`, and it also sets the Flow question policy. Model and effort overrides
+apply to every existing fallback candidate; a runtime override replaces the
+fallback chain with that runtime. Command and approval stages are unaffected.
+Per-stage overrides are not supported. The same flags are accepted by
+`doctor`, `run-stage`, `rework-pr`, `pr-comments`, and `ci-repair`, so doctor
+checks the configuration the run will use.
 
 `POST /api/tasks` accepts an `overrides` object as task defaults;
 `POST /api/tasks/:id/runs` accepts the same object for one run:
 
 ```json
-{ "overrides": { "runtime": "openrouter", "model": "openai/gpt-oss-120b", "effort": "high" } }
+{ "overrides": { "runtime": "openrouter", "model": "openai/gpt-oss-120b", "effort": "high", "questions": "auto" } }
 ```
 
 Overrides pass flow and runtime preflight validation. The Run stores the

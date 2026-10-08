@@ -443,18 +443,18 @@ describe("web server API and HTML", () => {
       captured = input;
       return { runId: admittedRunId(dependencies, "run-overrides"), branchName: "nitely/run-overrides", worktreePath: join(repoPath, "worktree") };
     });
-    const task = await createTask(repoPath, { title: "Evaluate", spec: "Spec", techDesign: "Design", overrides: { model: "default-model", runtime: "mock" } });
+    const task = await createTask(repoPath, { title: "Evaluate", spec: "Spec", techDesign: "Design", overrides: { model: "default-model", runtime: "mock", questions: "ask" } });
     const response = await fetch(`${server.url}/api/tasks/${task.id}/runs`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ overrides: { model: "selected-model" } }),
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ overrides: { model: "selected-model", questions: "deny" } }),
     });
     expect(response.status).toBe(200);
-    expect(captured?.overrides).toEqual({ model: "selected-model", runtime: "mock" });
-    expect((await getTask(repoPath, task.id)).overrides).toEqual({ model: "default-model", runtime: "mock" });
+    expect(captured?.overrides).toEqual({ model: "selected-model", runtime: "mock", questions: "deny" });
+    expect((await getTask(repoPath, task.id)).overrides).toEqual({ model: "default-model", runtime: "mock", questions: "ask" });
     const events = new EventStore(eventStorePath(repoPath));
     try {
       const runId = (await response.json() as { run: { runId: string } }).run.runId;
       const recorded = events.list(runId).find((event) => event.type === "run.admitted" || event.type === "run.created");
-      expect(recorded?.payload).toMatchObject({ overrides: { model: "selected-model", runtime: "mock" } });
+      expect(recorded?.payload).toMatchObject({ overrides: { model: "selected-model", runtime: "mock", questions: "deny" } });
     } finally { events.close(); }
   });
 
@@ -469,12 +469,23 @@ describe("web server API and HTML", () => {
     const body = await response.json() as { task: { id: string; overrides: unknown } };
     expect(body.task.overrides).toEqual({ model: "qwen/qwen3-coder-next", effort: "high" });
     expect((await getTask(repoPath, body.task.id)).overrides).toEqual(body.task.overrides);
-    for (const overrides of [{ effort: "urgent" }, { model: "" }, { extra: true }, null]) {
+    for (const overrides of [{ effort: "urgent" }, { model: "" }, { questions: "sometimes" }, { extra: true }, null]) {
       const invalid = await fetch(`${server.url}/api/tasks/${body.task.id}/runs`, {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ overrides }),
       });
       expect(invalid.status).toBe(400);
     }
+  });
+
+  it("lists registered runtimes for the console picker", async () => {
+    const repoPath = await createRepo();
+    const server = await startTestServer(repoPath);
+    const response = await fetch(`${server.url}/api/runtimes`);
+    expect(response.status).toBe(200);
+    const body = await response.json() as { runtimes: Array<{ id: string }> };
+    expect(body.runtimes.map((runtime) => runtime.id)).toEqual(
+      expect.arrayContaining(["codex", "claude", "glm", "grok", "openrouter", "pi", "together"]),
+    );
   });
 
   it("reports a local admin session and preserves unauthenticated local API compatibility", async () => {

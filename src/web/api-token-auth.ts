@@ -66,6 +66,9 @@ export function apiTokenActionForRequest(
   if (method === "POST" && pathname === "/api/preview-sessions") {
     return { action: "preview.sessions.start", capability: "preview:control" };
   }
+  if (method === "GET" && pathname === "/api/runtimes") {
+    return { action: "runtimes.list", capability: "runs:read" };
+  }
   if (method === "GET" && pathname === "/api/flows") {
     return { action: "flows.list", capability: "tasks:read" };
   }

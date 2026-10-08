@@ -181,6 +181,7 @@ function acceptedRunPayload(admission: StoredRunAdmission): Record<string, unkno
     inputs: input.inputs,
     configuration: input.configuration,
     overrides: input.overrides,
+    aliasOf: input.aliasOf,
     providerConnections: input.providerConnections,
     branchName: admission.branchName,
     workItemId: input.workItemId,
