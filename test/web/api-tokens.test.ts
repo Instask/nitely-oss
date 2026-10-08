@@ -196,10 +196,8 @@ describe("scoped API tokens", () => {
       },
     ]);
     expect(apiTokenActionForRequest("GET", "/api/providers")).toBeNull();
-    expect(apiTokenActionForRequest("POST", "/api/flows")).toBeNull();
-    expect(
-      apiTokenActionForRequest("GET", "/api/flows/flows%2Fimplement.json"),
-    ).toBeNull();
+    expect(apiTokenActionForRequest("PATCH", "/api/flows/flows%2Fimplement.json")).toBeNull();
+    expect(apiTokenActionForRequest("GET", "/api/flows/%E0%A4%A")).toBeNull();
     expect(apiTokenActionForRequest("GET", "/api/preview-sessions/pvs_1/proxy/app")).toBeNull();
     expect(
       apiTokenActionForRequest(
@@ -208,6 +206,29 @@ describe("scoped API tokens", () => {
       ),
     ).toBeNull();
     expect(apiTokenActionForRequest("DELETE", "/api/tasks/task-1")).toBeNull();
+  });
+
+  it("maps Flow catalog reads to tasks:read and mutations to flows:manage", () => {
+    const id = "/api/flows/flows%2Fimplement.json";
+    expect([
+      apiTokenActionForRequest("GET", "/api/flows/templates"),
+      apiTokenActionForRequest("POST", "/api/flows/validate"),
+      apiTokenActionForRequest("GET", id),
+      apiTokenActionForRequest("POST", "/api/flows"),
+      apiTokenActionForRequest("POST", "/api/flows/from-template"),
+      apiTokenActionForRequest("PUT", id),
+      apiTokenActionForRequest("DELETE", id),
+      apiTokenActionForRequest("POST", `${id}/reset`),
+    ]).toEqual([
+      { action: "flows.templates.list", capability: "tasks:read" },
+      { action: "flows.validate", capability: "tasks:read" },
+      { action: "flows.get", capability: "tasks:read" },
+      { action: "flows.create", capability: "flows:manage" },
+      { action: "flows.create-from-template", capability: "flows:manage" },
+      { action: "flows.update", capability: "flows:manage" },
+      { action: "flows.delete", capability: "flows:manage" },
+      { action: "flows.reset", capability: "flows:manage" },
+    ]);
   });
 
   it("creates a one-time secret while persisting only a verifier and safe grants", async () => {
@@ -293,6 +314,7 @@ describe("scoped API tokens", () => {
       "spec:approve",
       "preview:control",
       "preview:compare",
+      "flows:manage",
     ] as const) {
       await expect(
         createApiToken(repoPath, {
@@ -319,6 +341,7 @@ describe("scoped API tokens", () => {
       "preview:read",
       "preview:control",
       "preview:compare",
+      "flows:manage",
     ]);
   });
 

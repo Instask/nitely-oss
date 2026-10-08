@@ -549,10 +549,37 @@ it("checks repository command configuration before task admission", async () => 
     configurables: [{ key: "verifyCommand", label: "Verify", type: "text", required: true }] } });
   const input = { repoPath, flowPath: "fixture.json", flowDocument, inputs: { spec: { connector: "local-file" as const, uri: "spec.md" } } };
   await writeFile(join(repoPath, "spec.md"), "Spec");
-  expect((await evaluateRunPreflight(input)).issues).toContainEqual(expect.objectContaining({ code: "flow-invalid", message: "missing required configurable: verifyCommand" }));
+  const missing = (await evaluateRunPreflight(input)).issues;
+  expect(missing).toContainEqual(expect.objectContaining({
+    code: "missing-setting", severity: "blocking", settingKey: "verifyCommand",
+    message: "missing required configurable: verifyCommand",
+    remediation: expect.stringMatching(/Set verifyCommand .*\.nitely\/instructions\.json/),
+  }));
+  expect(missing.map((issue) => issue.code)).not.toContain("flow-invalid");
   await mkdir(join(repoPath, ".nitely"), { recursive: true });
   await writeFile(join(repoPath, ".nitely/instructions.json"), JSON.stringify({ configuration: { verifyCommand: "go test ./..." } }));
-  expect((await evaluateRunPreflight(input)).issues.filter((issue) => issue.code === "flow-invalid")).toEqual([]);
+  expect((await evaluateRunPreflight(input)).issues.filter((issue) => issue.code === "flow-invalid" || issue.code === "missing-setting")).toEqual([]);
+});
+
+it("keeps invalid configuration values and duplicate configurables as flow-invalid", async () => {
+  const repoPath = await mkdtemp(join(tmpdir(), "nitely-preflight-config-invalid-"));
+  await writeFile(join(repoPath, "spec.md"), "Spec");
+  const document = flow({ runtime: "mock" });
+  const inputs = { spec: { connector: "local-file" as const, uri: "spec.md" } };
+  const withConfigurables = (configurables: unknown[]) => JSON.stringify({
+    ...document, metadata: { ...document.metadata, configurables } });
+  const codes = async (flowDocument: string, configuration?: Record<string, unknown>) =>
+    (await evaluateRunPreflight({ repoPath, flowPath: "fixture.json", flowDocument, inputs,
+      ...(configuration ? { configuration } : {}) })).issues.map((issue) => issue.code);
+  const duplicate = withConfigurables([
+    { key: "retries", label: "Retries", type: "number" },
+    { key: "retries", label: "Retries", type: "number" },
+  ]);
+  expect(await codes(duplicate)).toContain("flow-invalid");
+  const numeric = withConfigurables([{ key: "retries", label: "Retries", type: "number", required: true }]);
+  expect(await codes(numeric, { retries: "many" })).toContain("flow-invalid");
+  expect(await codes(numeric)).toEqual(expect.arrayContaining(["missing-setting"]));
+  expect(await codes(numeric)).not.toContain("flow-invalid");
 });
 
 it("blocks OCI doctor preflight on an unset image", async () => {

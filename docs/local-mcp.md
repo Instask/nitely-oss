@@ -52,6 +52,7 @@ nitely mcp token create \
   --capability preview:read \
   --capability preview:control \
   --capability preview:compare \
+  --capability flows:manage \
   --allow-high-impact
 ```
 
@@ -59,12 +60,12 @@ nitely mcp token create \
 credentials the way that user's Web Console session does.
 
 The raw token is printed once. `tasks:write`, `runs:start`, `spec:approve`,
-`preview:control`, and `preview:compare` require `--allow-high-impact`;
+`preview:control`, `preview:compare`, and `flows:manage` require `--allow-high-impact`;
 read-only tokens do not. Supported capabilities:
 
 | Capability | Permitted MCP/API actions |
 | --- | --- |
-| `tasks:read` | list and inspect tasks, and list the instance's flows |
+| `tasks:read` | list and inspect tasks, and list, inspect, and validate the instance's flows and templates |
 | `tasks:write` | create tasks and draft specs |
 | `runs:read` | list and poll runs |
 | `runs:start` | start an approved task run |
@@ -72,6 +73,7 @@ read-only tokens do not. Supported capabilities:
 | `preview:read` | inspect preview sessions, diagnostics, and view hierarchy |
 | `preview:control` | start/stop/navigate/reload/click/type/scroll/capture screenshots in preview sessions |
 | `preview:compare` | attach preview screenshots to runs and create visual comparison artifacts |
+| `flows:manage` | create, update, enable/disable, reset, and delete Flows via `/api/flows*`, with the owner's repository and Flow permissions |
 
 Anything not explicitly granted is denied. In particular, a valid token cannot
 access provider credentials, user/session APIs, repository administration, or

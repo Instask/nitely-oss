@@ -1,4 +1,5 @@
 import type { ApiTokenCapability } from "./api-tokens.js";
+import { apiFlowId, apiFlowResetId } from "./route-patterns.js";
 
 export interface ApiTokenAction {
   action: string;
@@ -68,6 +69,8 @@ export function apiTokenActionForRequest(
   if (method === "GET" && pathname === "/api/flows") {
     return { action: "flows.list", capability: "tasks:read" };
   }
+  const flowAction = apiTokenFlowAction(method, pathname);
+  if (flowAction) return flowAction;
   if (method === "GET" && pathname === "/api/tasks") {
     return { action: "tasks.list", capability: "tasks:read" };
   }
@@ -234,5 +237,44 @@ export function apiTokenActionForRequest(
       };
     }
   }
+  return null;
+}
+
+/**
+ * Flow catalog routes. Reading stays on `tasks:read` (as `flows.list` always
+ * has); every mutation needs `flows:manage`. The token only selects the
+ * capability: the route still applies the owner's repository visibility and
+ * ownership/organization `flows:manage` checks exactly as for a browser session.
+ */
+function apiTokenFlowAction(
+  method: string | undefined,
+  pathname: string,
+): ApiTokenAction | null {
+  if (method === "GET" && pathname === "/api/flows/templates") {
+    return { action: "flows.templates.list", capability: "tasks:read" };
+  }
+  if (method === "POST" && pathname === "/api/flows/validate") {
+    return { action: "flows.validate", capability: "tasks:read" };
+  }
+  if (method === "POST" && pathname === "/api/flows") {
+    return { action: "flows.create", capability: "flows:manage" };
+  }
+  if (method === "POST" && pathname === "/api/flows/from-template") {
+    return { action: "flows.create-from-template", capability: "flows:manage" };
+  }
+  const safe = (parse: (value: string) => string | undefined) => {
+    try {
+      return parse(pathname);
+    } catch {
+      return undefined;
+    }
+  };
+  if (method === "POST" && safe(apiFlowResetId) !== undefined) {
+    return { action: "flows.reset", capability: "flows:manage" };
+  }
+  if (safe(apiFlowId) === undefined) return null;
+  if (method === "GET") return { action: "flows.get", capability: "tasks:read" };
+  if (method === "PUT") return { action: "flows.update", capability: "flows:manage" };
+  if (method === "DELETE") return { action: "flows.delete", capability: "flows:manage" };
   return null;
 }

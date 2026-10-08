@@ -4,6 +4,7 @@ import { parseFlowDocument } from "../../src/flow/load.js";
 import {
   normalizeFlowConfiguration,
   FlowConfigurationError,
+  FlowConfigurationMissingError,
 } from "../../src/flows/configurables.js";
 
 function flowWithConfigurables(configurables: unknown[]) {
@@ -53,7 +54,7 @@ describe("flow configurables", () => {
     ]);
 
     expect(() => normalizeFlowConfiguration(flow, {})).toThrow(
-      new FlowConfigurationError("missing required configurable: scope"),
+      new FlowConfigurationMissingError("scope"),
     );
   });
 
@@ -73,4 +74,11 @@ it("uses repository defaults only for declared keys and lets task values overrid
   expect(normalizeFlowConfiguration(flow, {}, { verifyCommand: "pytest -q", setupCommand: "uv sync" })).toEqual({ verifyCommand: "pytest -q" });
   expect(normalizeFlowConfiguration(flow, { verifyCommand: "go test ./..." }, { verifyCommand: "pytest -q" })).toEqual({ verifyCommand: "go test ./..." });
   expect(() => normalizeFlowConfiguration(flow, {}, {})).toThrow("missing required configurable: verifyCommand");
+  try {
+    normalizeFlowConfiguration(flow, {}, {});
+  } catch (error) {
+    expect(error).toBeInstanceOf(FlowConfigurationMissingError);
+    expect(error).toBeInstanceOf(FlowConfigurationError);
+    expect((error as FlowConfigurationMissingError).key).toBe("verifyCommand");
+  }
 });

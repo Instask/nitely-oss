@@ -33,7 +33,7 @@ import type {
   ProviderConnectionStore,
   ProviderId,
 } from "../providers/types.js";
-import { normalizeFlowConfiguration } from "../flows/configurables.js";
+import { FlowConfigurationMissingError, normalizeFlowConfiguration } from "../flows/configurables.js";
 import { loadProjectInstructions } from "./project-instructions.js";
 import { checkOciReadiness, normalizeExecutionBackendName, type ExecutionBackendName } from "./execution/backend.js";
 import { resolveRuntimeEffort } from "./execution/effort.js";
@@ -51,6 +51,7 @@ export interface RunPreflightIssue {
     | "flow-invalid"
     | "flow-disabled"
     | "missing-input"
+    | "missing-setting"
     | "input-unreadable"
     | "missing-provider"
     | "unknown-mcp-server"
@@ -65,6 +66,7 @@ export interface RunPreflightIssue {
   remediation: string;
   stageId?: string;
   inputId?: string;
+  settingKey?: string;
   providerId?: ProviderId;
   mcpServer?: string;
   runtime?: string;
@@ -658,8 +660,16 @@ export async function evaluateRunPreflight(
     normalizeFlowConfiguration(flow, input.configuration,
       instructions.loaded ? instructions.configuration : undefined);
   } catch (error) {
-    configurationIssues.push(issue("blocking", "flow-invalid", error instanceof Error ? error.message : String(error),
-      "Set the required flow configuration in .nitely/instructions.json configuration or on the task."));
+    if (error instanceof FlowConfigurationMissingError) {
+      configurationIssues.push({
+        ...issue("blocking", "missing-setting", error.message,
+          `Set ${error.key} on the task configuration or under configuration in .nitely/instructions.json.`),
+        settingKey: error.key,
+      });
+    } else {
+      configurationIssues.push(issue("blocking", "flow-invalid", error instanceof Error ? error.message : String(error),
+        "Fix the flow configuration values on the task or in .nitely/instructions.json, or the Flow's configurables."));
+    }
   }
   const { backend, env: executionEnv } = await preflightExecutionEnv(input);
   const ociIssues = backend === "oci" ? await checkOciReadiness({

@@ -172,7 +172,7 @@ describe("flows API", () => {
       `${server.url}/api/flows/${encodeURIComponent("flows/implement-spec-bootstrap.json")}`,
       { headers: { authorization: `Bearer ${reader.token}` } },
     );
-    expect(detail.status).toBe(403);
+    expect(detail.status).toBe(200);
 
     const created = await fetch(`${server.url}/api/flows`, {
       method: "POST",
@@ -183,6 +183,90 @@ describe("flows API", () => {
       body: JSON.stringify({ document: userFlow }),
     });
     expect(created.status).toBe(403);
+    await expect(json(created)).resolves.toMatchObject({
+      error: { code: "capability_denied" },
+    });
+  });
+
+  it("lets a flows:manage API token manage Flows with its owner's repository and record permissions", { timeout: 120_000 }, async () => {
+    const repo = await createRepo();
+    const repoB = await createRepo();
+    const member = await createUser(repo, {
+      email: "member@example.test",
+      password: "member password passphrase",
+      role: "user",
+    });
+    const admin = await createTokenOwner(repo, "admin@example.test");
+    const server = await start(repo, undefined, {
+      authMode: "required",
+      providerEnv: {},
+      repositories: [{ id: "repo-b", name: "repo-b", path: repoB }],
+    });
+    const memberToken = await createApiToken(repo, {
+      name: "member flows",
+      capabilities: ["tasks:read", "flows:manage"],
+      ownerUserId: member.id,
+      allowHighImpact: true,
+    });
+    const adminToken = await createApiToken(repo, {
+      name: "admin flows",
+      capabilities: ["flows:manage"],
+      ownerUserId: admin.id,
+      allowHighImpact: true,
+    });
+    const call = (token: string, method: string, path: string, body?: unknown) =>
+      fetch(`${server.url}${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+
+    const created = await call(memberToken.token, "POST", "/api/flows", { document: userFlow });
+    expect(created.status).toBe(201);
+    const flow = ((await json(created)) as { flow: { id: string; ownerId: string } }).flow;
+    expect(flow.ownerId).toBe(member.id);
+    const id = encodeURIComponent(flow.id);
+    const updated = await call(memberToken.token, "PUT", `/api/flows/${id}`, {
+      document: flowDocument("token updated"),
+    });
+    expect(updated.status).toBe(200);
+    await expect(json(updated)).resolves.toMatchObject({ flow: { name: "token updated" } });
+    expect((await call(memberToken.token, "PUT", `/api/flows/${id}`, { enabled: false })).status).toBe(200);
+    // Another user's Flow is not the member token's to change.
+    const adminFlow = await call(adminToken.token, "POST", "/api/flows", { document: flowDocument("admin owned") });
+    expect(adminFlow.status).toBe(201);
+    const adminId = encodeURIComponent(((await json(adminFlow)) as { flow: { id: string } }).flow.id);
+    expect((await call(memberToken.token, "DELETE", `/api/flows/${adminId}`)).status).not.toBe(200);
+
+    // Mutations are repository-scoped by repoId like browser requests.
+    const inB = await call(adminToken.token, "POST", "/api/flows", {
+      document: flowDocument("repo-b only"),
+      repoId: "repo-b",
+    });
+    expect(inB.status).toBe(201);
+    const bId = encodeURIComponent(((await json(inB)) as { flow: { id: string } }).flow.id);
+    expect((await call(memberToken.token, "GET", `/api/flows/${bId}`)).status).toBe(404);
+    expect((await call(adminToken.token, "DELETE", `/api/flows/${bId}`)).status).toBe(404);
+    expect((await call(adminToken.token, "DELETE", `/api/flows/${bId}?repoId=repo-b`)).status).toBe(200);
+
+    // Built-in Flows stay administrator-only, as for a signed-in member.
+    const builtin = encodeURIComponent("flows/implement-spec-bootstrap.json");
+    expect(
+      (await call(memberToken.token, "PUT", `/api/flows/${builtin}`, { enabled: false })).status,
+    ).toBe(403);
+    expect((await call(memberToken.token, "POST", `/api/flows/${builtin}/reset`, {})).status).toBe(403);
+    expect(
+      (await call(adminToken.token, "PUT", `/api/flows/${builtin}`, { enabled: false })).status,
+    ).toBe(200);
+    const reset = await call(adminToken.token, "POST", `/api/flows/${builtin}/reset`, {});
+    expect(reset.status).toBe(200);
+
+    const deleted = await call(memberToken.token, "DELETE", `/api/flows/${id}`);
+    expect(deleted.status).toBe(200);
+    expect((await call(memberToken.token, "GET", `/api/flows/${id}`)).status).toBe(404);
   });
 
   it("returns details for a legitimate built-in repository flow", async () => {
