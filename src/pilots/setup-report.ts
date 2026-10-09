@@ -4,7 +4,8 @@ import { access, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { loadFlow } from "../flow/load.js";
+import { parseFlowDocument } from "../flow/load.js";
+import { resolveRunFlowSource } from "../flows/catalog.js";
 import { loadContextPolicy } from "../context/policy.js";
 
 const execFileAsync = promisify(execFile);
@@ -255,7 +256,10 @@ export async function generatePilotSetupReport(
   let flowName = "unknown";
 
   try {
-    const flow = await loadFlow(flowPath);
+    // Check the document a run would execute: a seeded built-in reference
+    // resolves through the repository Flow catalog (edited/disabled state).
+    const source = await resolveRunFlowSource(repoPath, input.flowPath);
+    const flow = parseFlowDocument(source.flowDocument);
     flowName = flow.flow.metadata.name;
     addCheck(checks, {
       id: "flow.load",
@@ -269,7 +273,7 @@ export async function generatePilotSetupReport(
       label: "Flow",
       status: "fail",
       detail: error instanceof Error ? error.message : String(error),
-      remediation: "Fix the pilot flow file before the first run.",
+      remediation: "Fix or enable the pilot flow before the first run.",
     });
   }
 

@@ -8,6 +8,7 @@ import {
   generatePilotSetupReport,
   type PilotSetupCommandRunner,
 } from "../../src/pilots/setup-report.js";
+import { setCatalogFlowEnabled, updateCatalogFlowDocument } from "../../src/flows/catalog.js";
 
 async function createPilotRepo(): Promise<{ repoPath: string; flowPath: string }> {
   const repoPath = await mkdtemp(join(tmpdir(), "nitely-pilot-setup-"));
@@ -207,5 +208,34 @@ describe("pilot setup report", () => {
       "Set one of ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN",
     );
     expect(report.markdown).toContain("Add nitely.context.json");
+  });
+
+  it("checks the repository Flow catalog version of a built-in, refusing a disabled one", async () => {
+    const { repoPath } = await createPilotRepo();
+    const named = (name: string) => JSON.stringify({
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name },
+      spec: { stages: [{ id: "verify", type: "command", command: "true", outputs: ["verification-report"] }] },
+    });
+    await mkdir(join(repoPath, "flows"), { recursive: true });
+    await writeFile(join(repoPath, "flows/foo.json"), named("shipped-foo"), "utf8");
+    await updateCatalogFlowDocument(repoPath, "flows/foo.json", named("edited-foo"));
+    const report = () => generatePilotSetupReport({
+      repoPath,
+      flowPath: "flows/foo.json",
+      runtimes: ["codex"],
+      verifyCommands: ["pnpm run check"],
+      env: { NITELY_GITHUB_TOKEN: "github-token" },
+      now: new Date("2026-07-08T00:00:00.000Z"),
+      commandRunner: successfulRunner,
+    });
+    const edited = await report();
+    expect(edited.markdown).toContain("Flow: `edited-foo`");
+
+    await setCatalogFlowEnabled(repoPath, "flows/foo.json", false);
+    const disabled = await report();
+    expect(disabled.ready).toBe(false);
+    expect(disabled.checks.find((check) => check.id === "flow.load")).toMatchObject({ status: "fail" });
   });
 });

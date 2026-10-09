@@ -6246,7 +6246,12 @@ export async function runWebUsageLimitRecovery(input: StartWebServerInput): Prom
       try {
         return tasks.filter((task) => {
           if (!task.latestRunId) return false;
-          const run = projectRun(events.list(task.latestRunId));
+          // A task can point at a run this repository's event store never
+          // recorded (imported or historical work items). Skip it rather than
+          // let one unprojectable run abandon the whole recovery sweep.
+          const runEvents = events.list(task.latestRunId);
+          if (runEvents.length === 0) return false;
+          const run = projectRun(runEvents);
           if (questionPolicyResumeDue(run, now)) return true;
           if (run.status !== "blocked" || run.blocker?.reason !== "agent_usage_limit") return false;
           return Boolean(usageLimitBlockedRun({ task, eventStore: events, now, persisted })) ||

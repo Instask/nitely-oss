@@ -24,6 +24,7 @@ import { resumeRun, runFlow } from "../../src/run/run-flow.js";
 import { runSchedulerOnce } from "../../src/scheduler/run.js";
 import { listUnifiedWorkItems } from "../../src/work-items/access.js";
 import { runWebUsageLimitRecovery } from "../../src/web/server.js";
+import { createTask, updateTaskRunState } from "../../src/web/tasks.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -479,6 +480,23 @@ describe("question answer recovery invariants", () => {
       const question = store.list(runId).find((e) => e.type === "stage.question")!;
       store.append({ runId, stageId: question.stageId, attempt: question.attempt, type: "stage.question", payload: question.payload, createdAt: new Date(Date.now() - 2000).toISOString() });
     } finally { store.close(); }
+    const resumer = vi.fn((input: Parameters<typeof resumeRun>[0]) => resumeRun(input, { backend: agent }));
+    await runWebUsageLimitRecovery({ repoPath: repo, repositories: [{ id: "test-repo", path: repo }], host: "127.0.0.1", port: 0, authMode: "local", resumeRun: resumer });
+    expect(resumer).toHaveBeenCalledTimes(1);
+    expect(projectRun(events(repo, runId)).status).toBe("completed");
+  });
+
+  it("Web recovery skips a task whose latest run has no events instead of abandoning the sweep", async () => {
+    const { repo, runId, agent } = await blockedQuestionRun();
+    const store = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      const question = store.list(runId).find((e) => e.type === "stage.question")!;
+      store.append({ runId, stageId: question.stageId, attempt: question.attempt, type: "stage.question", payload: question.payload, createdAt: new Date(Date.now() - 2000).toISOString() });
+    } finally { store.close(); }
+    // An imported or historical task can point at a run this repository's
+    // event store never recorded; projecting it throws.
+    const orphan = await createTask(repo, { title: "Historical task", spec: "Spec", techDesign: "Design" });
+    await updateTaskRunState(repo, orphan.id, { status: "failed", latestRunId: "run-imported-without-events" });
     const resumer = vi.fn((input: Parameters<typeof resumeRun>[0]) => resumeRun(input, { backend: agent }));
     await runWebUsageLimitRecovery({ repoPath: repo, repositories: [{ id: "test-repo", path: repo }], host: "127.0.0.1", port: 0, authMode: "local", resumeRun: resumer });
     expect(resumer).toHaveBeenCalledTimes(1);

@@ -1306,7 +1306,7 @@
               <input name="intake" autocomplete="off" placeholder="GitHub/Jira URL, Jira key, document URL, or rough prompt" style="{{ inputStyle }}">
             </label>
             <label style="display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:600;color:var(--ink);">Repository
-              <select name="repoId" style="{{ inputStyle }}">
+              <select name="repoId" value="{{ plannerTemplateRepoId }}" data-planner-repo-select="true" onChange="{{ selectPlannerRepository }}" style="{{ inputStyle }}">
                 <sc-for list="{{ repositories }}" as="repo" hint-placeholder-count="1">
                   <option value="{{ repo.id }}">{{ repo.name }}</option>
                 </sc-for>
@@ -1330,7 +1330,7 @@
             </label>
             <label style="display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:600;color:var(--ink);grid-column:span 2;">Template
               <select name="templateId" style="{{ inputStyle }}">
-                <sc-for list="{{ taskFlowTemplates }}" as="tpl" hint-placeholder-count="2">
+                <sc-for list="{{ plannerFlowTemplates }}" as="tpl" hint-placeholder-count="2">
                   <option value="{{ tpl.id }}">{{ tpl.name }}</option>
                 </sc-for>
               </select>
@@ -1561,6 +1561,7 @@
             <sc-for list="{{ selectedFlowStatusBadges }}" as="b" hint-placeholder-count="1"><span data-flow-badge="{{ b.key }}" style="{{ b.style }}">{{ b.label }}</span></sc-for>
             <sc-if value="{{ selectedFlowCanToggle }}" hint-placeholder-val="{{ false }}"><button data-id="{{ selectedFlowId }}" data-enabled="{{ selectedFlowNextEnabled }}" onClick="{{ toggleFlowEnabled }}" style="border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:8px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;">{{ selectedFlowToggleLabel }}</button></sc-if>
             <sc-if value="{{ selectedFlowCanReset }}" hint-placeholder-val="{{ false }}"><button data-id="{{ selectedFlowId }}" onClick="{{ resetFlow }}" style="border:1px solid #fca5a5;background:var(--panel);color:#b91c1c;border-radius:8px;padding:8px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;">Reset to built-in</button></sc-if>
+            <sc-if value="{{ selectedFlowCanDelete }}" hint-placeholder-val="{{ false }}"><button data-id="{{ selectedFlowId }}" data-flow-delete="true" onClick="{{ deleteFlow }}" style="border:1px solid #fca5a5;background:var(--panel);color:#b91c1c;border-radius:8px;padding:8px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;">Delete flow</button></sc-if>
             <sc-if value="{{ flowEditorEditable }}" hint-placeholder-val="{{ true }}"><button onClick="{{ saveFlow }}" style="border:1px solid var(--accent);background:var(--accent);color:#fff;border-radius:8px;padding:8px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;">Save flow</button></sc-if>
             <sc-if value="{{ flowEditorRunnableWithoutConfigurables }}" hint-placeholder-val="{{ false }}"><button data-id="{{ selectedFlowId }}" onClick="{{ runFromFlow }}" style="border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:8px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;">Run</button></sc-if>
           </div>
@@ -2863,7 +2864,7 @@
           <input name="title" autocomplete="off" placeholder="Short, descriptive task title" style="{{ inputStyle }}">
         </label>
         <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">Repository
-          <select name="repoId" style="{{ inputStyle }}">
+          <select name="repoId" value="{{ newTaskTemplateRepoId }}" data-new-task-repo-select="true" onChange="{{ selectNewTaskRepository }}" style="{{ inputStyle }}">
             <sc-for list="{{ repositories }}" as="repo" hint-placeholder-count="1">
               <option value="{{ repo.id }}">{{ repo.name }}</option>
             </sc-for>
@@ -2880,7 +2881,7 @@
         </label>
         <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink);">Template
           <select name="templateId" style="{{ inputStyle }}">
-            <sc-for list="{{ taskFlowTemplates }}" as="tpl" hint-placeholder-count="2">
+            <sc-for list="{{ newTaskFlowTemplates }}" as="tpl" hint-placeholder-count="2">
               <option value="{{ tpl.id }}">{{ tpl.name }}</option>
             </sc-for>
           </select>
@@ -3030,6 +3031,10 @@ class Component extends DCLogic {
       scheduler: null,
       flows: [],
       flowTemplates: [],
+      plannerTemplateRepoId: "",
+      plannerTemplates: null,
+      newTaskTemplateRepoId: "",
+      newTaskTemplates: null,
       flowRepoId: "",
       flowManageError: "",
       flowDetailError: "",
@@ -3187,10 +3192,14 @@ class Component extends DCLogic {
           this.api("/api/schedules"),
           this.api("/api/runtimes"),
         ]);
+        const repositories = reposRes?.repositories ?? [];
+        // Resolve the Planner's templates before publishing this load. A request
+        // still open when the next screen replaces the page is aborted.
+        await this.ensurePlannerRepository(repositories);
         this.setState({
           tasks: tasksRes?.tasks ?? [],
           schedules: schedulesRes?.schedules ?? [],
-          repositories: reposRes?.repositories ?? [],
+          repositories,
           runRuntimeOptions: runtimesRes?.runtimes ?? [],
           skills: skillsRes?.skills ?? [],
           dashboard: this.dashboardFromResponse(dashboardRes),
@@ -3720,6 +3729,70 @@ class Component extends DCLogic {
     await this.fetchFlowCatalog();
     await this.fetchFlowDetail(flowId);
   };
+
+  deleteFlow = async (e) => {
+    const flowId = e.currentTarget.dataset.id;
+    const repoId = this.state.flowRepoId || "";
+    const detail = this.state.flowDetails[flowId];
+    if (!detail || detail.source !== "user") return;
+    const message = "Delete \"" + (detail.name || flowId) + "\" from this repository? This cannot be undone. Existing tasks and runs keep their snapshots.";
+    if (!window.confirm(message)) return;
+    this.setState({ flowManageError: "", flowDraftStatus: "Deleting..." });
+    const res = await fetch(this.flowApiPath("/api/flows/" + encodeURIComponent(flowId), repoId), {
+      method: "DELETE",
+      credentials: "same-origin",
+    });
+    if (!res.ok) {
+      const error = await this.flowErrorMessage(res, "Delete failed");
+      this.setState({ flowManageError: error, flowDraftStatus: error });
+      return;
+    }
+    if ((this.state.flowRepoId || "") !== repoId) return;
+    this.setState((s) => {
+      const flowDetails = Object.assign({}, s.flowDetails);
+      delete flowDetails[flowId];
+      return { flowDetails, flowDraftStatus: "", flowDraftDocument: "", flowDraftReport: null };
+    });
+    this.navigate(this.flowRoute("flows"));
+    await this.fetchFlowCatalog(repoId);
+  };
+
+  // Templates a task form can run. Planner and New Task each filter their own list.
+  taskFormFlowTemplates(templates) {
+    return (templates || []).filter((template) => {
+      const inputs = template.inputs || [];
+      return template.flowPath && inputs.every((input) => input.id === "spec" || input.id === "tech-design");
+    });
+  }
+
+  // Each form stores its own repository and template list. A response is
+  // applied only when that same form still has the requested repository.
+  selectPlannerRepository = async (e) => {
+    const repoId = (e && e.currentTarget && e.currentTarget.value) || "";
+    this.setState({ plannerTemplateRepoId: repoId, plannerTemplates: null });
+    const res = await this.api(this.flowApiPath("/api/flows/templates", repoId));
+    if ((this.state.plannerTemplateRepoId || "") !== repoId) return;
+    this.setState({ plannerTemplates: res?.templates ?? [] });
+  };
+
+  selectNewTaskRepository = async (e) => {
+    const repoId = (e && e.currentTarget && e.currentTarget.value) || "";
+    this.setState({ newTaskTemplateRepoId: repoId, newTaskTemplates: null });
+    const res = await this.api(this.flowApiPath("/api/flows/templates", repoId));
+    if ((this.state.newTaskTemplateRepoId || "") !== repoId) return;
+    this.setState({ newTaskTemplates: res?.templates ?? [] });
+  };
+
+  // The Planner form is always on the Tasks page, so its repository select
+  // shows the first repository before any click. Load that repository once.
+  // Later refreshes keep a selection that still exists.
+  async ensurePlannerRepository(repos = this.state.repositories || []) {
+    const list = repos || [];
+    const current = this.state.plannerTemplateRepoId || "";
+    if (current && list.some((repo) => repo.id === current)) return;
+    const first = list[0];
+    if (first && first.id) await this.selectPlannerRepository({ currentTarget: { value: first.id } });
+  }
 
   async fetchFlowDetail(flowId, repoId = this.state.flowRepoId || "") {
     const res = await this.api(this.flowApiPath("/api/flows/" + encodeURIComponent(flowId), repoId));
@@ -4725,7 +4798,16 @@ class Component extends DCLogic {
     this.navigate({ view: "run-detail", runId: id });
   };
 
-  toggleNewTask = () => this.setState((s) => ({ showNewTask: !s.showNewTask }));
+  toggleNewTask = () => {
+    const opening = !this.state.showNewTask;
+    this.setState({ showNewTask: opening });
+    if (!opening) return;
+    const repos = this.state.repositories || [];
+    const current = this.state.newTaskTemplateRepoId || "";
+    if (current && repos.some((repo) => repo.id === current)) return;
+    const first = repos[0];
+    if (first && first.id) return this.selectNewTaskRepository({ currentTarget: { value: first.id } });
+  };
   toggleNewRepo = () => this.setState((s) => ({
     showNewRepo: !s.showNewRepo,
     repoStatus: "",
@@ -6120,10 +6202,8 @@ class Component extends DCLogic {
     });
     const filteredRuns = runs.filter((r) => this.matchesSessionFilters(r, this.state.sessionFilters));
     const hasSessionOwners = this.state.runs.some((r) => !!r.ownerId);
-    const taskFlowTemplates = (this.state.flowTemplates || []).filter((template) => {
-      const inputs = template.inputs || [];
-      return template.flowPath && inputs.every((input) => input.id === "spec" || input.id === "tech-design");
-    });
+    const plannerFlowTemplates = this.taskFormFlowTemplates(this.state.plannerTemplates);
+    const newTaskFlowTemplates = this.taskFormFlowTemplates(this.state.newTaskTemplates);
     const assignmentUsers = (this.state.users || []).map((user) => ({
       id: user.id,
       email: user.email || user.id,
@@ -7467,6 +7547,7 @@ class Component extends DCLogic {
     const flowEditorRunnable = view === "flow-detail" && !!selectedFlow && selectedFlow.enabled !== false;
     const selectedFlowStatusBadges = view === "flow-detail" && selectedFlow ? flowStatusBadges(selectedFlow) : [];
     const selectedFlowCanToggle = view === "flow-detail" && !!selectedFlow && selectedFlow.editable === true;
+    const selectedFlowCanDelete = selectedFlowCanToggle && selectedFlow.source === "user";
     const selectedFlowCanReset = selectedFlowCanToggle && selectedFlow.source === "builtin" && (selectedFlow.customized === true || selectedFlow.upstreamUpdateAvailable === true);
     const selectedFlowConfigurables = (selectedFlow?.configurables || []).map((configurable) => {
       const type = configurable.type || "text";
@@ -7695,11 +7776,14 @@ class Component extends DCLogic {
       flowRepoId: this.state.flowRepoId || "",
       flowRepositoryOptions: (this.state.repositories || []).map((r) => ({ id: r.id, name: r.name || r.id })),
       flowManageError: this.state.flowManageError || "",
-      selectedFlowStatusBadges, selectedFlowCanToggle, selectedFlowCanReset,
+      selectedFlowStatusBadges, selectedFlowCanToggle, selectedFlowCanReset, selectedFlowCanDelete,
       selectedFlowNextEnabled: selectedFlow?.enabled === false ? "true" : "false",
       selectedFlowToggleLabel: selectedFlow?.enabled === false ? "Enable" : "Disable",
       flowTemplates: this.state.flowTemplates,
-      taskFlowTemplates,
+      plannerTemplateRepoId: this.state.plannerTemplateRepoId || "",
+      newTaskTemplateRepoId: this.state.newTaskTemplateRepoId || "",
+      plannerFlowTemplates,
+      newTaskFlowTemplates,
       flowDetailError: this.state.flowDetailError || "",
       hasFlowDetailError: !!this.state.flowDetailError,
       flowRepositoryLabel: (() => {
@@ -7736,7 +7820,7 @@ class Component extends DCLogic {
       hasDemoResult: !!demoResult,
       newFlow: this.newFlow, openFlow: this.openFlow, pickTemplate: this.pickTemplate,
       editFlowDraft: this.editFlowDraft, editFlowConfig: this.editFlowConfig, saveFlow: this.saveFlow, runFromFlow: this.runFromFlow,
-      selectFlowRepository: this.selectFlowRepository, toggleFlowEnabled: this.toggleFlowEnabled, resetFlow: this.resetFlow,
+      selectFlowRepository: this.selectFlowRepository, toggleFlowEnabled: this.toggleFlowEnabled, resetFlow: this.resetFlow, deleteFlow: this.deleteFlow, selectPlannerRepository: this.selectPlannerRepository, selectNewTaskRepository: this.selectNewTaskRepository,
       previewSkillImport: this.previewSkillImport, confirmSkillImport: this.confirmSkillImport,
       addSkillToFlowStage: this.addSkillToFlowStage,
       refreshPreviewSessions: this.refreshPreviewSessions,
