@@ -159,6 +159,8 @@ production 控制状态，但不包含 credential。
 - `GET /api/session`
 - `POST /api/session`
 - `DELETE /api/session`
+- `GET /api/session/organizations`：列出当前 session 可用的组织及当前组织
+- `PUT /api/session/organization`：切换当前组织，详见英文文档 “Current workspace”
 
 批准生成的 draft spec 会同时更新 task metadata 和持久化 spec Markdown 的
 `Status:` 行，然后 draft technical design 才会使用该 artifact。

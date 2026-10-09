@@ -42,11 +42,12 @@ export class WebUnauthorizedError extends Error {
 }
 
 export class WebForbiddenError extends Error {
-  readonly code = "forbidden";
+  readonly code: string;
   readonly status = 403;
 
-  constructor(message = "forbidden") {
+  constructor(message = "forbidden", code = "forbidden") {
     super(message);
+    this.code = code;
     this.name = "WebForbiddenError";
   }
 }
