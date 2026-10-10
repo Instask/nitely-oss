@@ -211,6 +211,21 @@ Both commands accept `--interval-ms <n>`, or use `NITELY_SERVER_URL` or the
 saved instance when `--server` is omitted. They print one line per
 status/stage/output transition and exit zero only when the run completes.
 
+Resume a `blocked` or `interrupted` run, for example after replacing a rejected
+provider key:
+
+```bash
+nitely run resume <run-id> --server http://192.0.2.10:4173
+```
+
+`run resume` POSTs to `/api/runs/<run-id>/resume` (the same endpoint as the
+Console's **Resume run** button) and prints the run id with the `run watch`
+command. An API token needs `runs:start` and only reaches runs its owner can
+see. The server accepts the resume with `202` and continues in the background.
+If that background resume fails, the run stays resumable and
+`GET /api/runs/<run-id>` reports the reason as `resumeFailure`, which the
+Console also shows under the run header.
+
 Trigger one scheduler cycle on the remote Nitely server:
 
 ```bash

@@ -213,6 +213,16 @@ export function apiTokenActionForRequest(
       };
     }
   }
+  if (method === "POST") {
+    const resumeRunId = decodedMatch(pathname, /^\/api\/runs\/([^/]+)\/resume$/);
+    if (resumeRunId !== undefined) {
+      return {
+        action: "runs.resume",
+        capability: "runs:start",
+        target: { runId: resumeRunId },
+      };
+    }
+  }
   if (method === "GET" && pathname === "/api/runs") {
     return { action: "runs.list", capability: "runs:read" };
   }

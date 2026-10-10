@@ -208,6 +208,15 @@ describe("scoped API tokens", () => {
     expect(apiTokenActionForRequest("DELETE", "/api/tasks/task-1")).toBeNull();
   });
 
+  it("maps run resume to runs:start for the named run", () => {
+    expect(apiTokenActionForRequest("POST", "/api/runs/run%2D1/resume")).toEqual({
+      action: "runs.resume",
+      capability: "runs:start",
+      target: { runId: "run-1" },
+    });
+    expect(apiTokenActionForRequest("GET", "/api/runs/run-1/resume")).toBeNull();
+  });
+
   it("maps Flow catalog reads to tasks:read and mutations to flows:manage", () => {
     const id = "/api/flows/flows%2Fimplement.json";
     expect([

@@ -12731,6 +12731,65 @@ describe("Web usage-limit recovery", () => {
     expect(resumed).toHaveLength(1);
   });
 
+  it("records a background resume failure on the run instead of only logging it", async () => {
+    const repo = await createRepo();
+    await mkdir(join(repo, ".nitely"), { recursive: true });
+    const events = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      events.append({ runId: "blocked", type: "run.created", payload: { ownerId: "local", flowName: "test", flowPath: "flows/implement-spec-bootstrap.json", inputs: {} } });
+      events.append({ runId: "blocked", type: "run.blocked", payload: { reason: "agent_auth", stageId: "write-tests", message: "401" } });
+    } finally { events.close(); }
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let fail = true;
+    const server = await startTestServer(repo, undefined, undefined, {
+      resumeRun: async (input) => {
+        if (fail) throw new Error("runtime openrouter rejected key sk-or-v1-abcdefghijklmnopqrstuvwxyz0123456789");
+        return { runId: input.runId, branchName: "test", worktreePath: repo };
+      },
+    });
+    expect((await fetch(`${server.url}/api/runs/blocked/resume`, { method: "POST" })).status).toBe(202);
+    const detail = await waitFor(
+      async () => (await json(await fetch(`${server.url}/api/runs/blocked`))) as { run: { status: string; canResume: boolean; resumeFailure?: { message: string; actor?: string } } },
+      (body) => body.run.resumeFailure !== undefined,
+    );
+    expect(detail.run).toMatchObject({ status: "blocked", canResume: true, resumeFailure: { actor: "local" } });
+    expect(detail.run.resumeFailure!.message).toContain("rejected key");
+    expect(detail.run.resumeFailure!.message).not.toContain("abcdefghijklmnopqrstuvwxyz0123456789");
+
+    // A later resume that the runner takes over clears the failure.
+    fail = false;
+    await waitFor(async () => (await fetch(`${server.url}/api/runs/blocked/resume`, { method: "POST" })).status, (status) => status === 202);
+    const store = new EventStore(join(repo, ".nitely", "events.db"));
+    try { store.append({ runId: "blocked", type: "run.resumed", payload: {} }); } finally { store.close(); }
+    expect(((await json(await fetch(`${server.url}/api/runs/blocked`))) as { run: Record<string, unknown> }).run.resumeFailure).toBeUndefined();
+  });
+
+  it("lets an API token with runs:start resume its owner's blocked run", async () => {
+    const repo = await createRepo();
+    const owner = await createUser(repo, { email: "token-resume@example.test", password: "token-resume-password", role: "user" });
+    const events = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      for (const [runId, ownerId] of [["mine", owner.id], ["theirs", "someone-else"]] as const) {
+        events.append({ runId, type: "run.created", payload: { ownerId, flowName: "test", flowPath: "flows/implement-spec-bootstrap.json", inputs: {} } });
+        events.append({ runId, type: "run.blocked", payload: { reason: "agent_auth", stageId: "write-tests", message: "401" } });
+      }
+    } finally { events.close(); }
+    const reader = await createApiToken(repo, { name: "reader", capabilities: ["runs:read"], ownerUserId: owner.id });
+    const starter = await createApiToken(repo, { name: "starter", capabilities: ["runs:read", "runs:start"], ownerUserId: owner.id, allowHighImpact: true });
+    const resumed: string[] = [];
+    const server = await startTestServer(repo, undefined, undefined, {
+      authMode: "required", authEnv: {}, providerEnv: {}, providerCommandStatus: async () => false,
+      resumeRun: async (input) => { resumed.push(input.runId); return { runId: input.runId, branchName: "test", worktreePath: repo }; },
+    });
+    const resume = (runId: string, token: string) =>
+      fetch(`${server.url}/api/runs/${runId}/resume`, { method: "POST", headers: { authorization: `Bearer ${token}` } });
+    expect((await resume("mine", reader.token)).status).toBe(403);
+    expect((await resume("theirs", starter.token)).status).toBe(404);
+    expect((await resume("mine", starter.token)).status).toBe(202);
+    await waitFor(async () => resumed, (ids) => ids.length === 1);
+    expect(resumed).toEqual(["mine"]);
+  });
+
   it("resumes a run once when submits race, and releases the claim afterwards", async () => {
     const repo = await createRepo();
     await mkdir(join(repo, ".nitely"), { recursive: true });

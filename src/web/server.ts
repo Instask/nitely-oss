@@ -185,6 +185,7 @@ import {
   WebSetupRequiredError,
   WebUnauthorizedError,
 } from "./errors.js";
+import { redactForWeb } from "./redaction.js";
 import {
   API_TOKEN_CAPABILITIES,
   appendApiTokenRequestAudit,
@@ -6193,6 +6194,34 @@ async function runStoredWorkItemAcrossRepositories(
   throw new WebNotFoundError(notFoundMessage);
 }
 
+/**
+ * Record a background resume failure on the run so the API and Console show
+ * why the requested Resume did not happen, not only `web.log`.
+ */
+function recordWebResumeFailure(
+  repoPath: string,
+  runId: string,
+  message: string,
+  actor: string,
+): void {
+  try {
+    const store = new EventStore(eventStorePath(repoPath));
+    try {
+      store.append({
+        runId,
+        type: "run.resume.failed",
+        payload: { message: redactForWeb(message) ?? "resume failed", actor, source: "web" },
+      });
+    } finally {
+      store.close();
+    }
+  } catch (error) {
+    console.error(
+      `Nitely Web could not record the resume failure for ${runId}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
 async function prepareWebRunResume(
   input: RuntimeStartWebServerInput,
   repository: WebRepository,
@@ -11102,7 +11131,9 @@ async function handleApiRequest(
       const task = tasks.find((item) => item.latestRunId === runId);
       if (task) await reconcileTerminalWorkItemRun({ repoPath: repository.path, workItemId: task.id, runId });
     }).catch((error: unknown) => {
-      console.error(`Nitely Web resume failed for ${runId}: ${error instanceof Error ? error.message : String(error)}`);
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Nitely Web resume failed for ${runId}: ${message}`);
+      recordWebResumeFailure(repository.path, runId, message, user.id);
     }).finally(release);
     sendJson(response, 202, { runId });
     return true;

@@ -268,15 +268,18 @@ export async function runRemoteListCommand(input: RemoteListCommandInput): Promi
   }
 }
 
+export type RemoteActionCollection = "tasks" | "runs";
+
 export async function postRemoteTaskAction(
   input: { serverUrl: string; apiToken?: string; taskId: string },
   fetchImpl: FetchFunction,
   route: string,
   label: string,
+  collection: RemoteActionCollection = "tasks",
 ): Promise<unknown> {
   const serverUrl = normalizeRemoteServerUrl(input.serverUrl);
   const response = await fetchImpl(
-    `${serverUrl}/api/tasks/${encodeURIComponent(input.taskId)}/${route}`,
+    `${serverUrl}/api/${collection}/${encodeURIComponent(input.taskId)}/${route}`,
     {
       method: "POST",
       headers: remoteRequestHeaders(input.apiToken, {
@@ -325,6 +328,12 @@ export function printRemoteRunStart(io: CliIo, payload: unknown): void {
   const status = typeof run.status === "string" && run.status ? run.status : "unknown";
   io.stdout(`RUN ${run.runId} ${status}`);
   io.stdout(`Watch command: nitely run watch ${run.runId}`);
+}
+
+export function printRemoteRunResume(io: CliIo, payload: unknown, runId: string): void {
+  const id = readJsonObject(payload)?.runId;
+  io.stdout(`RUN ${typeof id === "string" && id ? id : runId} resuming`);
+  io.stdout(`Watch command: nitely run watch ${typeof id === "string" && id ? id : runId}`);
 }
 
 export type RemoteIntakeSourceType =
@@ -494,6 +503,8 @@ export interface RemoteTaskActionCommandInput {
   route: string;
   label: string;
   print: (io: CliIo, payload: unknown, taskId: string) => void;
+  /** API collection the id belongs to. Defaults to `tasks`. */
+  collection?: RemoteActionCollection;
 }
 
 export async function runRemoteTaskActionCommand(
@@ -533,6 +544,7 @@ export async function runRemoteTaskActionCommand(
       input.fetchImpl,
       input.route,
       input.label,
+      input.collection,
     );
     input.print(asJson ? { stdout: () => {}, stderr: () => {} } : io, payload, input.taskId);
     if (asJson) {

@@ -5832,6 +5832,63 @@ None.
     ]);
   });
 
+  it("resumes a remote run with the API token and names the watch command", async () => {
+    const stdout: string[] = [];
+    const calls: Array<{ url: string; method?: string; authorization?: string | null }> = [];
+
+    const code = await runCli(
+      ["run", "resume", "run-9", "--server", "http://server.test"],
+      { stdout: (line) => stdout.push(line), stderr: () => {} },
+      {
+        env: { NITELY_API_TOKEN: "nitely_api_test" },
+        fetch: async (input, init) => {
+          calls.push({
+            url: String(input),
+            method: init?.method,
+            authorization: new Headers(init?.headers).get("authorization"),
+          });
+          return new Response(JSON.stringify({ runId: "run-9" }), {
+            status: 202,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(calls).toEqual([
+      {
+        url: "http://server.test/api/runs/run-9/resume",
+        method: "POST",
+        authorization: "Bearer nitely_api_test",
+      },
+    ]);
+    expect(stdout).toEqual([
+      "RUN run-9 resuming",
+      "Watch command: nitely run watch run-9",
+    ]);
+  });
+
+  it("reports a refused remote run resume with the server's reason", async () => {
+    const stderr: string[] = [];
+
+    const code = await runCli(
+      ["run", "resume", "run-9", "--server", "http://server.test"],
+      { stdout: () => {}, stderr: (line) => stderr.push(line) },
+      {
+        env: {},
+        fetch: async () =>
+          new Response(
+            JSON.stringify({ error: { message: "only blocked or interrupted runs can be resumed" } }),
+            { status: 400, headers: { "content-type": "application/json" } },
+          ),
+      },
+    );
+
+    expect(code).toBe(1);
+    expect(stderr.join("\n")).toContain("remote run resume failed (HTTP 400): only blocked or interrupted runs can be resumed");
+  });
+
   it("emits the remote payload unchanged for task start --json", async () => {
     const stdout: string[] = [];
     const run = { runId: "run-9", status: "running", taskId: "task-1" };

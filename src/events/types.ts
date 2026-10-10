@@ -85,6 +85,7 @@ export type RunEventType =
   | "run.blocked"
   | "run.cancelled"
   | "run.resumed"
+  | "run.resume.failed"
   | "factory.candidate.evaluated"
   | "factory.queue.dispatched"
   | "schedule.occurrence.materialized"
