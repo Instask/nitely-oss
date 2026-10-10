@@ -596,6 +596,8 @@ export interface ProjectedRun {
   trigger?: unknown;
   priorRunId?: string;
   blocker?: ProjectedRunBlocker;
+  /** The latest resume attempt that failed before the run moved on. */
+  resumeFailure?: ProjectedResumeFailure;
   contextUsage?: ProjectedContextUsage;
   runtimeUsage?: ProjectedRuntimeUsageTotal;
   budgetSummary?: ProjectedBudgetSummary;
@@ -610,6 +612,12 @@ export interface ProjectedRun {
   pendingQuestion?: ProjectedOperatorQuestion;
   activeQuestion?: ProjectedOperatorQuestion;
   riskClassification?: ProjectedRiskClassification;
+}
+
+export interface ProjectedResumeFailure {
+  message: string;
+  failedAt: string;
+  actor?: string;
 }
 
 interface ProjectedBudgetSignal {
@@ -2560,6 +2568,7 @@ export function projectRun(
       finalizerStageIds = new Set();
       projection.status = "running";
       projection.blocker = undefined;
+      projection.resumeFailure = undefined;
       if (typeof payload.budgets === "object" && payload.budgets !== null) {
         projection.budgets = payload.budgets;
       }
@@ -2575,6 +2584,20 @@ export function projectRun(
     if (event.type === "run.cancelled") {
       setRunTerminal("cancelled", event.createdAt);
       projection.blocker = undefined;
+      projection.resumeFailure = undefined;
+      continue;
+    }
+
+    if (event.type === "run.resume.failed") {
+      // A resume that threw before (or while) the runner took over. The run's
+      // own status is left as the runner last recorded it; this only explains
+      // why the Resume the operator asked for did not happen.
+      projection.resumeFailure = {
+        message: asString(payload.message) ?? "resume failed",
+        failedAt: event.createdAt,
+        ...(asString(payload.actor) ? { actor: asString(payload.actor) } : {}),
+      };
+      continue;
     }
   }
 

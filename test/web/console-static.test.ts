@@ -16,6 +16,21 @@ async function exists(path: string): Promise<boolean> {
 }
 
 describe("Design Component console shell", () => {
+  it("exposes every template event handler through renderVals", async () => {
+    // The runtime resolves `onClick="{{ name }}"` only from renderVals(), with
+    // no fallback to component methods, so an unexposed handler renders a
+    // button that silently does nothing.
+    const html = await readFile(consolePath, "utf8");
+    const handlers = new Set(
+      [...html.matchAll(/\bon[A-Z][A-Za-z]*="\{\{\s*([A-Za-z_$][\w$]*)\s*\}\}"/g)].map((match) => match[1]!),
+    );
+    expect(handlers.size).toBeGreaterThan(50);
+    const unexposed = [...handlers].filter(
+      (name) => !new RegExp(`\\b${name}: this\\.${name}\\b`).test(html),
+    );
+    expect(unexposed).toEqual([]);
+  });
+
   it("does not keep a legacy server-rendered console implementation", async () => {
     await expect(exists(legacyServerRenderPath)).resolves.toBe(false);
   });

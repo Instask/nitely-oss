@@ -173,6 +173,7 @@ import {
   postRemoteTaskAction,
   printRemoteDraftTaskResult,
   printRemoteRunList,
+  printRemoteRunResume,
   printRemoteRunStart,
   printRemoteTaskApproval,
   printRemoteTaskDraftTechDesign,
@@ -4293,6 +4294,35 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
         fetchItems: listRemoteRuns,
         jsonKey: "runs",
         print: printRemoteRunList,
+      });
+
+    },
+  },
+  {
+    name: "run",
+    matches: (argv) => argv[1] === "resume",
+    usage: [
+      "  run resume <run-id> [--server <url>] [--json]",
+    ],
+    run: async ({ argv, io, dependencies }) => {
+      const usage = "Usage: nitely run resume <run-id> [--server <url>] [--json]";
+      const runId = argv[2];
+      if (!runId || runId.startsWith("--")) {
+        io.stderr(usage);
+        return 1;
+      }
+      return await runRemoteTaskActionCommand({
+        argv,
+        startIndex: 3,
+        taskId: runId,
+        usage,
+        env: dependencies.env ?? process.env,
+        fetchImpl: dependencies.fetch ?? fetch,
+        io,
+        route: "resume",
+        label: "remote run resume",
+        collection: "runs",
+        print: printRemoteRunResume,
       });
 
     },

@@ -281,6 +281,12 @@ nitely task start <task-id>
 payload。API token 需要 `spec:approve` 才能做两个审批，需要 `tasks:write` 才能
 生成 draft 与 refresh，需要 `runs:start` 才能用 `task start`。
 
+已 `blocked` 或 `interrupted` 的 Run（例如替换了被拒的 provider key 之后）可以用
+`nitely run resume <run-id> --server <url>` 恢复。它与 Console 的 **Resume run**
+按钮调用同一个 `POST /api/runs/<run-id>/resume`，API token 需要 `runs:start`。
+服务端以 `202` 接受后在后台恢复；后台恢复失败时 Run 仍可再次恢复，
+`GET /api/runs/<run-id>` 的 `resumeFailure` 字段和 Console 的 Run 头部会显示原因。
+
 `task start` 不会发送 `override=true`，因此存在 run eligibility blocker 的 Task
 会被拒绝而不是强行启动；接受 blocker 仍然是 Web Console 上的决定。本地的
 `approvals`、`approve`、`deny`、`questions`、`answer` 与这几个命令无关，它们仍然

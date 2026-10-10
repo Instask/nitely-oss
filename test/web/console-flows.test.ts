@@ -722,3 +722,36 @@ describe("console Flow management", () => {
     expect(html).toContain("{{ flowDetailError }}");
   });
 });
+
+describe("console run resume", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  async function resumeComponent(runId: string | null) {
+    const c = await flowComponent(["flowErrorMessage", "resumeRun"]);
+    c.state = { selectedRunId: runId, runResumeError: "" };
+    c.fetchRunDetail = vi.fn(async () => {});
+    return c;
+  }
+
+  it("posts resume for the displayed run and refreshes it", async () => {
+    const c = await resumeComponent("run-1");
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 202, json: async () => ({ runId: "run-1" }) }));
+    vi.stubGlobal("fetch", fetchMock);
+    await c.resumeRun();
+    expect(fetchMock).toHaveBeenCalledWith("/api/runs/run-1/resume", { method: "POST", credentials: "same-origin" });
+    expect(c.fetchRunDetail).toHaveBeenCalledWith("run-1", { force: true });
+    expect(c.state.runResumeError).toBe("");
+  });
+
+  it("shows why the server refused the resume instead of doing nothing", async () => {
+    const c = await resumeComponent("run-1");
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: false,
+      status: 409,
+      json: async () => ({ error: { message: "run is already being resumed" } }),
+    })));
+    await c.resumeRun();
+    expect(c.state.runResumeError).toBe("run is already being resumed");
+    expect(c.fetchRunDetail).not.toHaveBeenCalled();
+  });
+});

@@ -50,6 +50,7 @@ import {
   type ProjectedKnowledgeRetrieval,
   type ProjectedOperatorQuestion,
   type ProjectedRun,
+  type ProjectedResumeFailure,
   type ProjectedRunBlocker,
   type ProjectedRunLogSource,
   type ProjectedRunStatus,
@@ -384,6 +385,7 @@ export interface WebRunSummary {
   recoveryArtifact?: WebRecoveryArtifact;
   latestDecision?: OrchestratorDecisionEvent;
   blocker?: ProjectedRunBlocker;
+  resumeFailure?: ProjectedResumeFailure;
   questions?: ProjectedOperatorQuestion[];
   pendingQuestion?: ProjectedOperatorQuestion;
   activeQuestion?: ProjectedOperatorQuestion;
@@ -1735,6 +1737,13 @@ function projectedRunSummary(
     ...(recoveryArtifact ? { recoveryArtifact } : {}),
     ...(webBlocker(projection.blocker)
       ? { blocker: webBlocker(projection.blocker) }
+      : {}),
+    ...(projection.resumeFailure
+      ? {
+          resumeFailure: redactUnknownForWeb(
+            projection.resumeFailure,
+          ) as ProjectedResumeFailure,
+        }
       : {}),
     ...((projection.questions ?? []).length > 0
       ? {

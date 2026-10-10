@@ -2128,6 +2128,12 @@
             <sc-if value="{{ selectedRun.hasBlocker }}" hint-placeholder-val="{{ false }}">
               <div style="font-family:'Geist Mono',monospace;font-size:12px;color:#b45309;overflow-wrap:anywhere;margin-top:4px;max-width:780px;">{{ selectedRun.blockerLabel }}</div>
             </sc-if>
+            <sc-if value="{{ selectedRun.hasResumeFailure }}" hint-placeholder-val="{{ false }}">
+              <div role="status" style="font-family:'Geist Mono',monospace;font-size:12px;color:#b91c1c;overflow-wrap:anywhere;margin-top:4px;max-width:780px;">{{ selectedRun.resumeFailureLabel }}</div>
+            </sc-if>
+            <sc-if value="{{ selectedRun.hasResumeError }}" hint-placeholder-val="{{ false }}">
+              <div role="alert" style="font-size:12.5px;color:#b91c1c;overflow-wrap:anywhere;margin-top:4px;max-width:780px;">{{ selectedRun.resumeError }}</div>
+            </sc-if>
           </div>
           <div class="mobile-actions" style="display:flex;gap:9px;flex:none;">
             <sc-if value="{{ selectedRun.hasChange }}" hint-placeholder-val="{{ false }}">
@@ -3007,6 +3013,7 @@ class Component extends DCLogic {
       view: "tasks",
       selectedTaskId: null,
       selectedRunId: null,
+      runResumeError: "",
       showNewTask: false,
       showNewRepo: false,
       openStages: {},
@@ -3545,6 +3552,7 @@ class Component extends DCLogic {
       patch.selectedRunId = null;
       this.fetchTaskDetail(route.taskId);
     } else if (route.view === "run-detail") {
+      if (route.runId !== this.state.selectedRunId) patch.runResumeError = "";
       patch.selectedRunId = route.runId;
       this.fetchRunDetail(route.runId);
     } else if (route.view === "flow-detail") {
@@ -4856,8 +4864,20 @@ class Component extends DCLogic {
   resumeRun = async () => {
     const runId = this.state.selectedRunId;
     if (!runId) return;
-    const res = await this.api("/api/runs/" + encodeURIComponent(runId) + "/resume", { method: "POST" });
-    if (res) await this.fetchRunDetail(runId, { force: true });
+    this.setState({ runResumeError: "" });
+    const res = await fetch("/api/runs/" + encodeURIComponent(runId) + "/resume", {
+      method: "POST",
+      credentials: "same-origin",
+    });
+    if (res.status === 401) {
+      this.setState({ authRequired: true, user: null, sessionLoaded: true, loginError: "" });
+      return;
+    }
+    if (!res.ok) {
+      this.setState({ runResumeError: await this.flowErrorMessage(res, "Resume failed") });
+      return;
+    }
+    await this.fetchRunDetail(runId, { force: true });
   };
 
   runTaskDefaultsLabel() {
@@ -7397,6 +7417,12 @@ class Component extends DCLogic {
         selectedRun = Object.assign({}, rd, {
           badge: this.badge(rd.status),
           canResume: rd.canResume === true,
+          hasResumeFailure: !!(rd.resumeFailure && rd.resumeFailure.message),
+          resumeFailureLabel: rd.resumeFailure && rd.resumeFailure.message
+            ? "Resume failed" + (rd.resumeFailure.failedAt ? " at " + rd.resumeFailure.failedAt : "") + ": " + rd.resumeFailure.message
+            : "",
+          hasResumeError: !!this.state.runResumeError,
+          resumeError: this.state.runResumeError,
           stages: stages.map((s, i) => this.decorateStage(rd, s, i, stages.length)),
           stagesLabel: done.length + " of " + stages.length + " stages",
           progressLabel: done.length + " / " + stages.length + " complete",
@@ -7898,6 +7924,15 @@ class Component extends DCLogic {
       resolveContextKnowledgeProposal: this.resolveContextKnowledgeProposal,
       editContextKnowledgeProposal: this.editContextKnowledgeProposal,
       startRun: this.startRun, planWork: this.planWork, approveSpec: this.approveSpec,
+      resumeRun: this.resumeRun, startRunOverride: this.startRunOverride,
+      refreshPreflight: this.refreshPreflight, refreshSourcePlanning: this.refreshSourcePlanning,
+      loadMoreRuns: this.loadMoreRuns,
+      answerOperatorQuestion: this.answerOperatorQuestion, submitOperatorQuestionText: this.submitOperatorQuestionText,
+      submitTaskReworkRequest: this.submitTaskReworkRequest, confirmTaskReworkRequest: this.confirmTaskReworkRequest,
+      cancelTaskReworkRequest: this.cancelTaskReworkRequest,
+      addDependency: this.addDependency, removeDependency: this.removeDependency,
+      acceptDependencySuggestion: this.acceptDependencySuggestion, dismissDependencySuggestion: this.dismissDependencySuggestion,
+      refreshDependencySuggestions: this.refreshDependencySuggestions,
       syncSourceStatus: this.syncSourceStatus,
       draftTechnicalDesign: this.draftTechnicalDesign, approveTechDesign: this.approveTechDesign,
       toggleNewTask: this.toggleNewTask, createTask: this.createTask,
