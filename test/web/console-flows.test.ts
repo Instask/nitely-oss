@@ -725,7 +725,7 @@ describe("console run resume", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   async function resumeComponent(runId: string | null) {
-    const c = await flowComponent(["flowErrorMessage", "resumeRun"]);
+    const c = await flowComponent(["flowErrorMessage", "networkErrorMessage", "resumeRun"]);
     c.state = { selectedRunId: runId, runActionError: "" };
     c.fetchRunDetail = vi.fn(async () => {});
     return c;
@@ -754,7 +754,7 @@ describe("console run resume", () => {
   });
 
   it("cancels the displayed run with the operator's reason, or not at all", async () => {
-    const c = await flowComponent(["flowErrorMessage", "cancelRun"]);
+    const c = await flowComponent(["flowErrorMessage", "networkErrorMessage", "cancelRun"]);
     c.state = { selectedRunId: "run-1", runActionError: "" };
     c.fetchRunDetail = vi.fn(async () => {});
     const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ runId: "run-1", status: "cancelled" }) }));
@@ -773,5 +773,25 @@ describe("console run resume", () => {
       body: JSON.stringify({ reason: "stuck on a bad key" }),
     });
     expect(c.fetchRunDetail).toHaveBeenCalledWith("run-1", { force: true });
+  });
+
+  it("reports a resume or cancel that never reached the server", async () => {
+    const resume = await flowComponent(["flowErrorMessage", "networkErrorMessage", "resumeRun"]);
+    resume.state = { selectedRunId: "run-1", runActionError: "" };
+    resume.fetchRunDetail = vi.fn(async () => {});
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("Failed to fetch"); }));
+    await expect(resume.resumeRun()).resolves.toBeUndefined();
+    expect(resume.state.runActionError).toBe(
+      "Resume request did not reach the server: Failed to fetch. Check the connection and try again.",
+    );
+    expect(resume.fetchRunDetail).not.toHaveBeenCalled();
+
+    const cancel = await flowComponent(["flowErrorMessage", "networkErrorMessage", "cancelRun"]);
+    cancel.state = { selectedRunId: "run-1", runActionError: "" };
+    cancel.fetchRunDetail = vi.fn(async () => {});
+    vi.stubGlobal("window", { prompt: () => "stop" });
+    await expect(cancel.cancelRun()).resolves.toBeUndefined();
+    expect(cancel.state.runActionError).toMatch(/^Cancel request did not reach the server/);
+    expect(cancel.fetchRunDetail).not.toHaveBeenCalled();
   });
 });

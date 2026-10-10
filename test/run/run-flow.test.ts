@@ -416,6 +416,64 @@ describe("runFlow", () => {
     store.close();
   });
 
+  it("does not record run.completed after a cancellation recorded while the last stage ran", async () => {
+    const repo = await createRepo();
+    const flowDocument = JSON.stringify({
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "cancel-before-complete" },
+      spec: { stages: [{ id: "verify", type: "command", command: "printf verified", inputs: [], outputs: ["test-report"] }] },
+    });
+    const local = new LocalExecutionBackend();
+    const backend = new Proxy(local, {
+      get(target, property) {
+        if (property === "runCommand") {
+          return async (...args: Parameters<LocalExecutionBackend["runCommand"]>) => {
+            const result = await target.runCommand(...args);
+            // An operator cancels after the stage finished, before the runner
+            // records the run as completed.
+            const store = new EventStore(join(repo, ".nitely", "events.db"));
+            try {
+              store.append({ runId: "run-cancel-before-complete", type: "run.cancelled", payload: { actor: "operator", reason: "stop", source: "web" } });
+            } finally { store.close(); }
+            return result;
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    await expect(runFlow(
+      { repoPath: repo, flowPath: join(repo, "flows", "cancel-before-complete.json"), flowDocument, inputs: {} },
+      { createRunId: () => "run-cancel-before-complete", backend },
+    )).rejects.toThrow(/cancelled/);
+
+    const store = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      const events = store.list("run-cancel-before-complete");
+      expect(events.some((event) => event.type === "run.completed")).toBe(false);
+      expect(projectRun(events).status).toBe("cancelled");
+    } finally { store.close(); }
+  });
+
+  it("refuses to resume a cancelled run even though its blocked stage remains", async () => {
+    const repo = await createRepo();
+    await mkdir(join(repo, ".nitely"), { recursive: true });
+    const store = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      store.append({ runId: "run-cancelled-blocked", type: "run.created", payload: { flowName: "test", flowPath: "flows/implement-spec-bootstrap.json", inputs: {} } });
+      store.append({ runId: "run-cancelled-blocked", stageId: "implement", attempt: 1, type: "stage.started", payload: { runtime: "codex" } });
+      store.append({ runId: "run-cancelled-blocked", stageId: "implement", attempt: 1, type: "stage.blocked", payload: { reason: "agent_auth" } });
+      store.append({ runId: "run-cancelled-blocked", type: "run.blocked", payload: { reason: "agent_auth", stageId: "implement" } });
+      store.append({ runId: "run-cancelled-blocked", type: "run.cancelled", payload: { actor: "operator", reason: "stop", source: "web" } });
+    } finally { store.close(); }
+
+    await expect(resumeRun({ repoPath: repo, runId: "run-cancelled-blocked" })).rejects.toThrow(
+      "run is cancelled: run-cancelled-blocked",
+    );
+  });
+
   it("fails before workspace creation when the configured origin cannot be fetched", async () => {
     const { repo } = await createRepoWithOrigin();
     await git(repo, ["remote", "set-url", "origin", join(repo, "missing-origin")]);

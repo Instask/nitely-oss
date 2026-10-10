@@ -3573,6 +3573,11 @@ class Component extends DCLogic {
     return repoId ? Object.assign({}, body, { repoId }) : body;
   }
 
+  networkErrorMessage(action, error) {
+    const detail = error && typeof error.message === "string" && error.message ? ": " + error.message : "";
+    return action + " request did not reach the server" + detail + ". Check the connection and try again.";
+  }
+
   async flowErrorMessage(res, fallback) {
     const body = await res.json().catch(() => ({}));
     const error = body && body.error;
@@ -4798,10 +4803,16 @@ class Component extends DCLogic {
     const runId = this.state.selectedRunId;
     if (!runId) return;
     this.setState({ runActionError: "" });
-    const res = await fetch("/api/runs/" + encodeURIComponent(runId) + "/resume", {
-      method: "POST",
-      credentials: "same-origin",
-    });
+    let res;
+    try {
+      res = await fetch("/api/runs/" + encodeURIComponent(runId) + "/resume", {
+        method: "POST",
+        credentials: "same-origin",
+      });
+    } catch (error) {
+      this.setState({ runActionError: this.networkErrorMessage("Resume", error) });
+      return;
+    }
     if (res.status === 401) {
       this.setState({ authRequired: true, user: null, sessionLoaded: true, loginError: "" });
       return;
@@ -4821,12 +4832,18 @@ class Component extends DCLogic {
       : "cancelled by operator";
     if (reason === null) return;
     this.setState({ runActionError: "" });
-    const res = await fetch("/api/runs/" + encodeURIComponent(runId) + "/cancel", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ reason: String(reason).trim() || "cancelled by operator" }),
-    });
+    let res;
+    try {
+      res = await fetch("/api/runs/" + encodeURIComponent(runId) + "/cancel", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reason: String(reason).trim() || "cancelled by operator" }),
+      });
+    } catch (error) {
+      this.setState({ runActionError: this.networkErrorMessage("Cancel", error) });
+      return;
+    }
     if (res.status === 401) {
       this.setState({ authRequired: true, user: null, sessionLoaded: true, loginError: "" });
       return;
