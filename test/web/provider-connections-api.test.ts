@@ -180,7 +180,7 @@ describe("provider connections API", () => {
     const seen: Array<{ url: string; authorization: string | null }> = [];
     const server = await start(repoPath, (async (url: string | URL | Request, init?: RequestInit) => {
       seen.push({ url: String(url), authorization: new Headers(init?.headers).get("authorization") });
-      return new Response("{}", { status });
+      return new Response(JSON.stringify({ data: { label: "inference", is_management_key: false, is_provisioning_key: false } }), { status });
     }) as typeof fetch);
 
     const saved = await json(await post(server, "/api/providers/openrouter/connection", {
@@ -202,6 +202,80 @@ describe("provider connections API", () => {
     const accepted = await json(await post(server, validatePath, {}));
     expect(accepted).toMatchObject({ ok: true, checked: "provider", connection: { id: saved.connection.id } });
     expect(accepted.connection.lastValidatedAt).toEqual(expect.any(String));
+  });
+
+  async function savedOpenRouterKey(server: WebServer, value: string, connectionId?: string) {
+    return await json(await post(server, "/api/providers/openrouter/connection", {
+      value,
+      authMethod: "api_key",
+      ...(connectionId ? { connectionId } : {}),
+    }));
+  }
+  async function listedConnection(server: WebServer) {
+    const statuses = await json(await fetch(`${server.url}/api/providers`));
+    const openrouter = statuses.providers.find((p: { id: string }) => p.id === "openrouter");
+    return openrouter.authMethods[0].connections[0];
+  }
+
+  it("rejects an OpenRouter management key, which answers /key but cannot run inference", async () => {
+    const repoPath = await createRepo();
+    const server = await start(repoPath, (async () => new Response(JSON.stringify({
+      data: { label: "admin", is_management_key: true, is_provisioning_key: true },
+    }), { status: 200 })) as typeof fetch);
+    const saved = await savedOpenRouterKey(server, "sk-or-v1-management-key-0123456789");
+
+    const result = await json(await post(server, `/api/providers/openrouter/connections/${saved.connection.id}/validate`, {}));
+    expect(result).toMatchObject({ ok: false, checked: "provider" });
+    expect(result.reason).toMatch(/management key/);
+    expect(JSON.stringify(result)).not.toContain("sk-or-v1-management-key");
+    expect((await listedConnection(server)).lastValidatedAt).toBeUndefined();
+  });
+
+  it.each([
+    ["a server error", async () => new Response("upstream", { status: 500 })],
+    ["a network failure", async () => { throw new TypeError("fetch failed sk-or-v1-transient-key-0123456789"); }],
+    ["a 200 without key details", async () => new Response("not json", { status: 200 })],
+  ])("does not stamp a key on %s", async (_label, respond) => {
+    const repoPath = await createRepo();
+    const server = await start(repoPath, respond as unknown as typeof fetch);
+    const saved = await savedOpenRouterKey(server, "sk-or-v1-transient-key-0123456789");
+
+    const result = await json(await post(server, `/api/providers/openrouter/connections/${saved.connection.id}/validate`, {}));
+    expect(result).toMatchObject({ ok: false, checked: "provider" });
+    expect(result.reason).toMatch(/^unverified: /);
+    expect(JSON.stringify(result)).not.toContain("sk-or-v1-transient-key");
+    expect((await listedConnection(server)).lastValidatedAt).toBeUndefined();
+  });
+
+  it("does not stamp a key rotated in while the previous key was being validated", async () => {
+    const repoPath = await createRepo();
+    let release!: () => void;
+    const held = new Promise<void>((resolveHeld) => { release = resolveHeld; });
+    let reached!: () => void;
+    const requestReached = new Promise<void>((resolveReached) => { reached = resolveReached; });
+    const validatedWith: string[] = [];
+    const server = await start(repoPath, (async (_url: string | URL | Request, init?: RequestInit) => {
+      validatedWith.push(new Headers(init?.headers).get("authorization") ?? "");
+      reached();
+      await held;
+      return new Response(JSON.stringify({ data: { is_management_key: false } }), { status: 200 });
+    }) as typeof fetch);
+    const saved = await savedOpenRouterKey(server, "sk-or-v1-key-a-0123456789");
+
+    // Validation of A is in flight with the provider...
+    const validation = post(server, `/api/providers/openrouter/connections/${saved.connection.id}/validate`, {});
+    await requestReached;
+    // ...the operator rotates to B...
+    const rotated = await savedOpenRouterKey(server, "sk-or-v1-key-b-0123456789", saved.connection.id);
+    expect(rotated.connection.id).toBe(saved.connection.id);
+    // ...and then OpenRouter accepts A.
+    release();
+    const result = await json(await validation);
+
+    expect(validatedWith).toEqual(["Bearer sk-or-v1-key-a-0123456789"]);
+    expect(result).toMatchObject({ ok: false, checked: "provider" });
+    expect(result.reason).toMatch(/changed while it was being validated/);
+    expect((await listedConnection(server)).lastValidatedAt).toBeUndefined();
   });
 
   it("keeps multiple connections, selects a default, and clears one by id", async () => {

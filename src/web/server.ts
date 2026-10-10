@@ -11700,18 +11700,24 @@ async function validateProviderConnection(
   if (record.providerId === "openrouter" && record.authMethod === "api_key") {
     checked = "provider";
     let status: number;
+    let body: unknown;
     try {
       const response = await fetchImpl("https://openrouter.ai/api/v1/key", {
         headers: { authorization: `Bearer ${accessToken}` },
         signal: AbortSignal.timeout(10_000),
       });
       status = response.status;
-      await response.body?.cancel().catch(() => undefined);
+      if (status >= 200 && status < 300) {
+        body = await response.json().catch(() => undefined);
+      } else {
+        await response.body?.cancel().catch(() => undefined);
+      }
     } catch (error) {
+      // Never echo the error text: a client error can quote request headers.
       return {
         ok: false,
         checked,
-        reason: `unverified: OpenRouter could not be reached (${error instanceof Error ? error.message : String(error)})`,
+        reason: `unverified: OpenRouter could not be reached (${error instanceof Error && error.name ? error.name : "network error"})`,
       };
     }
     if (status === 401 || status === 403) {
@@ -11720,7 +11726,29 @@ async function validateProviderConnection(
     if (status < 200 || status >= 300) {
       return { ok: false, checked, reason: `unverified: OpenRouter answered ${status}` };
     }
-    await providerStore.recordValidation?.(record.providerId, record.id);
+    const data = typeof body === "object" && body !== null
+      ? (body as { data?: unknown }).data
+      : undefined;
+    if (typeof data !== "object" || data === null) {
+      return { ok: false, checked, reason: "unverified: OpenRouter returned no key details" };
+    }
+    const details = data as { is_management_key?: unknown; is_provisioning_key?: unknown };
+    if (details.is_management_key === true || details.is_provisioning_key === true) {
+      // Management keys answer this endpoint but are blocked from inference.
+      return {
+        ok: false,
+        checked,
+        reason: "a management key, which OpenRouter blocks from inference; use an inference API key from https://openrouter.ai/settings/keys",
+      };
+    }
+    const stamped = await providerStore.recordValidation?.(record.providerId, record.id, accessToken);
+    if (stamped === false) {
+      return {
+        ok: false,
+        checked,
+        reason: "unverified: the credential changed while it was being validated; validate again",
+      };
+    }
   }
   const refreshed = (await providerStore.listConnections?.(record.providerId))?.find(
     (candidate) => candidate.id === record.id,

@@ -1,5 +1,5 @@
 import { withKnowledgeLease } from "../knowledge-repositories/lock.js";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -1059,7 +1059,11 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
     });
   }
 
-  async recordValidation(providerId: ProviderId, connectionId: string): Promise<void> {
+  async recordValidation(
+    providerId: ProviderId,
+    connectionId: string,
+    validatedValue: string,
+  ): Promise<boolean> {
     return await withKnowledgeLease({ path: this.primary.path + ".lock", waitMs: 10_000 }, async () => {
       const file = await this.loadForWrite(this.primary);
       const target = file.connections.find(
@@ -1071,9 +1075,22 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
           `provider ${providerId} has no connection ${connectionId}`,
         );
       }
+      // The provider checked one value; stamp only if that value is still the
+      // stored one. setConnection writes under this same lock, so a rotation
+      // either happened before this read (no stamp) or waits for it. The
+      // comparison stays in memory; no digest of the secret is persisted.
+      const material = await this.primary.secrets.get(target.credentialRef);
+      if (
+        target.state !== "active" ||
+        !material ||
+        !sameSecret(material.accessToken, validatedValue)
+      ) {
+        return false;
+      }
       await this.updateRecord(this.primary, target.id, {
         lastValidatedAt: this.now().toISOString(),
       });
+      return true;
     });
   }
 
@@ -1106,4 +1123,10 @@ function safeAuditMetadata(
     ...(metadata?.rotationHint ? { rotationHint: metadata.rotationHint } : {}),
     ...(metadata?.vaultRef ? { vaultRef: metadata.vaultRef } : {}),
   };
+}
+
+function sameSecret(stored: string, candidate: string): boolean {
+  const left = createHash("sha256").update(stored, "utf8").digest();
+  const right = createHash("sha256").update(candidate, "utf8").digest();
+  return timingSafeEqual(left, right);
 }

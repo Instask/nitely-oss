@@ -41,7 +41,9 @@ path keeps tool use working for non-Anthropic, non-OpenAI models:
      artifacts show only connection metadata.
      A pasted value that does not start with `sk-or-` is refused. **Validate**
      sends the key to OpenRouter (`GET /api/v1/key`). Only an accepted key gets
-     `lastValidatedAt`; saving a key does not set it.
+     `lastValidatedAt`; saving a key does not set it. A management key is
+     refused because OpenRouter blocks it from inference, and a key replaced
+     while its validation was in flight is left unvalidated.
    - **Environment:** export `OPENROUTER_API_KEY` for the Nitely process.
 3. Select the runtime and an OpenRouter model id in the flow.
 

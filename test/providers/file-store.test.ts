@@ -38,9 +38,13 @@ describe("FileProviderConnectionStore", () => {
       const pasted = await store.setConnection({ providerId: "openrouter", authMethod: "api_key", value: "sk-or-v1-pasted" });
       expect(pasted.lastValidatedAt).toBeUndefined();
 
-      await store.recordValidation(pasted.providerId, pasted.id);
+      await expect(store.recordValidation(pasted.providerId, pasted.id, "sk-or-v1-other")).resolves.toBe(false);
+      expect((await store.listConnections("openrouter"))[0]?.lastValidatedAt).toBeUndefined();
+      await expect(store.recordValidation(pasted.providerId, pasted.id, "sk-or-v1-pasted")).resolves.toBe(true);
       const [validated] = await store.listConnections("openrouter");
       expect(validated?.lastValidatedAt).toEqual(expect.any(String));
+      // Only the record is stamped: nothing derived from the secret is written.
+      expect(await readFile(storePath, "utf8")).not.toContain("sk-or-v1-pasted");
 
       // Replacing the value drops the earlier validation.
       const replaced = await store.setConnection({ providerId: "openrouter", authMethod: "api_key", connectionId: pasted.id, value: "sk-or-v1-new" });
