@@ -222,6 +222,14 @@ export function apiTokenActionForRequest(
         target: { runId: resumeRunId },
       };
     }
+    const cancelRunId = decodedMatch(pathname, /^\/api\/runs\/([^/]+)\/cancel$/);
+    if (cancelRunId !== undefined) {
+      return {
+        action: "runs.cancel",
+        capability: "runs:start",
+        target: { runId: cancelRunId },
+      };
+    }
   }
   if (method === "GET" && pathname === "/api/runs") {
     return { action: "runs.list", capability: "runs:read" };

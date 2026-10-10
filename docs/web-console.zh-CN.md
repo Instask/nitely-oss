@@ -287,6 +287,12 @@ payload。API token 需要 `spec:approve` 才能做两个审批，需要 `tasks:
 服务端以 `202` 接受后在后台恢复；后台恢复失败时 Run 仍可再次恢复，
 `GET /api/runs/<run-id>` 的 `resumeFailure` 字段和 Console 的 Run 头部会显示原因。
 
+不再需要的 Run 用 `nitely run cancel <run-id> --reason <text> --server <url>` 或
+Console 的 **Cancel run** 取消（`POST /api/runs/<run-id>/cancel`，API token 需要
+`runs:start`）。非终态的 Run 都可以取消：服务端正在执行的进程会收到中止信号，Run
+记录带操作者和原因的 `run.cancelled` 并进入终态，所属 task 离开 `running`，可以再次
+`task start`。同一 Run 正在恢复时取消会返回 `409`。
+
 `task start` 不会发送 `override=true`，因此存在 run eligibility blocker 的 Task
 会被拒绝而不是强行启动；接受 blocker 仍然是 Web Console 上的决定。本地的
 `approvals`、`approve`、`deny`、`questions`、`answer` 与这几个命令无关，它们仍然

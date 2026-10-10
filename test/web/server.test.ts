@@ -12764,6 +12764,42 @@ describe("Web usage-limit recovery", () => {
     expect(((await json(await fetch(`${server.url}/api/runs/blocked`))) as { run: Record<string, unknown> }).run.resumeFailure).toBeUndefined();
   });
 
+  it("cancels a blocked run, frees its task, and refuses a second cancel", async () => {
+    const repo = await createRepo();
+    await createTask(repo, { title: "stuck", spec: "spec", techDesign: "td" }, { createId: () => "task-stuck" });
+    await updateTaskRunState(repo, "task-stuck", { status: "running", latestRunId: "run-stuck" });
+    const events = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      events.append({ runId: "run-stuck", type: "run.created", payload: { ownerId: "local", taskId: "task-stuck", flowName: "test", flowPath: "flows/implement-spec-bootstrap.json", inputs: {} } });
+      events.append({ runId: "run-stuck", type: "run.blocked", payload: { reason: "agent_auth", stageId: "write-tests", message: "401" } });
+    } finally { events.close(); }
+    const server = await startTestServer(repo, undefined, undefined, {
+      resumeRun: async () => { throw new Error("a cancelled run must not resume"); },
+    });
+    expect(await json(await fetch(`${server.url}/api/runs/run-stuck`))).toMatchObject({ run: { canResume: true, canCancel: true } });
+
+    const cancelled = await fetch(`${server.url}/api/runs/run-stuck/cancel`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason: "abandoned after key rotation" }),
+    });
+    expect(cancelled.status).toBe(200);
+    expect(await json(cancelled)).toEqual({ runId: "run-stuck", status: "cancelled" });
+
+    expect(await json(await fetch(`${server.url}/api/runs/run-stuck`))).toMatchObject({
+      run: { status: "cancelled", canResume: false, canCancel: false },
+    });
+    const store = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      const recorded = store.list("run-stuck").find((event) => event.type === "run.cancelled");
+      expect(recorded?.payload).toMatchObject({ actor: "local", reason: "abandoned after key rotation", source: "web", cleanup: { result: "no-active-process" } });
+    } finally { store.close(); }
+    expect((await getTask(repo, "task-stuck")).status).not.toBe("running");
+
+    expect((await fetch(`${server.url}/api/runs/run-stuck/cancel`, { method: "POST" })).status).toBe(400);
+    expect((await fetch(`${server.url}/api/runs/run-stuck/resume`, { method: "POST" })).status).toBe(400);
+  });
+
   it("lets an API token with runs:start resume its owner's blocked run", async () => {
     const repo = await createRepo();
     const owner = await createUser(repo, { email: "token-resume@example.test", password: "token-resume-password", role: "user" });

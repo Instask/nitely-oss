@@ -226,6 +226,20 @@ If that background resume fails, the run stays resumable and
 `GET /api/runs/<run-id>` reports the reason as `resumeFailure`, which the
 Console also shows under the run header.
 
+Cancel a run you will not resume:
+
+```bash
+nitely run cancel <run-id> --reason "stuck on a rotated key" --server http://192.0.2.10:4173
+```
+
+`run cancel` POSTs to `/api/runs/<run-id>/cancel` (the Console's **Cancel run**
+button). Any run that is not `completed`, `failed`, or `cancelled` can be
+cancelled. A process the server is running for it gets an abort signal. The run
+records `run.cancelled` with the actor and reason and becomes terminal. The task
+it belongs to leaves `running`, so `task start` works again. An API token needs
+`runs:start`. A cancel is refused with `409` while a resume of the same run is
+starting.
+
 Trigger one scheduler cycle on the remote Nitely server:
 
 ```bash

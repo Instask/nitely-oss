@@ -172,6 +172,7 @@ import {
   parseRemoteRunStatusOption,
   postRemoteTaskAction,
   printRemoteDraftTaskResult,
+  printRemoteRunCancel,
   printRemoteRunList,
   printRemoteRunResume,
   printRemoteRunStart,
@@ -4255,6 +4256,36 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
         label: "remote run resume",
         collection: "runs",
         print: printRemoteRunResume,
+      });
+
+    },
+  },
+  {
+    name: "run",
+    matches: (argv) => argv[1] === "cancel",
+    usage: [
+      "  run cancel <run-id> [--reason <text>] [--server <url>] [--json]",
+    ],
+    run: async ({ argv, io, dependencies }) => {
+      const usage = "Usage: nitely run cancel <run-id> [--reason <text>] [--server <url>] [--json]";
+      const runId = argv[2];
+      if (!runId || runId.startsWith("--")) {
+        io.stderr(usage);
+        return 1;
+      }
+      return await runRemoteTaskActionCommand({
+        argv,
+        startIndex: 3,
+        taskId: runId,
+        usage,
+        env: dependencies.env ?? process.env,
+        fetchImpl: dependencies.fetch ?? fetch,
+        io,
+        route: "cancel",
+        label: "remote run cancel",
+        collection: "runs",
+        bodyOptions: { "--reason": "reason" },
+        print: printRemoteRunCancel,
       });
 
     },

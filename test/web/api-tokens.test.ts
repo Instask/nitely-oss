@@ -215,6 +215,11 @@ describe("scoped API tokens", () => {
       target: { runId: "run-1" },
     });
     expect(apiTokenActionForRequest("GET", "/api/runs/run-1/resume")).toBeNull();
+    expect(apiTokenActionForRequest("POST", "/api/runs/run-1/cancel")).toEqual({
+      action: "runs.cancel",
+      capability: "runs:start",
+      target: { runId: "run-1" },
+    });
   });
 
   it("maps Flow catalog reads to tasks:read and mutations to flows:manage", () => {
