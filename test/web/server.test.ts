@@ -12775,6 +12775,147 @@ describe("Web usage-limit recovery", () => {
     expect(((await json(await fetch(`${server.url}/api/runs/blocked`))) as { run: Record<string, unknown> }).run.resumeFailure).toBeUndefined();
   });
 
+  it("refuses to cancel a completed run without aborting the process still finishing it", async () => {
+    const repoPath = await createRepo();
+    const task = await createTask(repoPath, { title: "Finishing", spec: "Spec body", techDesign: "Design body" });
+    let signal: AbortSignal | undefined;
+    let release!: () => void;
+    const held = new Promise<void>((resolveHeld) => { release = resolveHeld; });
+    let recorded!: () => void;
+    const completedRecorded = new Promise<void>((resolveRecorded) => { recorded = resolveRecorded; });
+    const server = await startTestServer(repoPath, async (_input, dependencies) => {
+      const runId = admittedRunId(dependencies, "run-finishing");
+      signal = dependencies?.cancellation?.signal;
+      const store = new EventStore(join(repoPath, ".nitely", "events.db"));
+      try {
+        store.append({ runId, type: "run.created", payload: { workItemId: task.id, flowName: "test" } });
+        store.append({ runId, type: "run.completed", payload: {} });
+      } finally { store.close(); }
+      recorded();
+      // Still registered as active while it wraps up.
+      await held;
+      return { runId, branchName: "test", worktreePath: repoPath };
+    });
+    const started = (await json(await fetch(`${server.url}/api/tasks/${encodeURIComponent(task.id)}/runs`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+    }))) as { run: { runId: string } };
+    await completedRecorded;
+
+    const refused = await fetch(`${server.url}/api/runs/${started.run.runId}/cancel`, { method: "POST" });
+    expect(refused.status).toBe(400);
+    expect(((await json(refused)) as { error: { message: string } }).error.message).toBe("run is already completed");
+    expect(signal?.aborted).toBe(false);
+    const store = new EventStore(join(repoPath, ".nitely", "events.db"));
+    try {
+      expect(store.list(started.run.runId).some((event) => event.type === "run.cancelled")).toBe(false);
+    } finally { store.close(); }
+    release();
+  });
+
+  it("records exactly one cancellation when cancels race", async () => {
+    const repo = await createRepo();
+    await mkdir(join(repo, ".nitely"), { recursive: true });
+    const events = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      events.append({ runId: "run-race", type: "run.created", payload: { ownerId: "local", flowName: "test", inputs: {} } });
+      events.append({ runId: "run-race", type: "run.blocked", payload: { reason: "agent_auth", stageId: "implement", message: "401" } });
+    } finally { events.close(); }
+    const server = await startTestServer(repo);
+    const cancel = () => fetch(`${server.url}/api/runs/run-race/cancel`, { method: "POST" });
+    const statuses = (await Promise.all([cancel(), cancel(), cancel()])).map((response) => response.status).sort();
+    expect(statuses).toEqual([200, 400, 400]);
+    const store = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      expect(store.list("run-race").filter((event) => event.type === "run.cancelled")).toHaveLength(1);
+    } finally { store.close(); }
+  });
+
+  it("cancels a run while a Web resume is executing it and aborts the resumed execution", async () => {
+    const repo = await createRepo();
+    await mkdir(join(repo, ".nitely"), { recursive: true });
+    const events = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      events.append({ runId: "run-resumed", type: "run.created", payload: { ownerId: "local", flowName: "test", flowPath: "flows/implement-spec-bootstrap.json", inputs: {} } });
+      events.append({ runId: "run-resumed", type: "run.blocked", payload: { reason: "agent_auth", stageId: "implement", message: "401" } });
+    } finally { events.close(); }
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let signal: AbortSignal | undefined;
+    let entered!: () => void;
+    const resumeEntered = new Promise<void>((resolveEntered) => { entered = resolveEntered; });
+    let settled!: () => void;
+    const resumeSettled = new Promise<void>((resolveSettled) => { settled = resolveSettled; });
+    const server = await startTestServer(repo, undefined, undefined, {
+      resumeRun: async (_input, dependencies) => {
+        signal = dependencies?.cancellation?.signal;
+        entered();
+        try {
+          await new Promise<void>((_resolve, reject) => {
+            signal?.addEventListener("abort", () => reject(new Error("run cancelled")), { once: true });
+          });
+          throw new Error("unreachable");
+        } finally {
+          setTimeout(settled, 0);
+        }
+      },
+    });
+    expect((await fetch(`${server.url}/api/runs/run-resumed/resume`, { method: "POST" })).status).toBe(202);
+    await resumeEntered;
+    expect(signal?.aborted).toBe(false);
+
+    // The resume still holds its claim; cancelling must not wait for it.
+    const cancelled = await fetch(`${server.url}/api/runs/run-resumed/cancel`, { method: "POST" });
+    expect(cancelled.status).toBe(200);
+    expect(signal?.aborted).toBe(true);
+    await resumeSettled;
+    await new Promise((resolveTick) => setTimeout(resolveTick, 50));
+
+    const detail = (await json(await fetch(`${server.url}/api/runs/run-resumed`))) as { run: Record<string, unknown> };
+    expect(detail.run).toMatchObject({ status: "cancelled", canResume: false, canCancel: false });
+    // A resume stopped by the cancellation is not reported as a resume failure.
+    expect(detail.run.resumeFailure).toBeUndefined();
+    const store = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      const cancel = store.list("run-resumed").find((event) => event.type === "run.cancelled");
+      expect(cancel?.payload).toMatchObject({ cleanup: { result: "abort-signal-dispatched" } });
+    } finally { store.close(); }
+  });
+
+  it("cancels a blocked run, frees its task, and refuses a second cancel", async () => {
+    const repo = await createRepo();
+    await createTask(repo, { title: "stuck", spec: "spec", techDesign: "td" }, { createId: () => "task-stuck" });
+    await updateTaskRunState(repo, "task-stuck", { status: "running", latestRunId: "run-stuck" });
+    const events = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      events.append({ runId: "run-stuck", type: "run.created", payload: { ownerId: "local", taskId: "task-stuck", flowName: "test", flowPath: "flows/implement-spec-bootstrap.json", inputs: {} } });
+      events.append({ runId: "run-stuck", type: "run.blocked", payload: { reason: "agent_auth", stageId: "write-tests", message: "401" } });
+    } finally { events.close(); }
+    const server = await startTestServer(repo, undefined, undefined, {
+      resumeRun: async () => { throw new Error("a cancelled run must not resume"); },
+    });
+    expect(await json(await fetch(`${server.url}/api/runs/run-stuck`))).toMatchObject({ run: { canResume: true, canCancel: true } });
+
+    const cancelled = await fetch(`${server.url}/api/runs/run-stuck/cancel`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason: "abandoned after key rotation" }),
+    });
+    expect(cancelled.status).toBe(200);
+    expect(await json(cancelled)).toEqual({ runId: "run-stuck", status: "cancelled" });
+
+    expect(await json(await fetch(`${server.url}/api/runs/run-stuck`))).toMatchObject({
+      run: { status: "cancelled", canResume: false, canCancel: false },
+    });
+    const store = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      const recorded = store.list("run-stuck").find((event) => event.type === "run.cancelled");
+      expect(recorded?.payload).toMatchObject({ actor: "local", reason: "abandoned after key rotation", source: "web", cleanup: { result: "no-active-process" } });
+    } finally { store.close(); }
+    expect((await getTask(repo, "task-stuck")).status).not.toBe("running");
+
+    expect((await fetch(`${server.url}/api/runs/run-stuck/cancel`, { method: "POST" })).status).toBe(400);
+    expect((await fetch(`${server.url}/api/runs/run-stuck/resume`, { method: "POST" })).status).toBe(400);
+  });
+
   it("lets an API token with runs:start resume its owner's blocked run", async () => {
     const repo = await createRepo();
     const owner = await createUser(repo, { email: "token-resume@example.test", password: "token-resume-password", role: "user" });

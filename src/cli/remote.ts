@@ -276,6 +276,7 @@ export async function postRemoteTaskAction(
   route: string,
   label: string,
   collection: RemoteActionCollection = "tasks",
+  body: Record<string, unknown> = {},
 ): Promise<unknown> {
   const serverUrl = normalizeRemoteServerUrl(input.serverUrl);
   const response = await fetchImpl(
@@ -285,7 +286,7 @@ export async function postRemoteTaskAction(
       headers: remoteRequestHeaders(input.apiToken, {
         "content-type": "application/json",
       }),
-      body: JSON.stringify(input.overrides ? { overrides: input.overrides } : {}),
+      body: JSON.stringify({ ...body, ...(input.overrides ? { overrides: input.overrides } : {}) }),
     },
   );
   if (!response.ok) {
@@ -334,6 +335,13 @@ export function printRemoteRunResume(io: CliIo, payload: unknown, runId: string)
   const id = readJsonObject(payload)?.runId;
   io.stdout(`RUN ${typeof id === "string" && id ? id : runId} resuming`);
   io.stdout(`Watch command: nitely run watch ${typeof id === "string" && id ? id : runId}`);
+}
+
+export function printRemoteRunCancel(io: CliIo, payload: unknown, runId: string): void {
+  const record = readJsonObject(payload);
+  const id = typeof record?.runId === "string" && record.runId ? record.runId : runId;
+  const status = typeof record?.status === "string" && record.status ? record.status : "cancelled";
+  io.stdout(`RUN ${id} ${status}`);
 }
 
 export type RemoteIntakeSourceType =
@@ -505,6 +513,8 @@ export interface RemoteTaskActionCommandInput {
   print: (io: CliIo, payload: unknown, taskId: string) => void;
   /** API collection the id belongs to. Defaults to `tasks`. */
   collection?: RemoteActionCollection;
+  /** Flags that take a value and become request body fields, e.g. `--reason` → `reason`. */
+  bodyOptions?: Record<string, string>;
 }
 
 export async function runRemoteTaskActionCommand(
@@ -515,9 +525,17 @@ export async function runRemoteTaskActionCommand(
   let asJson = false;
   const overrideOptions: Record<string, string> = {};
   let resolvedApiToken: string | undefined;
+  const body: Record<string, unknown> = {};
   try {
     for (let index = input.startIndex; index < argv.length; index += 1) {
       const arg = argv[index];
+      const bodyKey = arg ? input.bodyOptions?.[arg] : undefined;
+      if (arg && bodyKey) {
+        const value = argv[++index] ?? "";
+        if (!value) throw new Error(`Missing value for ${arg}`);
+        body[bodyKey] = value;
+        continue;
+      }
       if (input.route === "runs" && ["--runtime", "--model", "--effort", "--questions"].includes(arg ?? "")) {
         const value = argv[++index] ?? "";
         if (!value || value.startsWith("--")) throw new Error(`Missing value for ${arg}`);
@@ -554,6 +572,7 @@ export async function runRemoteTaskActionCommand(
       input.route,
       input.label,
       input.collection,
+      body,
     );
     input.print(asJson ? { stdout: () => {}, stderr: () => {} } : io, payload, input.taskId);
     if (asJson) {

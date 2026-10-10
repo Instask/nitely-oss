@@ -727,8 +727,8 @@ describe("console run resume", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   async function resumeComponent(runId: string | null) {
-    const c = await flowComponent(["flowErrorMessage", "resumeRun"]);
-    c.state = { selectedRunId: runId, runResumeError: "" };
+    const c = await flowComponent(["flowErrorMessage", "networkErrorMessage", "resumeRun"]);
+    c.state = { selectedRunId: runId, runActionError: "" };
     c.fetchRunDetail = vi.fn(async () => {});
     return c;
   }
@@ -740,7 +740,7 @@ describe("console run resume", () => {
     await c.resumeRun();
     expect(fetchMock).toHaveBeenCalledWith("/api/runs/run-1/resume", { method: "POST", credentials: "same-origin" });
     expect(c.fetchRunDetail).toHaveBeenCalledWith("run-1", { force: true });
-    expect(c.state.runResumeError).toBe("");
+    expect(c.state.runActionError).toBe("");
   });
 
   it("shows why the server refused the resume instead of doing nothing", async () => {
@@ -751,7 +751,49 @@ describe("console run resume", () => {
       json: async () => ({ error: { message: "run is already being resumed" } }),
     })));
     await c.resumeRun();
-    expect(c.state.runResumeError).toBe("run is already being resumed");
+    expect(c.state.runActionError).toBe("run is already being resumed");
     expect(c.fetchRunDetail).not.toHaveBeenCalled();
+  });
+
+  it("cancels the displayed run with the operator's reason, or not at all", async () => {
+    const c = await flowComponent(["flowErrorMessage", "networkErrorMessage", "cancelRun"]);
+    c.state = { selectedRunId: "run-1", runActionError: "" };
+    c.fetchRunDetail = vi.fn(async () => {});
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ runId: "run-1", status: "cancelled" }) }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    vi.stubGlobal("window", { prompt: () => null });
+    await c.cancelRun();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    vi.stubGlobal("window", { prompt: () => "  stuck on a bad key  " });
+    await c.cancelRun();
+    expect(fetchMock).toHaveBeenCalledWith("/api/runs/run-1/cancel", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason: "stuck on a bad key" }),
+    });
+    expect(c.fetchRunDetail).toHaveBeenCalledWith("run-1", { force: true });
+  });
+
+  it("reports a resume or cancel that never reached the server", async () => {
+    const resume = await flowComponent(["flowErrorMessage", "networkErrorMessage", "resumeRun"]);
+    resume.state = { selectedRunId: "run-1", runActionError: "" };
+    resume.fetchRunDetail = vi.fn(async () => {});
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("Failed to fetch"); }));
+    await expect(resume.resumeRun()).resolves.toBeUndefined();
+    expect(resume.state.runActionError).toBe(
+      "Resume request did not reach the server: Failed to fetch. Check the connection and try again.",
+    );
+    expect(resume.fetchRunDetail).not.toHaveBeenCalled();
+
+    const cancel = await flowComponent(["flowErrorMessage", "networkErrorMessage", "cancelRun"]);
+    cancel.state = { selectedRunId: "run-1", runActionError: "" };
+    cancel.fetchRunDetail = vi.fn(async () => {});
+    vi.stubGlobal("window", { prompt: () => "stop" });
+    await expect(cancel.cancelRun()).resolves.toBeUndefined();
+    expect(cancel.state.runActionError).toMatch(/^Cancel request did not reach the server/);
+    expect(cancel.fetchRunDetail).not.toHaveBeenCalled();
   });
 });

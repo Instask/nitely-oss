@@ -14470,36 +14470,42 @@ async function runFlowOnce(
     "utf8",
   );
 
-  if (projectRun(eventStore.list(runId)).status === "cancelled") {
+  // Check and append in one write transaction, so a cancellation
+  // recorded concurrently is never followed by run.completed.
+  const completedRecorded = eventStore.transaction(() => {
+    if (projectRun(eventStore.list(runId)).status === "cancelled") return false;
+    eventStore.append({
+      runId,
+      type: "run.completed",
+      payload: redactRuntimeUnknown({
+        changeRequestUrl,
+        changeRequest,
+        trigger: input.trigger,
+        priorRunId: input.priorRunId,
+        changeRequestTarget: reworkTarget
+          ? {
+              provider: reworkTarget.provider,
+              target: reworkTarget.target,
+              resolved: reworkTarget.resolved,
+              previousHeadSha: reworkTarget.previousHeadSha,
+              updatedHeadSha: reworkTarget.updatedHeadSha,
+            }
+          : undefined,
+        sync: syncMetadata,
+        taskScope: taskScopeSelection
+          ? taskScopeEventPayload(taskScopeSelection)
+          : undefined,
+        taskIssues,
+      }, runtimeContext),
+    });
+    return true;
+  });
+  if (!completedRecorded) {
     eventStore.close();
     throw new RunCancelledError({
       request: cancellationRequestFromSignal(dependencies.cancellation),
     });
   }
-  eventStore.append({
-    runId,
-    type: "run.completed",
-    payload: redactRuntimeUnknown({
-      changeRequestUrl,
-      changeRequest,
-      trigger: input.trigger,
-      priorRunId: input.priorRunId,
-      changeRequestTarget: reworkTarget
-        ? {
-            provider: reworkTarget.provider,
-            target: reworkTarget.target,
-            resolved: reworkTarget.resolved,
-            previousHeadSha: reworkTarget.previousHeadSha,
-            updatedHeadSha: reworkTarget.updatedHeadSha,
-          }
-        : undefined,
-      sync: syncMetadata,
-      taskScope: taskScopeSelection
-        ? taskScopeEventPayload(taskScopeSelection)
-        : undefined,
-      taskIssues,
-    }, runtimeContext),
-  });
   eventStore.close();
   return {
     runId,
@@ -14778,6 +14784,11 @@ async function resumeRunOnce(
     }
 
     let projection = projectRun(events, { openAttemptStatus: "interrupted" });
+    if (projection.status === "cancelled") {
+      // A cancelled run keeps its blocked stage in the projection; without
+      // this check a CLI, scheduler, or Web resume would run it again.
+      throw new Error(`run is cancelled: ${input.runId}`);
+    }
     const runCreatedEvents = events.filter(
       (event) => event.type === "run.created",
     );
@@ -15061,20 +15072,29 @@ async function resumeRunOnce(
         throw new Error(`run is not resumable: ${input.runId}`);
       }
       budgetResumeStageId = decision.stageId;
-      eventStore.append({
-        runId: input.runId,
-        type: "run.resumed",
-        payload: redactRuntimeUnknown(
-          {
-            reason: "budget_exceeded",
-            selectedStageId: decision.stageId,
-            consumed: decision.consumed,
-            cap: decision.cap,
-            budgets: currentBudgets,
-          },
-          runtimeContext,
-        ),
+      // run.resumed clears the terminal status, so it must not land after a
+      // cancellation recorded since this resume read the run.
+      const resumedRecorded = eventStore.transaction(() => {
+        if (projectRun(eventStore.list(input.runId)).status === "cancelled") return false;
+        eventStore.append({
+          runId: input.runId,
+          type: "run.resumed",
+          payload: redactRuntimeUnknown(
+            {
+              reason: "budget_exceeded",
+              selectedStageId: decision.stageId,
+              consumed: decision.consumed,
+              cap: decision.cap,
+              budgets: currentBudgets,
+            },
+            runtimeContext,
+          ),
+        });
+        return true;
       });
+      if (!resumedRecorded) {
+        throw new Error(`run is cancelled: ${input.runId}`);
+      }
       projection = projectRun(eventStore.list(input.runId), {
         openAttemptStatus: "interrupted",
       });
@@ -16814,34 +16834,40 @@ async function resumeRunOnce(
       ),
       "utf8",
     );
-    if (projectRun(eventStore.list(input.runId)).status === "cancelled") {
+    // Check and append in one write transaction, so a cancellation
+    // recorded concurrently is never followed by run.completed.
+    const completedRecorded = eventStore.transaction(() => {
+      if (projectRun(eventStore.list(input.runId)).status === "cancelled") return false;
+      eventStore.append({
+        runId: input.runId,
+        type: "run.completed",
+        payload: redactRuntimeUnknown({
+          changeRequestUrl,
+          changeRequest,
+          trigger: projection.trigger,
+          priorRunId: projection.priorRunId,
+          changeRequestTarget: reworkTarget
+            ? {
+                provider: reworkTarget.provider,
+                target: reworkTarget.target,
+                resolved: reworkTarget.resolved,
+                previousHeadSha: reworkTarget.previousHeadSha,
+                updatedHeadSha: reworkTarget.updatedHeadSha,
+              }
+            : undefined,
+          sync: syncMetadata,
+          taskScope: resumedTaskScope,
+          taskIssues,
+        }, runtimeContext),
+      });
+      return true;
+    });
+    if (!completedRecorded) {
       eventStore.close();
       throw new RunCancelledError({
         request: cancellationRequestFromSignal(dependencies.cancellation),
       });
     }
-    eventStore.append({
-      runId: input.runId,
-      type: "run.completed",
-      payload: redactRuntimeUnknown({
-        changeRequestUrl,
-        changeRequest,
-        trigger: projection.trigger,
-        priorRunId: projection.priorRunId,
-        changeRequestTarget: reworkTarget
-          ? {
-              provider: reworkTarget.provider,
-              target: reworkTarget.target,
-              resolved: reworkTarget.resolved,
-              previousHeadSha: reworkTarget.previousHeadSha,
-              updatedHeadSha: reworkTarget.updatedHeadSha,
-            }
-          : undefined,
-        sync: syncMetadata,
-        taskScope: resumedTaskScope,
-        taskIssues,
-      }, runtimeContext),
-    });
     return {
       runId: input.runId,
       branchName,

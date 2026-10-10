@@ -2144,6 +2144,11 @@
                 <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5V5h-2.5"/></svg>Resume run
               </button>
             </sc-if>
+            <sc-if value="{{ selectedRun.canCancel }}" hint-placeholder-val="{{ false }}">
+              <button onClick="{{ cancelRun }}" style="display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:9px 14px;font:inherit;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;" style-hover="border-color:#b91c1c;color:#b91c1c;">
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>Cancel run
+              </button>
+            </sc-if>
           </div>
         </div>
 
@@ -3013,7 +3018,7 @@ class Component extends DCLogic {
       view: "tasks",
       selectedTaskId: null,
       selectedRunId: null,
-      runResumeError: "",
+      runActionError: "",
       showNewTask: false,
       showNewRepo: false,
       openStages: {},
@@ -3552,7 +3557,7 @@ class Component extends DCLogic {
       patch.selectedRunId = null;
       this.fetchTaskDetail(route.taskId);
     } else if (route.view === "run-detail") {
-      if (route.runId !== this.state.selectedRunId) patch.runResumeError = "";
+      if (route.runId !== this.state.selectedRunId) patch.runActionError = "";
       patch.selectedRunId = route.runId;
       this.fetchRunDetail(route.runId);
     } else if (route.view === "flow-detail") {
@@ -3638,6 +3643,11 @@ class Component extends DCLogic {
   flowRepoBody(body) {
     const repoId = this.state.flowRepoId || "";
     return repoId ? Object.assign({}, body, { repoId }) : body;
+  }
+
+  networkErrorMessage(action, error) {
+    const detail = error && typeof error.message === "string" && error.message ? ": " + error.message : "";
+    return action + " request did not reach the server" + detail + ". Check the connection and try again.";
   }
 
   async flowErrorMessage(res, fallback) {
@@ -4864,17 +4874,54 @@ class Component extends DCLogic {
   resumeRun = async () => {
     const runId = this.state.selectedRunId;
     if (!runId) return;
-    this.setState({ runResumeError: "" });
-    const res = await fetch("/api/runs/" + encodeURIComponent(runId) + "/resume", {
-      method: "POST",
-      credentials: "same-origin",
-    });
+    this.setState({ runActionError: "" });
+    let res;
+    try {
+      res = await fetch("/api/runs/" + encodeURIComponent(runId) + "/resume", {
+        method: "POST",
+        credentials: "same-origin",
+      });
+    } catch (error) {
+      this.setState({ runActionError: this.networkErrorMessage("Resume", error) });
+      return;
+    }
     if (res.status === 401) {
       this.setState({ authRequired: true, user: null, sessionLoaded: true, loginError: "" });
       return;
     }
     if (!res.ok) {
-      this.setState({ runResumeError: await this.flowErrorMessage(res, "Resume failed") });
+      this.setState({ runActionError: await this.flowErrorMessage(res, "Resume failed") });
+      return;
+    }
+    await this.fetchRunDetail(runId, { force: true });
+  };
+
+  cancelRun = async () => {
+    const runId = this.state.selectedRunId;
+    if (!runId) return;
+    const reason = typeof window !== "undefined" && typeof window.prompt === "function"
+      ? window.prompt("Cancel this run? It cannot be resumed afterwards. Reason:", "cancelled by operator")
+      : "cancelled by operator";
+    if (reason === null) return;
+    this.setState({ runActionError: "" });
+    let res;
+    try {
+      res = await fetch("/api/runs/" + encodeURIComponent(runId) + "/cancel", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reason: String(reason).trim() || "cancelled by operator" }),
+      });
+    } catch (error) {
+      this.setState({ runActionError: this.networkErrorMessage("Cancel", error) });
+      return;
+    }
+    if (res.status === 401) {
+      this.setState({ authRequired: true, user: null, sessionLoaded: true, loginError: "" });
+      return;
+    }
+    if (!res.ok) {
+      this.setState({ runActionError: await this.flowErrorMessage(res, "Cancel failed") });
       return;
     }
     await this.fetchRunDetail(runId, { force: true });
@@ -7419,12 +7466,13 @@ class Component extends DCLogic {
         selectedRun = Object.assign({}, rd, {
           badge: this.badge(rd.status),
           canResume: rd.canResume === true,
+          canCancel: rd.canCancel === true,
           hasResumeFailure: !!(rd.resumeFailure && rd.resumeFailure.message),
           resumeFailureLabel: rd.resumeFailure && rd.resumeFailure.message
             ? "Resume failed" + (rd.resumeFailure.failedAt ? " at " + rd.resumeFailure.failedAt : "") + ": " + rd.resumeFailure.message
             : "",
-          hasResumeError: !!this.state.runResumeError,
-          resumeError: this.state.runResumeError,
+          hasResumeError: !!this.state.runActionError,
+          resumeError: this.state.runActionError,
           stages: stages.map((s, i) => this.decorateStage(rd, s, i, stages.length)),
           stagesLabel: done.length + " of " + stages.length + " stages",
           progressLabel: done.length + " / " + stages.length + " complete",
@@ -7926,7 +7974,7 @@ class Component extends DCLogic {
       resolveContextKnowledgeProposal: this.resolveContextKnowledgeProposal,
       editContextKnowledgeProposal: this.editContextKnowledgeProposal,
       startRun: this.startRun, planWork: this.planWork, approveSpec: this.approveSpec,
-      resumeRun: this.resumeRun, startRunOverride: this.startRunOverride,
+      resumeRun: this.resumeRun, cancelRun: this.cancelRun, startRunOverride: this.startRunOverride,
       refreshPreflight: this.refreshPreflight, refreshSourcePlanning: this.refreshSourcePlanning,
       loadMoreRuns: this.loadMoreRuns,
       answerOperatorQuestion: this.answerOperatorQuestion, submitOperatorQuestionText: this.submitOperatorQuestionText,

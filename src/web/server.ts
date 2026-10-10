@@ -4733,6 +4733,104 @@ function registerActiveRunCancellation(input: {
   };
 }
 
+/**
+ * Cancel a non-terminal run: signal its active process, if this server owns
+ * one, record `run.cancelled` with the actor and reason, and settle the work
+ * item it belongs to so the task leaves `running` and can start again.
+ */
+async function cancelWebRun(input: {
+  repository: WebRepository;
+  runId: string;
+  actor: string;
+  reason: string;
+  source: string;
+  /** How errors name the run, e.g. "linked run" for notification actions. */
+  subject?: string;
+  notificationId?: string;
+  sourceKey?: string;
+  taskId?: string;
+}): Promise<void> {
+  const subject = input.subject ?? "run";
+  // Look at the process this server runs for the run without signalling it:
+  // a cancel that is refused below must not abort anything.
+  const active = activeRunCancellations.get(
+    activeRunCancellationKey(input.repository.path, input.runId),
+  );
+  const requestedAt = new Date().toISOString();
+  const store = new EventStore(eventStorePath(input.repository.path));
+  try {
+    // BEGIN IMMEDIATE holds SQLite's write lock, so the status read and the
+    // append are atomic against every other event writer: a run that
+    // completes, fails, blocks, or is cancelled concurrently is either seen
+    // here as terminal or writes its event after this one.
+    store.transaction(() => {
+      const events = store.list(input.runId);
+      if (events.length === 0) {
+        throw new WebInputError(`${subject} was not found`);
+      }
+      const status = projectRun(events, {
+        openAttemptStatus: "interrupted",
+      }).status;
+      if (
+        status === "completed" ||
+        status === "failed" ||
+        status === "cancelled"
+      ) {
+        throw new WebInputError(`${subject} is already ${status}`);
+      }
+      store.append({
+        runId: input.runId,
+        ...(active?.stage?.stageId ? { stageId: active.stage.stageId } : {}),
+        ...(active?.stage?.attempt !== undefined ? { attempt: active.stage.attempt } : {}),
+        type: "run.cancelled",
+        payload: {
+          actor: input.actor,
+          ...(input.notificationId ? { notificationId: input.notificationId } : {}),
+          ...(input.sourceKey ? { sourceKey: input.sourceKey } : {}),
+          reason: input.reason,
+          requestedAt,
+          cancelledAt: new Date().toISOString(),
+          source: input.source,
+          affectedStage: active?.stage?.stageId,
+          affectedAttempt: active?.stage?.attempt,
+          cleanup: active
+            ? {
+                result: "abort-signal-dispatched",
+                activeSince: active.startedAt,
+                terminateWithinMs: 10_000,
+              }
+            : {
+                result: "no-active-process",
+              },
+        },
+      });
+    });
+  } finally {
+    store.close();
+  }
+  // Only a recorded cancellation signals the process. The runner then stops
+  // at its next cancellation check and, seeing run.cancelled, writes no
+  // terminal event of its own.
+  requestActiveRunCancellation({
+    repoPath: input.repository.path,
+    runId: input.runId,
+    actor: input.actor,
+    reason: input.reason,
+    source: input.source,
+    ...(input.notificationId ? { notificationId: input.notificationId } : {}),
+    ...(input.sourceKey ? { sourceKey: input.sourceKey } : {}),
+  });
+  const taskId = input.taskId ??
+    (await listUnifiedWorkItems(input.repository.path)).find(
+      (item) => item.latestRunId === input.runId,
+    )?.id;
+  if (taskId) {
+    await settleOrUpdateUnifiedRun(input.repository.path, taskId, input.runId, {
+      status: "failed",
+    });
+  }
+}
+
 function requestActiveRunCancellation(input: {
   repoPath: string;
   runId: string;
@@ -5408,74 +5506,17 @@ async function applyNotificationAction(input: {
     if (!input.notification.runId || !normalized.reason) {
       throw new WebInputError("cancel-run requires a linked run and reason");
     }
-    const activeCancellation = requestActiveRunCancellation({
-      repoPath: input.repository.path,
+    await cancelWebRun({
+      repository: input.repository,
       runId: input.notification.runId,
       actor: input.user.id,
       reason: normalized.reason,
       source: "web-notification",
+      subject: "linked run",
       notificationId: input.notification.id,
       sourceKey: input.notification.sourceKey,
+      ...(input.notification.taskId ? { taskId: input.notification.taskId } : {}),
     });
-    const store = new EventStore(eventStorePath(input.repository.path));
-    try {
-      const events = store.list(input.notification.runId);
-      if (events.length === 0) {
-        throw new WebInputError("linked run was not found");
-      }
-      const status = projectRun(events, {
-        openAttemptStatus: "interrupted",
-      }).status;
-      if (
-        status === "completed" ||
-        status === "failed" ||
-        status === "cancelled"
-      ) {
-        throw new WebInputError(`linked run is already ${status}`);
-      }
-      store.append({
-        runId: input.notification.runId,
-        ...(activeCancellation?.stage?.stageId
-          ? { stageId: activeCancellation.stage.stageId }
-          : {}),
-        ...(activeCancellation?.stage?.attempt !== undefined
-          ? { attempt: activeCancellation.stage.attempt }
-          : {}),
-        type: "run.cancelled",
-        payload: {
-          actor: input.user.id,
-          notificationId: input.notification.id,
-          sourceKey: input.notification.sourceKey,
-          reason: normalized.reason,
-          requestedAt: activeCancellation?.request?.requestedAt ?? new Date().toISOString(),
-          cancelledAt: new Date().toISOString(),
-          source: "web-notification",
-          affectedStage: activeCancellation?.stage?.stageId,
-          affectedAttempt: activeCancellation?.stage?.attempt,
-          cleanup: activeCancellation
-            ? {
-                result: "abort-signal-dispatched",
-                activeSince: activeCancellation.startedAt,
-                terminateWithinMs: 10_000,
-              }
-            : {
-                result: "no-active-process",
-              },
-        },
-      });
-    } finally {
-      store.close();
-    }
-    if (input.notification.taskId) {
-      await settleOrUpdateUnifiedRun(
-        input.repository.path,
-        input.notification.taskId,
-        input.notification.runId,
-        {
-          status: "failed",
-        },
-      );
-    }
   } else if (normalized.action === "override") {
     // An override dismisses the inbox item with evidence. It deliberately
     // does not claim that the linked blocker recovered or resume the run.
@@ -6805,13 +6846,18 @@ async function getScopedRunDetail(
       const decorated = withRepository(run, repository);
       requireRecordAccess(decorated, user, "run not found");
       let canResume = false;
+      let canCancel = false;
       try {
         requireWriteAccessToRecord(user, decorated, "runs:start");
         canResume = decorated.status === "blocked" || decorated.status === "interrupted";
+        canCancel = decorated.status !== "completed" &&
+          decorated.status !== "failed" &&
+          decorated.status !== "cancelled";
       } catch { /* Read-only viewers keep evidence access. */ }
       return {
         ...decorated,
         canResume,
+        canCancel,
         parentRun:
           decorated.parentRun && recordVisibleToUser(decorated.parentRun, user)
             ? withRepository(decorated.parentRun, repository)
@@ -11147,16 +11193,49 @@ async function handleApiRequest(
       release();
       throw error;
     }
-    void (input.resumeRun ?? resumeRun)(prepared.resumeInput, prepared.dependencies).then(async () => {
+    // Register before the runner starts so a cancel that lands mid-resume
+    // can abort it.
+    const cancellation = registerActiveRunCancellation({ repoPath: repository.path, runId });
+    void (input.resumeRun ?? resumeRun)(prepared.resumeInput, {
+      ...prepared.dependencies,
+      cancellation: cancellation.control,
+    }).then(async () => {
       const tasks = await listUnifiedWorkItems(repository.path);
       const task = tasks.find((item) => item.latestRunId === runId);
       if (task) await reconcileTerminalWorkItemRun({ repoPath: repository.path, workItemId: task.id, runId });
     }).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       console.error(`Nitely Web resume failed for ${runId}: ${message}`);
-      recordWebResumeFailure(repository.path, runId, message, user.id);
-    }).finally(release);
+      // A resume refused or stopped because the run was cancelled is not a
+      // resume failure worth showing on the cancelled run.
+      if (currentProjectedRunStatus(repository.path, runId) !== "cancelled") {
+        recordWebResumeFailure(repository.path, runId, message, user.id);
+      }
+    }).finally(() => {
+      cancellation.finish();
+      release();
+    });
     sendJson(response, 202, { runId });
+    return true;
+  }
+
+  const cancelRunMatch = /^\/api\/runs\/([^/]+)\/cancel$/.exec(url.pathname);
+  if (request.method === "POST" && cancelRunMatch) {
+    const user = await requireUserContext(request, input, homeRepoPath);
+    const runId = decodeURIComponent(cancelRunMatch[1]!);
+    const body = requireObject(await readRequestJson(request));
+    const reason = typeof body.reason === "string" && body.reason.trim()
+      ? body.reason.trim().slice(0, 2_000)
+      : "cancelled by operator";
+    const run = await getScopedRunDetail(repositories, homeRepoPath, input, runId, user);
+    requireWriteAccessToRecord(user, run, "runs:start");
+    const repository = repositories.find((repo) => repo.path === run.repoPath)!;
+    // No resume claim here: a Web resume holds it for its whole execution,
+    // which is exactly when an operator needs to cancel. cancelWebRun's write
+    // transaction serializes against the resume instead, resumeRun refuses a
+    // cancelled run, and a resumed execution registers for the abort signal.
+    await cancelWebRun({ repository, runId, actor: user.id, reason, source: "web" });
+    sendJson(response, 200, { runId, status: "cancelled" });
     return true;
   }
 

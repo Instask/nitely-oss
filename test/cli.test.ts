@@ -67,7 +67,8 @@ describe("runCli", () => {
     expect(lines.join("\n")).toContain(
       "resume <run-id> [--checkpoint <checkpoint-id>] [--backend local|mise|oci]",
     );
-    expect(lines.join("\n")).not.toContain("cancel");
+    expect(lines.join("\n")).toContain("run resume <run-id> [--server <url>] [--json]");
+    expect(lines.join("\n")).toContain("run cancel <run-id> [--reason <text>] [--server <url>] [--json]");
     expect(lines.join("\n")).toContain("mcp serve");
     expect(lines.join("\n")).toContain("mcp token create");
     expect(lines.join("\n")).toContain("connect --server");
@@ -5867,6 +5868,32 @@ None.
       "RUN run-9 resuming",
       "Watch command: nitely run watch run-9",
     ]);
+  });
+
+  it("cancels a remote run with a reason", async () => {
+    const stdout: string[] = [];
+    const calls: Array<{ url: string; method?: string; body?: unknown }> = [];
+
+    const code = await runCli(
+      ["run", "cancel", "run-9", "--reason", "abandoned", "--server", "http://server.test"],
+      { stdout: (line) => stdout.push(line), stderr: () => {} },
+      {
+        env: {},
+        fetch: async (input, init) => {
+          calls.push({ url: String(input), method: init?.method, body: init?.body });
+          return new Response(JSON.stringify({ runId: "run-9", status: "cancelled" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(calls).toEqual([
+      { url: "http://server.test/api/runs/run-9/cancel", method: "POST", body: JSON.stringify({ reason: "abandoned" }) },
+    ]);
+    expect(stdout).toEqual(["RUN run-9 cancelled"]);
   });
 
   it("reports a refused remote run resume with the server's reason", async () => {
