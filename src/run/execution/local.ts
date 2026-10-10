@@ -33,7 +33,12 @@ import type {
   RunCommandOptions,
   WorkspaceHandle,
 } from "./types.js";
-import { isPiJsonRuntime, normalizePiJsonResult, PI_JSON_MODE_ARGS } from "./pi-json.js";
+import {
+  createPiJsonCapture,
+  isPiJsonRuntime,
+  normalizePiJsonResult,
+  PI_JSON_MODE_ARGS,
+} from "./pi-json.js";
 import {
   commandMediationError,
   normalizeCommandMediationPolicy,
@@ -1555,6 +1560,8 @@ export class LocalExecutionBackend implements ExecutionBackend {
       // The stream stays out of the logs; the final answer is written once
       // the process ends, so stdout.log reads as it did in text mode.
       const piJson = isPiJsonRuntime(launch.runtime);
+      // Bounded: Pi streams per-token and per-tool-snapshot records.
+      const piCapture = piJson ? createPiJsonCapture() : undefined;
       let piTextWritten = false;
       const clearTimers = () => {
         if (timeout) clearTimeout(timeout);
@@ -1573,8 +1580,11 @@ export class LocalExecutionBackend implements ExecutionBackend {
         child.kill?.(signal);
       };
       child.stdout?.on("data", (chunk: Buffer) => {
+        if (piCapture) {
+          piCapture.write(chunk);
+          return;
+        }
         stdout.push(chunk);
-        if (piJson) return;
         process.stdout.write(chunk);
         logWriters.writeStdout(chunk);
       });
@@ -1587,7 +1597,7 @@ export class LocalExecutionBackend implements ExecutionBackend {
         piJson
           ? normalizePiJsonResult({
             runtime: launch.runtime,
-            stdout: Buffer.concat(stdout).toString("utf8"),
+            stdout: piCapture?.text() ?? "",
             stderr: Buffer.concat(stderr).toString("utf8"),
             exitCode: 0,
             ...(input.stage.model ? { model: input.stage.model } : {}),

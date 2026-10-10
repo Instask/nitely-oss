@@ -211,6 +211,10 @@ exits.
   cost is Pi's estimate from its model price table (`classification:
   estimated`, `method: pi-model-pricing`), so the OpenRouter Activity page
   stays authoritative for billing.
+  Nitely keeps only the records it needs from Pi's event stream (assistant
+  message ends, the latest cumulative usage of the call in flight, and
+  compaction usage) and drops per-tool output snapshots, so long runs stay
+  well under the OCI output cap.
 - Like `pi`, the local backend has no read-only enforcement for this runtime;
   stages with `capabilities.write.scope: none` must use OCI.
 - Pi reads the operator's Pi settings and extensions; Nitely has no global

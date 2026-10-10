@@ -26,7 +26,12 @@ import {
   type ClaudePermissionMode,
   type RuntimeEnv,
 } from "./local.js";
-import { isPiJsonRuntime, normalizePiJsonResult } from "./pi-json.js";
+import {
+  createPiJsonCapture,
+  isPiJsonRuntime,
+  normalizePiJsonResult,
+  type PiJsonCapture,
+} from "./pi-json.js";
 import { runSandboxProcess } from "./process-runner.js";
 import {
   assertRuntimeCandidateAllowedByCapabilities,
@@ -62,6 +67,11 @@ export interface SandboxProcessInput {
   timeoutMs?: number;
   maxOutputBytes?: number;
   signal?: AbortSignal;
+  /**
+   * Receives stdout instead of a raw buffer; `maxOutputBytes` then counts
+   * what it holds. Used to keep Pi's JSON event stream in bounded memory.
+   */
+  stdoutCapture?: PiJsonCapture;
 }
 
 export interface SandboxProcessResult {
@@ -453,6 +463,46 @@ function containerAlreadyRemoved(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Give a stopped agent's error (cancelled, over the output cap, cleanup
+ * failure) the usage its partial output reports, through the same `usage`
+ * field a completed result uses. Pi's event stream is replaced by the text
+ * text mode would have printed, so raw JSONL never reaches logs or messages.
+ */
+function withPartialAgentOutput(
+  error: unknown,
+  input: { runtime: string; piJson: boolean; model?: string },
+): unknown {
+  if (typeof error !== "object" || error === null) return error;
+  const source = error as { stdout?: unknown; stderr?: unknown; cause?: unknown };
+  const carrier = typeof source.stdout === "string"
+    ? source
+    : typeof source.cause === "object" && source.cause !== null &&
+        typeof (source.cause as { stdout?: unknown }).stdout === "string"
+      ? (source.cause as { stdout: string; stderr?: unknown })
+      : undefined;
+  if (!carrier) return error;
+  const stdout = carrier.stdout as string;
+  const stderr = typeof carrier.stderr === "string" ? carrier.stderr : "";
+  if (input.piJson) {
+    const normalized = normalizePiJsonResult({
+      runtime: input.runtime,
+      stdout,
+      stderr,
+      exitCode: 1,
+      ...(input.model ? { model: input.model } : {}),
+    });
+    Object.assign(carrier, { stdout: normalized.stdout, stderr: normalized.stderr });
+    if (carrier !== source) Object.assign(source, { stdout: normalized.stdout, stderr: normalized.stderr });
+    if (normalized.usage) Object.assign(source, { usage: normalized.usage });
+    return error;
+  }
+  const usage = parseRuntimeUsage(input.runtime, stdout);
+  if (carrier !== source) Object.assign(source, { stdout, stderr });
+  if (usage) Object.assign(source, { usage });
+  return error;
 }
 
 function workloadAndCleanupError(input: {
@@ -943,6 +993,17 @@ export class OciExecutionBackend implements ExecutionBackend {
       result = await this.processRunner(plan.launch);
     } catch (error) {
       primaryError = error;
+      // A stopped process carries what it wrote so far; redact it the same
+      // way as a completed result before anything reads it.
+      if (typeof error === "object" && error !== null) {
+        const partial = error as { stdout?: unknown; stderr?: unknown };
+        if (typeof partial.stdout === "string") {
+          partial.stdout = redactText(partial.stdout, this.redactionSecrets()) ?? "";
+        }
+        if (typeof partial.stderr === "string") {
+          partial.stderr = redactText(partial.stderr, this.redactionSecrets()) ?? "";
+        }
+      }
     }
 
     const cleanupInput: SandboxProcessInput = {
@@ -1368,7 +1429,18 @@ export class OciExecutionBackend implements ExecutionBackend {
       } else {
         plan.launch.stdin = undefined;
       }
-      const executed = await this.executePlan(plan);
+      const piJson = isPiJsonRuntime(launch.runtime);
+      if (piJson) plan.launch.stdoutCapture = createPiJsonCapture();
+      let executed: SandboxProcessResult;
+      try {
+        executed = await this.executePlan(plan);
+      } catch (error) {
+        throw withPartialAgentOutput(error, {
+          runtime: launch.runtime,
+          piJson,
+          ...(input.stage.model ? { model: input.stage.model } : {}),
+        });
+      }
       // Pi runs in JSON mode; give the caller the answer text mode printed
       // and the usage the stream reported. Other runtimes report usage in
       // their own output.

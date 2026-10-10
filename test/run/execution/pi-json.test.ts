@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { normalizePiJsonResult, readPiJsonStream } from "../../../src/run/execution/pi-json.js";
+import { createPiJsonCapture, normalizePiJsonResult, readPiJsonStream } from "../../../src/run/execution/pi-json.js";
 
 const fixturePath = join(process.cwd(), "test/fixtures/pi-json/openrouter-two-calls.jsonl");
 
@@ -85,5 +85,52 @@ describe("readPiJsonStream", () => {
       stderr: "",
       exitCode: 0,
     });
+  });
+});
+
+describe("createPiJsonCapture", () => {
+  const captureOf = (stream: string, chunkSize = stream.length) => {
+    const capture = createPiJsonCapture();
+    const bytes = Buffer.from(stream, "utf8");
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      capture.write(bytes.subarray(offset, offset + chunkSize));
+    }
+    return capture.text();
+  };
+
+  it("reads the same answer and usage as the raw stream, whatever the chunking", async () => {
+    const stream = await readFile(fixturePath, "utf8");
+    const options = { observedAt: new Date("2026-10-08T09:00:00.000Z") };
+    const expected = readPiJsonStream(stream, options);
+    for (const chunkSize of [1, 7, 4096]) {
+      const compact = captureOf(stream, chunkSize);
+      expect(compact.length).toBeLessThan(stream.length);
+      expect(compact).not.toContain("tool_execution");
+      expect(readPiJsonStream(compact, options)).toEqual(expected);
+    }
+  });
+
+  it("drops a record cut off mid-line but keeps the usage streamed before it", async () => {
+    const stream = await readFile(fixturePath, "utf8");
+    const lines = stream.split("\n");
+    const cut = lines.findIndex((line) => line.includes('"delta":"Done"'));
+    const truncated = `${lines.slice(0, cut + 1).join("\n")}\n{"type":"message_up`;
+    expect(readPiJsonStream(captureOf(truncated, 5))).toEqual(readPiJsonStream(truncated));
+  });
+
+  it("skips a huge agent_end without buffering it and still sees willRetry", () => {
+    const huge = "y".repeat(5 * 1024 * 1024);
+    const capture = createPiJsonCapture();
+    capture.write(`${JSON.stringify({ type: "agent_end", messages: [{ role: "user", content: huge }], willRetry: true })}`.slice(0, 1024));
+    const rest = `${JSON.stringify({ type: "agent_end", messages: [{ role: "user", content: huge }], willRetry: true })}\n`.slice(1024);
+    for (let offset = 0; offset < rest.length; offset += 65_536) {
+      capture.write(rest.slice(offset, offset + 65_536));
+      expect(capture.size()).toBeLessThan(4096);
+    }
+    expect(capture.text()).toBe('{"type":"agent_end","willRetry":true}\n');
+  });
+
+  it("passes output that is not Pi JSON through unchanged", () => {
+    expect(captureOf("plain answer\nsecond line", 3)).toBe("plain answer\nsecond line\n");
   });
 });

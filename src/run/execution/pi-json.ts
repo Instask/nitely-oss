@@ -230,3 +230,195 @@ export function normalizePiJsonResult(input: {
     ...(outcome.usage ? { usage: outcome.usage } : {}),
   };
 }
+
+/** Receives a process's stdout and holds what the caller will read back. */
+export interface PiJsonCapture {
+  write(chunk: Buffer | string): void;
+  /** Bytes held in memory now, for output caps. */
+  size(): number;
+  /** The captured stdout, finished: compact Pi JSONL (or raw text). */
+  text(): string;
+}
+
+/** Event types whose records are dropped without being buffered. */
+const DROPPED_EVENT_PREFIXES = [
+  '{"type":"tool_execution_',
+  '{"type":"turn_end"',
+  '{"type":"turn_start"',
+  '{"type":"queue_update"',
+  '{"type":"entry_appended"',
+  '{"type":"auto_retry_',
+  '{"type":"summarization_retry_',
+];
+const AGENT_END_PREFIX = '{"type":"agent_end"';
+const PREFIX_PROBE_BYTES = 48;
+const WINDOW_CHARS = 256;
+
+function compactPiEvent(event: Record<string, unknown>): Record<string, unknown> | undefined {
+  const message = record(event.message);
+  switch (event.type) {
+    case "session":
+    case "agent_start":
+    case "agent_settled":
+      return { type: event.type };
+    case "message_start":
+      return message?.role === "assistant" ? { type: event.type, message: { role: "assistant" } } : undefined;
+    case "message_end": {
+      if (message?.role !== "assistant") return undefined;
+      const content = Array.isArray(message.content)
+        ? message.content.map(record).filter((block) => block?.type === "text")
+        : [];
+      const kept: Record<string, unknown> = { role: "assistant", content };
+      for (const key of ["usage", "stopReason", "errorMessage", "model", "responseModel"]) {
+        if (message[key] !== undefined) kept[key] = message[key];
+      }
+      return { type: event.type, message: kept };
+    }
+    case "compaction_end":
+      return { type: event.type, result: { usage: record(event.result)?.usage } };
+    case "agent_end":
+      return { type: event.type, willRetry: event.willRetry === true };
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Capture Pi `--mode json` stdout in bounded memory. Pi streams one record per
+ * token and per tool-output snapshot, and `agent_end` repeats the whole
+ * conversation, so a long run's raw stream can reach tens of megabytes. This
+ * keeps only what {@link readPiJsonStream} reads: assistant message starts and
+ * ends (text blocks, usage, stop reason), the latest cumulative
+ * `message_update` usage of the call in flight, compaction usage, and the
+ * agent end and settle markers. Records it drops are recognized from their
+ * first bytes and never buffered. Output that is not Pi JSON passes through.
+ */
+export function createPiJsonCapture(): PiJsonCapture {
+  const decoder = new TextDecoder("utf-8");
+  const out: string[] = [];
+  let outBytes = 0;
+  let line = "";
+  // "keep": buffering a record; "drop": skipping one; "agent_end": skipping
+  // one while watching for willRetry.
+  let mode: "keep" | "drop" | "agent_end" | undefined;
+  let head = "";
+  let tail = "";
+  let pendingUpdate: string | undefined;
+
+  const emit = (text: string) => {
+    out.push(`${text}\n`);
+    outBytes += Buffer.byteLength(text) + 1;
+  };
+  const flushUpdate = () => {
+    if (pendingUpdate !== undefined) {
+      emit(pendingUpdate);
+      pendingUpdate = undefined;
+    }
+  };
+  const finishLine = () => {
+    if (mode === "agent_end") {
+      const willRetry = /"willRetry"\s*:\s*true/.test(head) || /"willRetry"\s*:\s*true/.test(tail);
+      flushUpdate();
+      emit(JSON.stringify({ type: "agent_end", willRetry }));
+    } else if (mode === "keep" || mode === undefined) {
+      const text = line.endsWith("\r") ? line.slice(0, -1) : line;
+      if (text.trim()) {
+        let event: Record<string, unknown> | undefined;
+        try {
+          event = record(JSON.parse(text));
+        } catch {
+          event = undefined;
+        }
+        if (!event || typeof event.type !== "string") {
+          flushUpdate();
+          emit(text);
+        } else if (event.type === "message_update") {
+          // Cumulative: only the latest one of a call matters.
+          pendingUpdate = JSON.stringify({ type: "message_update", usage: event.usage });
+        } else {
+          const compact = compactPiEvent(event);
+          if (compact) {
+            flushUpdate();
+            emit(JSON.stringify(compact));
+          }
+        }
+      }
+    }
+    line = "";
+    head = "";
+    tail = "";
+    mode = undefined;
+  };
+  const classify = () => {
+    if (mode !== undefined || line.length < PREFIX_PROBE_BYTES) return;
+    if (line.startsWith(AGENT_END_PREFIX)) {
+      mode = "agent_end";
+      head = line.slice(0, WINDOW_CHARS);
+      tail = line.slice(-WINDOW_CHARS);
+      line = "";
+    } else if (DROPPED_EVENT_PREFIXES.some((prefix) => line.startsWith(prefix))) {
+      mode = "drop";
+      line = "";
+    } else {
+      mode = "keep";
+    }
+  };
+  const append = (text: string) => {
+    let rest = text;
+    while (rest.length > 0) {
+      const newline = rest.indexOf("\n");
+      const piece = newline === -1 ? rest : rest.slice(0, newline);
+      if (mode === "drop") {
+        // Skip without buffering.
+      } else if (mode === "agent_end") {
+        if (head.length < WINDOW_CHARS) head += piece.slice(0, WINDOW_CHARS - head.length);
+        tail = (tail + piece).slice(-WINDOW_CHARS);
+      } else {
+        line += piece;
+        classify();
+      }
+      if (newline === -1) break;
+      if (mode === undefined) classify();
+      finishLine();
+      rest = rest.slice(newline + 1);
+    }
+  };
+  return {
+    write(chunk) {
+      append(typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true }));
+    },
+    size() {
+      return outBytes + Buffer.byteLength(line) + (pendingUpdate ? Buffer.byteLength(pendingUpdate) : 0);
+    },
+    text() {
+      append(decoder.decode());
+      // A final record without a newline: keep it only if it is complete.
+      if (line || mode === "agent_end") {
+        const unterminated = mode === "keep" || mode === undefined ? line : "";
+        if (mode === "agent_end") {
+          mode = undefined;
+          line = "";
+        } else if (unterminated) {
+          const candidate = unterminated.endsWith("\r") ? unterminated.slice(0, -1) : unterminated;
+          let complete = !candidate.trimStart().startsWith("{");
+          if (!complete) {
+            try {
+              JSON.parse(candidate);
+              complete = true;
+            } catch {
+              // A record cut off by a kill or an output cap.
+            }
+          }
+          if (complete) {
+            finishLine();
+          } else {
+            line = "";
+            mode = undefined;
+          }
+        }
+      }
+      flushUpdate();
+      return out.join("");
+    },
+  };
+}
