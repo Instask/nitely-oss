@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import type { ProviderConnectionStore } from "../providers/types.js";
 import { FlowValidationError, parseFlowDocument } from "../flow/load.js";
 import type { LoadedFlow } from "../flow/load.js";
+import { normalizeRunOverrides, type RunOverrides } from "../flow/overrides.js";
 import { createScmProvider } from "../scm/registry.js";
 import type { ChangeRequestStatus } from "../scm/types.js";
 import { createCompletionPredicate } from "../scheduler/completion.js";
@@ -102,6 +103,8 @@ interface ResolvedWorkItemRunFlow {
   flowPath: string;
   flowDocument: string;
   loaded: LoadedFlow;
+  aliasOf?: string;
+  overrides?: RunOverrides;
 }
 
 type WorkItemRunFlowResolution =
@@ -114,10 +117,15 @@ async function resolveWorkItemRunFlow(
 ): Promise<WorkItemRunFlowResolution> {
   let flowPath = workItem.flowPath;
   let flowDocument: string;
+  let aliasOf: string | undefined;
+  let aliasOverrides: RunOverrides | undefined;
   try {
     if (workItem.flowId) {
-      flowDocument = (await resolveCatalogFlow(repoPath, workItem.flowId)).document;
+      const resolved = await resolveCatalogFlow(repoPath, workItem.flowId);
+      flowDocument = resolved.document;
       flowPath = workItem.flowId;
+      aliasOf = resolved.aliasOf;
+      aliasOverrides = resolved.overrides;
     } else if (workItem.template) {
       // Template work items read the built-in Flow the template points at,
       // from the store, and keep their `template:<id>` run label.
@@ -125,13 +133,18 @@ async function resolveWorkItemRunFlow(
       if (!entry) {
         throw new Error(`flow template not found: ${workItem.template.templateId}`);
       }
-      flowDocument = (await resolveCatalogFlow(repoPath, entry.flowPath)).document;
+      const resolved = await resolveCatalogFlow(repoPath, entry.flowPath);
+      flowDocument = resolved.document;
+      aliasOf = resolved.aliasOf;
+      aliasOverrides = resolved.overrides;
     } else if (isFlowSeedKey(workItem.flowPath)) {
       // Catalog Flows run the stored document, so a customized or upgraded
       // system Flow takes effect without a file change.
       const resolved = await resolveCatalogFlow(repoPath, workItem.flowPath);
       flowDocument = resolved.document;
       flowPath = await catalogFlowRunLabel(repoPath, resolved);
+      aliasOf = resolved.aliasOf;
+      aliasOverrides = resolved.overrides;
     } else {
       // Any other path is an explicit file, read as given.
       flowPath = (
@@ -149,6 +162,7 @@ async function resolveWorkItemRunFlow(
         flowPath,
         flowDocument,
         loaded,
+        ...(aliasOf ? { aliasOf, overrides: aliasOverrides } : {}),
       },
     };
   } catch (error) {
@@ -478,6 +492,10 @@ export async function evaluateWorkItemRunStarts(
         };
       }
       const resolvedFlow = flowResolution.resolved;
+      const selectionOverrides = normalizeRunOverrides({
+        ...resolvedFlow.overrides,
+        ...workItem.overrides,
+      });
       const governance = await evaluateWorkItemTypeGovernance({
         repoPath: input.repoPath,
         workItemType: workItem.workItemType,
@@ -509,9 +527,10 @@ export async function evaluateWorkItemRunStarts(
           repoPath: input.repoPath,
           flowPath: resolvedFlow.flowPath,
           flowDocument: resolvedFlow.flowDocument,
+          ...(resolvedFlow.aliasOf ? { aliasOf: resolvedFlow.aliasOf } : {}),
           inputs: workItem.inputs,
           configuration: workItem.configuration,
-          overrides: workItem.overrides,
+          ...(selectionOverrides ? { overrides: selectionOverrides } : {}),
           executionBackend: input.executionBackend,
           env: await executionEnv(),
           ...(input.providerStore ? { providerStore: input.providerStore } : {}),
@@ -539,13 +558,14 @@ export async function evaluateWorkItemRunStarts(
           ? {
               flowPath: resolvedFlow.flowPath,
               flowDocument: resolvedFlow.flowDocument,
+              ...(resolvedFlow.aliasOf ? { aliasOf: resolvedFlow.aliasOf } : {}),
               repoPath: input.repoPath,
               ...(workItem.repoId ?? input.repoId
                 ? { repoId: workItem.repoId ?? input.repoId }
                 : {}),
               ...(input.repoName ? { repoName: input.repoName } : {}),
               inputs: workItem.inputs,
-              ...(workItem.overrides ? { overrides: workItem.overrides } : {}),
+              ...(selectionOverrides ? { overrides: selectionOverrides } : {}),
               ...(input.executionBackend ? { executionBackend: input.executionBackend } : {}),
               ...(workItem.configuration
                 ? { configuration: workItem.configuration }

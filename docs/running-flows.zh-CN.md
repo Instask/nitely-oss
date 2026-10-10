@@ -108,41 +108,26 @@ nitely ci-repair decide <idempotency-key> \
 - 因此可以把 spec 放在 Nitely 安装目录旁，同时对另一个 checkout 执行 run，例如：
   `nitely run ... --repo /other/repo --input spec=./local-spec.md`。
 
-若要用 Grok Build 而不是 Codex 跑同一条 bootstrap 路径，使用 Grok 变体。真实
-运行需要本地 `grok` CLI（`grok login` 或 `XAI_API_KEY`）；该 flow 不设置
-`model`，因此沿用本地 CLI 的默认模型：
+在同一条 bootstrap Flow 上选择其他 runtime。Grok Build 需要本地 `grok` CLI
+（`grok login` 或 `XAI_API_KEY`）。Claude Code 需要本地 `claude` CLI 和
+`ANTHROPIC_API_KEY`。经 OpenRouter 使用 Pi 时需要 `pi` CLI 和
+`OPENROUTER_API_KEY`，并传入 OpenRouter 模型 id。见
+[OpenRouter 配置](openrouter.md)。
 
 ```bash
-nitely run flows/implement-spec-bootstrap-grok.json \
+nitely run flows/implement-spec-bootstrap.json \
   --repo . \
   --input spec=./spec.md \
-  --input tech-design=./tech-design.md
+  --input tech-design=./tech-design.md \
+  --runtime grok
 ```
 
-若要用 Pi 而不是 Codex 跑同一条 bootstrap 路径，使用 Pi 变体。真实运行需要本地
-`pi` CLI 和通过 Nitely 配置的 `OPENROUTER_API_KEY`。所有 agent 阶段固定使用
-OpenRouter 的 `qwen/qwen3-coder-next`，不再沿用 Pi CLI 默认模型；保留原有 flow
-ID 以兼容已有配置。OCI 的额外要求见 [OpenRouter 配置](openrouter.md)。
-spec 与 tech-design 输入可以是任意本地文件：
-
-```bash
-nitely run flows/implement-spec-bootstrap-pi.json \
-  --repo . \
-  --input spec=./spec.md \
-  --input tech-design=./tech-design.md
-```
-
-若要用 Claude Code 而不是 Codex 跑同一条 bootstrap 路径，使用 Claude 变体。真实
-运行需要本地 `claude` CLI 和 `ANTHROPIC_API_KEY`；该 flow 不设置 `model`，因此
-沿用本地 CLI 的默认模型。与 Grok、Pi 变体不同，这个变体完整对齐 Codex 基准：
-保留 blocking 的 `review` gate 和末尾的 `reflect` stage。
-
-```bash
-nitely run flows/implement-spec-bootstrap-claude.json \
-  --repo . \
-  --input spec=./spec.md \
-  --input tech-design=./tech-design.md
-```
+`flows/implement-spec-bootstrap-grok.json`、`-claude.json` 和 `-pi.json`
+在这一版里仍是该基础 Flow 的弃用别名。未编辑的别名会运行当前基础文档（含
+review gate 和 reflect），并记录 `aliasOf`。Grok 与 Claude 别名只选择对应
+runtime，模型留给 provider 默认值。Pi 别名选择 OpenRouter 的
+`qwen/qwen3-coder-next`。同一条命令上的显式 `--runtime` 优先。目录里已经
+编辑过的变体行保持独立，不会变成别名。
 
 Nitely 会：
 
@@ -285,15 +270,18 @@ nitely task create --server http://localhost:4173 --repo-id my-repo \
   --model openai/gpt-oss-120b --effort high
 ```
 
-`--model`、`--effort` 和可选的 `--runtime` 作用于所有 agent、judge 和 review
-gate。仅覆盖 model/effort 时作用于现有每个候选；覆盖 runtime 时替换候选链。
-command 与人工批准阶段不受影响；暂不支持按 stage 指定覆盖。
+`--model`、`--effort`、`--questions` 和可选的 `--runtime` 作用于所有 agent、
+judge 和 review gate。`--questions` 取 `ask`、`auto` 或 `deny`，同时设置 Flow
+的提问策略。仅覆盖 model/effort 时作用于现有每个候选；覆盖 runtime 时替换候选链。
+command 与人工批准阶段不受影响；暂不支持按 stage 指定覆盖。`doctor`、
+`run-stage`、`rework-pr`、`pr-comments` 和 `ci-repair` 接受同一组参数，因此
+doctor 检查的就是 run 将使用的配置。
 
 `POST /api/tasks` 可用 `overrides` 保存任务默认值，
 `POST /api/tasks/:id/runs` 可用相同对象设置单次运行覆盖：
 
 ```json
-{ "overrides": { "runtime": "openrouter", "model": "openai/gpt-oss-120b", "effort": "high" } }
+{ "overrides": { "runtime": "openrouter", "model": "openai/gpt-oss-120b", "effort": "high", "questions": "auto" } }
 ```
 
 覆盖值经过 Flow 与运行时预检。Run 分别保存原始 Flow 文档和应用的覆盖值，

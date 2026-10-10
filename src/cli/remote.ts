@@ -1,4 +1,4 @@
-import type { RunOverrides } from "../flow/overrides.js";
+import { normalizeRunOverrides, type RunOverrides } from "../flow/overrides.js";
 import {
   normalizeRemoteServerUrl,
   remoteAuthorizationHeaders,
@@ -271,7 +271,7 @@ export async function runRemoteListCommand(input: RemoteListCommandInput): Promi
 export type RemoteActionCollection = "tasks" | "runs";
 
 export async function postRemoteTaskAction(
-  input: { serverUrl: string; apiToken?: string; taskId: string },
+  input: { serverUrl: string; apiToken?: string; taskId: string; overrides?: RunOverrides },
   fetchImpl: FetchFunction,
   route: string,
   label: string,
@@ -286,7 +286,7 @@ export async function postRemoteTaskAction(
       headers: remoteRequestHeaders(input.apiToken, {
         "content-type": "application/json",
       }),
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, ...(input.overrides ? { overrides: input.overrides } : {}) }),
     },
   );
   if (!response.ok) {
@@ -523,6 +523,7 @@ export async function runRemoteTaskActionCommand(
   const { argv, io, env } = input;
   let serverFlag = "";
   let asJson = false;
+  const overrideOptions: Record<string, string> = {};
   let resolvedApiToken: string | undefined;
   const body: Record<string, unknown> = {};
   try {
@@ -533,6 +534,12 @@ export async function runRemoteTaskActionCommand(
         const value = argv[++index] ?? "";
         if (!value) throw new Error(`Missing value for ${arg}`);
         body[bodyKey] = value;
+        continue;
+      }
+      if (input.route === "runs" && ["--runtime", "--model", "--effort", "--questions"].includes(arg ?? "")) {
+        const value = argv[++index] ?? "";
+        if (!value || value.startsWith("--")) throw new Error(`Missing value for ${arg}`);
+        overrideOptions[arg!.slice(2)] = value;
         continue;
       }
       if (arg === "--server") {
@@ -547,6 +554,7 @@ export async function runRemoteTaskActionCommand(
       io.stderr(`Unknown option: ${arg}. ${input.usage}`);
       return 1;
     }
+    const overrides = normalizeRunOverrides(overrideOptions);
     const remote = await resolveRemoteTarget({
       env,
       ...(serverFlag ? { flag: serverFlag } : {}),
@@ -557,6 +565,7 @@ export async function runRemoteTaskActionCommand(
       {
         serverUrl,
         taskId: input.taskId,
+        ...(overrides ? { overrides } : {}),
         ...(remote.apiToken ? { apiToken: remote.apiToken } : {}),
       },
       input.fetchImpl,

@@ -78,6 +78,7 @@ export interface ReproducibilityManifest {
     documentSha256?: string;
     configurationSha256?: string;
     overrides?: RunOverrides;
+    aliasOf?: string;
   };
   inputs: ReproducibilityInputSnapshot[];
   context: {
@@ -257,4 +258,16 @@ export async function readReproducibilityManifest(input: {
   } catch {
     return undefined;
   }
+}
+
+/** Refresh selections after continuation while retaining the original execution snapshot. */
+export async function updateReproducibilityRuntimes(input: {
+  runDirectory: string;
+  runtimes: ReproducibilityRuntimeStage[];
+}): Promise<ReproducibilityManifest | undefined> {
+  const previous = await readReproducibilityManifest(input);
+  if (!previous) return undefined;
+  const manifest = { ...previous, generatedAt: new Date().toISOString(), runtimes: input.runtimes };
+  await writeFile(reproducibilityManifestPath(input.runDirectory), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  return manifest;
 }

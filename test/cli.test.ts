@@ -6360,13 +6360,13 @@ describe("run model and effort overrides", () => {
   it("forwards explicit runtime choices to runFlow", async () => {
     let captured: RunFlowInput | undefined;
     const errors: string[] = [];
-    const code = await runCli(["run", "flow.json", "--repo", "/repo", "--model", "qwen/qwen3-coder-next", "--effort", "high", "--runtime", "openrouter"],
+    const code = await runCli(["run", "flow.json", "--repo", "/repo", "--model", "qwen/qwen3-coder-next", "--effort", "high", "--runtime", "openrouter", "--questions", "deny"],
       { stdout: () => {}, stderr: (line) => errors.push(line) }, {
         runFlow: async (input) => { captured = input; return { runId: "run-override", branchName: "nitely/run-override", worktreePath: "/repo/worktree" }; },
       });
     expect(errors).toEqual([]);
     expect(code).toBe(0);
-    expect(captured?.overrides).toEqual({ model: "qwen/qwen3-coder-next", effort: "high", runtime: "openrouter" });
+    expect(captured?.overrides).toEqual({ model: "qwen/qwen3-coder-next", effort: "high", runtime: "openrouter", questions: "deny" });
   });
 
   it("rejects invalid effort before starting a run", async () => {
@@ -6388,7 +6388,7 @@ describe("run model and effort overrides", () => {
     await writeFile(spec, "Spec"); await writeFile(design, "Design");
     let body: Record<string, unknown> | undefined;
     const errors: string[] = [];
-    const code = await runCli(["task", "create", "--server", "http://localhost:4173", "--title", "Evaluate", "--spec", spec, "--tech-design", design, "--model", "qwen/qwen3-coder-next", "--effort", "off"],
+    const code = await runCli(["task", "create", "--server", "http://localhost:4173", "--title", "Evaluate", "--spec", spec, "--tech-design", design, "--model", "qwen/qwen3-coder-next", "--effort", "off", "--questions", "auto"],
       { stdout: () => {}, stderr: (line) => errors.push(line) }, {
         env: {}, fetch: async (_url, init) => {
           body = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -6396,6 +6396,97 @@ describe("run model and effort overrides", () => {
         },
       });
     expect(errors).toEqual([]); expect(code).toBe(0);
-    expect(body?.overrides).toEqual({ model: "qwen/qwen3-coder-next", effort: "off" });
+    expect(body?.overrides).toEqual({ model: "qwen/qwen3-coder-next", effort: "off", questions: "auto" });
+  });
+});
+
+
+describe("execution command override agreement", () => {
+  const flags = ["--runtime", "mock", "--model", "selected", "--effort", "high", "--questions", "deny"];
+  const overrides = { runtime: "mock", model: "selected", effort: "high", questions: "deny" };
+
+  it("passes doctor selections to shared preflight", async () => {
+    const errors: string[] = [];
+    const code = await runCli(["doctor", "flow.json", ...flags],
+      { stdout: () => {}, stderr: (line) => errors.push(line) }, {
+        evaluateRunPreflight: async (input) => {
+          expect(input.overrides).toEqual(overrides);
+          return { status: "PASS", summary: "ok", flowPath: "flow.json", flowName: "flow", stageCount: 1,
+            artifactCount: 1, requiredInputs: [], requiredProviders: [], outputDirectory: ".nitely",
+            executionPlan: [], issues: [] };
+        },
+      });
+    expect(errors).toEqual([]);
+    expect(code).toBe(0);
+  });
+
+  it.each(["rework-pr", "pr-comments"])("forwards %s selections", async (command) => {
+    const errors: string[] = [];
+    let seen: unknown;
+    const code = await runCli([command, "42", "--repo", "/repo", "--flow", "flow.json", ...flags],
+      { stdout: () => {}, stderr: (line) => errors.push(line) }, {
+        runFlow: async (input) => { seen = input.overrides; return { runId: "run", branchName: "branch", worktreePath: "/repo" }; },
+        processPullRequestComments: async (input) => {
+          seen = input.overrides;
+          return {
+            target: {
+              provider: "github", owner: "owner", repository: "repo", number: 42,
+              url: "https://github.com/owner/repo/pull/42", baseBranch: "main", headBranch: "branch",
+              headSha: "a".repeat(40), headRepository: { owner: "owner", repository: "repo" },
+              isCrossRepository: false,
+            },
+            processed: 0, triggered: [], explained: [], pendingApprovals: [], skipped: [],
+          };
+        },
+      });
+    expect(errors).toEqual([]);
+    expect(code).toBe(0);
+    expect(seen).toEqual(overrides);
+  });
+
+  it("run-stage previews overridden values and preserves the source snapshot for execution", async () => {
+    const flowPath = await writeCliFlow(singleAgentFlow({ model: "original", questions: { mode: "ask" } }));
+    const output: string[] = [];
+    const errors: string[] = [];
+    expect(await runCli(["run-stage", flowPath, "implement", "--dry-run", ...flags],
+      { stdout: (line) => output.push(line), stderr: (line) => errors.push(line) })).toBe(0);
+    expect(output.join("\n")).toContain("RUNTIME mock/selected");
+    let captured: RunFlowInput | undefined;
+    expect(await runCli(["run-stage", flowPath, "implement", ...flags],
+      { stdout: () => {}, stderr: (line) => errors.push(line) }, {
+        runFlow: async (input) => { captured = input; return { runId: "run", branchName: "branch", worktreePath: "/repo" }; },
+      })).toBe(0);
+    expect(errors).toEqual([]);
+    expect(captured?.overrides).toEqual(overrides);
+    expect(JSON.parse(captured!.flowDocument!).spec.stages[0]).toMatchObject({ model: "original", questions: { mode: "ask" } });
+  });
+
+  it("allows per-run selections on remote task start", async () => {
+    let body: unknown;
+    const errors: string[] = [];
+    expect(await runCli(["task", "start", "task-1", "--server", "http://localhost:4173", "--json", ...flags],
+      { stdout: () => {}, stderr: (line) => errors.push(line) }, {
+        env: {}, fetch: async (_url, init) => {
+          body = JSON.parse(String(init?.body));
+          return new Response(JSON.stringify({ run: { runId: "run", status: "running", taskId: "task-1" } }), { status: 201 });
+        },
+      })).toBe(0);
+    expect(errors).toEqual([]);
+    expect(body).toEqual({ overrides });
+  });
+
+  it.each(["doctor", "run", "run-stage", "rework-pr", "pr-comments"])("rejects invalid question policy in %s", async (command) => {
+    const errors: string[] = [];
+    let invoked = false;
+    const args = command === "run-stage" ? [command, "flow.json", "implement"]
+      : ["rework-pr", "pr-comments"].includes(command) ? [command, "42", "--flow", "flow.json"]
+      : [command, "flow.json"];
+    const fail = async () => { invoked = true; throw new Error("unexpected execution"); };
+    expect(await runCli([...args, "--questions", "sometimes"],
+      { stdout: () => {}, stderr: (line) => errors.push(line) }, {
+        runFlow: fail, evaluateRunPreflight: fail, processPullRequestComments: fail,
+      })).toBe(1);
+    expect(invoked).toBe(false);
+    expect(errors.join("\n")).toContain("overrides.questions must be one of");
   });
 });

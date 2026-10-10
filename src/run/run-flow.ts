@@ -4,7 +4,7 @@ import {
   resolveRuntimeEffort,
   type ResolvedRuntimeEffort,
 } from "./execution/effort.js";
-import { resolveRunFlowSource } from "../flows/catalog.js";
+import { applyResolvedFlowSelection, resolveRunFlowSource } from "../flows/catalog.js";
 import { execFile } from "node:child_process";
 import {
   mkdir,
@@ -117,7 +117,7 @@ import { EventStore } from "../events/store.js";
 import type { StoredRunEvent } from "../events/types.js";
 import { ensureContextKnowledgeProposalNotification } from "../web/context-knowledge-notifications.js";
 import { loadFlow, parseFlowDocument, type FlowGraph } from "../flow/load.js";
-import { applyRunOverrides, normalizeRunOverrides, type RunOverrides } from "../flow/overrides.js";
+import { normalizeRunOverrides, type RunOverrides } from "../flow/overrides.js";
 import { decideBudgetStoppedResume } from "./budget-resume.js";
 import { flowInputReferences } from "../flow/inputs.js";
 import {
@@ -259,6 +259,7 @@ import {
   sha256File,
   sha256Text,
   readReproducibilityManifest,
+  updateReproducibilityRuntimes,
   writeReproducibilityManifest,
   type ReproducibilityInputSnapshot,
   type ReproducibilityManifest,
@@ -507,6 +508,7 @@ export interface RunFlowInput {
   inputs: Record<string, ResourceReference>;
   configuration?: Record<string, unknown>;
   overrides?: RunOverrides;
+  aliasOf?: string;
   providerConnections?: Partial<Record<import("../providers/types.js").ProviderId, string>>;
   ownerId?: string;
   organizationId?: string;
@@ -12813,14 +12815,15 @@ async function runFlowOnce(
   // A catalog reference (`flows/<name>.json`) runs the repository's stored
   // Flow: edited built-ins are honored and disabled Flows refused. Explicit
   // non-catalog files are read as given. The label stays `input.flowPath`.
-  const loadedFlowDocument =
-    input.flowDocument ??
-    (await resolveRunFlowSource(repoPath, input.flowPath)).flowDocument;
-  const overrides = normalizeRunOverrides(input.overrides);
+  const source = input.flowDocument !== undefined ? undefined
+    : await resolveRunFlowSource(repoPath, input.flowPath);
+  const loadedFlowDocument = input.flowDocument ?? source!.flowDocument;
+  const aliasOf = input.aliasOf ?? source?.aliasOf;
+  const overrides = normalizeRunOverrides({ ...source?.overrides, ...input.overrides });
   const stored = parseFlowDocument(loadedFlowDocument, {
     externalInputs: Object.keys(input.inputs),
   });
-  const loaded = { ...stored, flow: applyRunOverrides(stored.flow, overrides) };
+  const loaded = { ...stored, flow: applyResolvedFlowSelection(stored.flow, { aliasOf, overrides }) };
   const runWorkItemType = input.workItemType ?? flowWorkItemType(loaded.flow);
   await assertWorkItemTypeAllowed({
     repoPath,
@@ -12951,6 +12954,7 @@ async function runFlowOnce(
       flowPath: input.flowPath,
       flowDocument: loadedFlowDocument,
       overrides,
+      aliasOf,
       flowDocumentSha256: sha256Text(loadedFlowDocument),
       repoPath,
       repoId: input.repoId,
@@ -13018,6 +13022,7 @@ async function runFlowOnce(
         path: input.flowPath,
         documentSha256: sha256Text(loadedFlowDocument),
         overrides,
+        aliasOf,
         configurationSha256,
       },
       inputs: inputSnapshots,
@@ -15015,7 +15020,10 @@ async function resumeRunOnce(
       : await loadFlow(flowPath, {
           externalInputs: Object.keys(inputReferences),
         });
-    loaded = { ...loaded, flow: applyRunOverrides(loaded.flow, projection.overrides) };
+    loaded = { ...loaded, flow: applyResolvedFlowSelection(loaded.flow, {
+      aliasOf: projection.aliasOf,
+      overrides: projection.overrides,
+    }) };
     let budgetResumeStageId: string | undefined;
     if (resumableStages.length === 0) {
       const alwaysRunStageIds = loaded.flow.spec.stages
@@ -15281,7 +15289,10 @@ async function resumeRunOnce(
     ): Promise<string> => {
       const events = eventStore.list(input.runId);
       const projection = projectRun(events);
-      const reproducibility = await readReproducibilityManifest({ runDirectory });
+      const reproducibility = await updateReproducibilityRuntimes({
+        runDirectory,
+        runtimes: reproducibilityRuntimeStages({ stages: loaded.flow.spec.stages, events }),
+      });
       const existingToolchainPreflight = await readToolchainPreflight({
         runDirectory,
       });

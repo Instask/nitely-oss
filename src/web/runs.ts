@@ -32,7 +32,8 @@ import {
 import { EventStore } from "../events/store.js";
 import type { StoredRunEvent } from "../events/types.js";
 import { loadFlow, parseFlowDocument } from "../flow/load.js";
-import type { Stage } from "../flow/schema.js";
+import type { Effort, Stage } from "../flow/schema.js";
+import type { RuntimeEffortStatus } from "../run/execution/effort.js";
 import {
   eventStorePath,
   getProjectedRun,
@@ -266,6 +267,11 @@ export interface WebStageDetailArtifact {
 }
 
 export interface WebWorkflowProgressItem {
+  runtime?: string;
+  model?: string;
+  requestedEffort?: Effort;
+  nativeEffort?: string;
+  effortStatus?: RuntimeEffortStatus;
   stageId: string;
   label: string;
   stageType?: string;
@@ -2823,6 +2829,7 @@ function buildWorkflowProgress(input: {
       const projectedStage = input.projection?.stages.find(
         (candidate) => candidate.stageId === stage.id,
       );
+      const attempt = projectedStage?.attempts.at(-1);
       const approval = input.projection?.approvals
         .filter((candidate) => candidate.stageId === stage.id)
         .at(-1);
@@ -2840,6 +2847,11 @@ function buildWorkflowProgress(input: {
           }
         : undefined;
       return {
+        runtime: redactForWeb(attempt?.runtime),
+        model: redactForWeb(attempt?.model),
+        requestedEffort: attempt?.requestedEffort,
+        nativeEffort: redactForWeb(attempt?.nativeEffort),
+        effortStatus: attempt?.effortStatus,
         stageId: stage.id,
         label: stage.id,
         stageType: item?.stageType ?? stage.type,

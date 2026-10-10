@@ -44,10 +44,12 @@ export const baselineReproducibilityManifestSchema = z.object({
     path: z.string().min(1).optional(),
     documentSha256: sha256Schema.optional(),
     configurationSha256: sha256Schema.optional(),
+    aliasOf: z.string().min(1).optional(),
     overrides: z.object({
       runtime: z.string().min(1).optional(),
       model: z.string().min(1).optional(),
       effort: effortSchema.optional(),
+      questions: z.enum(["ask", "auto", "deny"]).optional(),
     }).strict().optional(),
   }).strict(),
   inputs: z.array(z.object({
