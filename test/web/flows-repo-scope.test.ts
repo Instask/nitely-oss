@@ -235,6 +235,31 @@ describe("Web task creation from a catalog user Flow", () => {
     expect(disabled.status).toBe(400);
     expect(disabled.body.error.message).toMatch(/flow is disabled/);
   });
+
+  it("does not reveal another user's disabled Flow", async () => {
+    const home = await createRepo("home");
+    const b = await createRepo("b");
+    const alice = await createUser(home, { email: "alice@example.test", password: "alice password passphrase", role: "user" });
+    await createUser(home, { email: "bob@example.test", password: "bob password passphrase", role: "user" });
+    const store = openFlowStore(home);
+    store.createFlow({ name: "alice-off", document: flow({ name: "alice-off" }), ownerId: alice.id }, { createId: () => "flow-alice-off" });
+    store.close();
+    const server = await start(home, b, { authMode: "required", providerEnv: {} });
+    const bobCookie = await login(server, "bob@example.test", "bob password passphrase");
+    const aliceCookie = await login(server, "alice@example.test", "alice password passphrase");
+    expect((await call(server, "PUT", "/api/flows/flow-alice-off", { enabled: false }, aliceCookie)).status).toBe(200);
+
+    const foreignDisabled = await call(server, "POST", "/api/tasks", taskBody("flow-alice-off"), bobCookie);
+    const missing = await call(server, "POST", "/api/tasks", taskBody("flow-does-not-exist"), bobCookie);
+    expect(foreignDisabled.status).toBe(missing.status);
+    expect(foreignDisabled.body).toEqual(missing.body);
+    expect(JSON.stringify(foreignDisabled.body)).not.toMatch(/disabled/);
+
+    // The owner still gets the specific reason.
+    const ownDisabled = await call(server, "POST", "/api/tasks", taskBody("flow-alice-off"), aliceCookie);
+    expect(ownDisabled.status).toBe(400);
+    expect(ownDisabled.body.error.message).toMatch(/flow is disabled: flow-alice-off/);
+  });
 });
 
 describe("Web Flow document replacement", () => {

@@ -512,11 +512,11 @@ export async function validateTaskFlowReference(
   }
   let resolved: ResolvedCatalogFlow;
   try {
-    resolved = await resolveCatalogFlow(repoPath, candidate);
+    // Resolve disabled Flows too, so the enabled check below runs only after
+    // authorization: an unauthorized caller must not learn that a disabled
+    // Flow with this id exists.
+    resolved = await resolveCatalogFlow(repoPath, candidate, { requireEnabled: false });
   } catch (error) {
-    if (error instanceof CatalogFlowDisabledError) {
-      throw new WebInputError(error.message);
-    }
     if (error instanceof CatalogFlowNotFoundError) throw pathError;
     throw error;
   }
@@ -532,6 +532,9 @@ export async function validateTaskFlowReference(
       if (error instanceof WebNotFoundError) throw pathError;
       throw error;
     }
+  }
+  if (!resolved.record.enabled) {
+    throw new WebInputError(new CatalogFlowDisabledError(candidate).message);
   }
   return { flowPath: resolved.id, flowId: resolved.id };
 }
