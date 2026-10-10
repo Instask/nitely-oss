@@ -181,6 +181,62 @@ describe("repository-scoped flowId for work items", () => {
   });
 });
 
+describe("Web task creation from a catalog user Flow", () => {
+  const taskBody = (flowPath: string, extra: Record<string, unknown> = {}) => ({
+    title: "catalog task",
+    spec: "# Spec\n\nDo it.\n",
+    techDesign: "# Design\n\nPlan.\n",
+    flowPath,
+    ...extra,
+  });
+
+  it("accepts a stored Flow id and runs preflight against the stored document", async () => {
+    const home = await createRepo("home");
+    const b = await createRepo("b");
+    const store = openFlowStore(home);
+    store.createFlow(
+      { name: "catalog-only", document: flow({ name: "catalog-only" }, ["spec", "tech-design"]) },
+      { createId: () => "flow-catalog-only" },
+    );
+    store.close();
+    const server = await start(home, b);
+
+    const created = await call(server, "POST", "/api/tasks", taskBody("flow-catalog-only"));
+    expect(created.status).toBe(201);
+    expect(created.body.task).toMatchObject({ flowPath: "flow-catalog-only", flowId: "flow-catalog-only" });
+
+    const preflight = await call(server, "GET", `/api/tasks/${created.body.task.id}/preflight`);
+    expect(preflight.status).toBe(200);
+    expect(preflight.body.preflight).toMatchObject({ flowPath: "flow-catalog-only", flowName: "catalog-only" });
+  });
+
+  it("refuses unknown, disabled, and other users' stored Flows like a missing path", async () => {
+    const home = await createRepo("home");
+    const b = await createRepo("b");
+    const alice = await createUser(home, { email: "alice@example.test", password: "alice password passphrase", role: "user" });
+    await createUser(home, { email: "bob@example.test", password: "bob password passphrase", role: "user" });
+    const store = openFlowStore(home);
+    store.createFlow({ name: "alice-only", document: flow({ name: "alice-only" }), ownerId: alice.id }, { createId: () => "flow-alice" });
+    store.close();
+    const server = await start(home, b, { authMode: "required", providerEnv: {} });
+    const bobCookie = await login(server, "bob@example.test", "bob password passphrase");
+    const aliceCookie = await login(server, "alice@example.test", "alice password passphrase");
+
+    const missing = await call(server, "POST", "/api/tasks", taskBody("flow-nope"), aliceCookie);
+    expect(missing.status).toBe(400);
+    expect(missing.body.error.message).toMatch(/flow path must exist inside the repository/);
+    const foreign = await call(server, "POST", "/api/tasks", taskBody("flow-alice"), bobCookie);
+    expect(foreign.status).toBe(400);
+    expect(foreign.body.error.message).toMatch(/flow path must exist inside the repository/);
+    expect((await call(server, "POST", "/api/tasks", taskBody("flow-alice"), aliceCookie)).status).toBe(201);
+
+    expect((await call(server, "PUT", "/api/flows/flow-alice", { enabled: false }, aliceCookie)).status).toBe(200);
+    const disabled = await call(server, "POST", "/api/tasks", taskBody("flow-alice"), aliceCookie);
+    expect(disabled.status).toBe(400);
+    expect(disabled.body.error.message).toMatch(/flow is disabled/);
+  });
+});
+
 describe("Web Flow document replacement", () => {
   it("clears workItemType removed from the document, consistently with the runtime", async () => {
     const home = await createRepo("home");

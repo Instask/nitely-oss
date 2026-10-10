@@ -9257,6 +9257,7 @@ async function handleApiRequest(
           : {}),
         ...(templateSelection ? { template: templateSelection.template } : {}),
         resyncRepository: () => syncStoredWebRepository(repository),
+        authorizeCatalogFlow: (record) => requireRecordAccess(record, user, "flow not found"),
       },
     );
     scheduleDependencySuggestionRefresh(repository.path, task.id);
@@ -9577,6 +9578,7 @@ async function handleApiRequest(
         repoId: repository.id,
         initialStatus: "draft",
         specStatus: "draft",
+        authorizeCatalogFlow: (record) => requireRecordAccess(record, user, "flow not found"),
         ...(templateSelection ? { template: templateSelection.template } : {}),
         source:
           normalizedTicket && sourceSnapshot && sourceDrift

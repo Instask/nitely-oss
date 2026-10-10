@@ -5,7 +5,9 @@ import {
   CatalogFlowNotFoundError,
   isFlowSeedKey,
   resolveCatalogFlow,
+  type ResolvedCatalogFlow,
 } from "../flows/catalog.js";
+import type { FlowRecord } from "../flows/store.js";
 import {
   mkdir,
   readdir,
@@ -239,6 +241,8 @@ export interface TaskRecord {
   specReadinessOverride?: TaskSpecReadinessOverride;
   repoId?: string;
   flowPath: string;
+  /** Store id when the task runs a user Flow from the catalog. */
+  flowId?: string;
   overrides?: RunOverrides;
   template?: FlowTemplateLineage;
   issueUrl?: string;
@@ -293,6 +297,11 @@ export interface CreateTaskOptions {
    * resulting error points at the path rather than at the stale snapshot.
    */
   resyncRepository?: () => Promise<boolean>;
+  /**
+   * Check the caller may use a user Flow from the catalog. Throws to refuse.
+   * Without it, any stored Flow id is accepted.
+   */
+  authorizeCatalogFlow?: (record: FlowRecord) => void;
 }
 
 const defaultFlowPath = "flows/implement-spec-bootstrap.json";
@@ -475,6 +484,56 @@ export async function validateFlowPath(
     }
     throw error;
   }
+}
+
+export interface TaskFlowReference {
+  flowPath: string;
+  /** Set when the reference named a user Flow in the catalog by store id. */
+  flowId?: string;
+}
+
+/**
+ * Validate a task's Flow reference. Accepts everything
+ * {@link validateFlowPath} accepts, plus the store id of an enabled user Flow
+ * in the catalog, so `nitely flow list` ids work for tasks the same way they
+ * do for work items.
+ */
+export async function validateTaskFlowReference(
+  repoPath: string,
+  candidate: string,
+  authorize?: (record: FlowRecord) => void,
+): Promise<TaskFlowReference> {
+  let pathError: unknown;
+  try {
+    return { flowPath: await validateFlowPath(repoPath, candidate) };
+  } catch (error) {
+    if (!(error instanceof WebInputError) || isFlowSeedKey(candidate)) throw error;
+    pathError = error;
+  }
+  let resolved: ResolvedCatalogFlow;
+  try {
+    resolved = await resolveCatalogFlow(repoPath, candidate);
+  } catch (error) {
+    if (error instanceof CatalogFlowDisabledError) {
+      throw new WebInputError(error.message);
+    }
+    if (error instanceof CatalogFlowNotFoundError) throw pathError;
+    throw error;
+  }
+  if (resolved.record.origin === "system") {
+    // System Flows keep their seed key as the public id; validateFlowPath
+    // already handled those.
+    throw pathError;
+  }
+  if (authorize) {
+    try {
+      authorize(resolved.record);
+    } catch (error) {
+      if (error instanceof WebNotFoundError) throw pathError;
+      throw error;
+    }
+  }
+  return { flowPath: resolved.id, flowId: resolved.id };
 }
 
 async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
@@ -819,14 +878,23 @@ export async function createTask(
   }
 
   const requestedFlowPath = normalizeOptionalText(input.flowPath) ?? defaultFlowPath;
-  let flowPath: string;
+  let flowReference: TaskFlowReference;
   try {
-    flowPath = await validateFlowPath(repoPath, requestedFlowPath);
+    flowReference = await validateTaskFlowReference(
+      repoPath,
+      requestedFlowPath,
+      options.authorizeCatalogFlow,
+    );
   } catch (error) {
     if (!(error instanceof WebInputError) || !options.resyncRepository) throw error;
     await options.resyncRepository();
-    flowPath = await validateFlowPath(repoPath, requestedFlowPath);
+    flowReference = await validateTaskFlowReference(
+      repoPath,
+      requestedFlowPath,
+      options.authorizeCatalogFlow,
+    );
   }
+  const { flowPath, flowId } = flowReference;
   const id = options.createId?.() ?? `task-${randomUUID()}`;
   validateTaskId(id);
 
@@ -847,6 +915,7 @@ export async function createTask(
     ...(options.planningNotes ? { planningNotes: options.planningNotes } : {}),
     ...(options.repoId ? { repoId: options.repoId } : {}),
     flowPath,
+    ...(flowId ? { flowId } : {}),
     ...(normalizeRunOverrides(input.overrides) ? { overrides: normalizeRunOverrides(input.overrides) } : {}),
     ...(options.template ? { template: options.template } : {}),
     specPath,
