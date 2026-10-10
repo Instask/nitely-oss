@@ -15,6 +15,8 @@ export interface ProviderAuthMethodDescriptor {
   readAliases: string[];
   /** Whether the store may hold credential material for this method. */
   writable: boolean;
+  /** Prefix every valid value starts with, checked when a value is pasted. */
+  valuePrefix?: string;
 }
 
 export interface ProviderDescriptor {
@@ -175,6 +177,7 @@ export const PROVIDER_DESCRIPTORS: ProviderDescriptor[] = [
         env: "OPENROUTER_API_KEY",
         readAliases: [],
         writable: true,
+        valuePrefix: "sk-or-",
       },
     ],
     hints: ["OPENROUTER_API_KEY", "pi --version", "NITELY_PI_COMMAND"],
@@ -284,4 +287,23 @@ export function readFirstEnv(
     if (env[name]) return env[name];
   }
   return undefined;
+}
+
+/**
+ * Why a pasted credential cannot be a value of this provider's method, or
+ * undefined when its shape is acceptable. Only methods with a documented key
+ * format are checked; the provider remains the authority on validity.
+ */
+export function providerValueShapeProblem(
+  providerId: ProviderId,
+  authMethod: ProviderAuthMethod | undefined,
+  value: string,
+): string | undefined {
+  const descriptor = PROVIDER_DESCRIPTORS.find((candidate) => candidate.id === providerId);
+  if (!descriptor) return undefined;
+  const method = authMethod
+    ? descriptor.authMethods.find((candidate) => candidate.method === authMethod)
+    : descriptor.authMethods.find((candidate) => candidate.writable);
+  if (!method?.valuePrefix || value.startsWith(method.valuePrefix)) return undefined;
+  return `${descriptor.name} ${method.label.toLowerCase()} values start with "${method.valuePrefix}"; the pasted value does not, so it is not a ${descriptor.name} key`;
 }

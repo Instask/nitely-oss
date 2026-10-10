@@ -5546,7 +5546,9 @@ class Component extends DCLogic {
     const target = this.providerDataset(e);
     const res = await this.api(this.providerConnectionPath(target.providerId, target.connectionId) + "/validate", { method: "POST" });
     if (res && res.ok) {
-      this.setProviderFlash("success", target.providerId + " credential is valid.");
+      this.setProviderFlash("success", res.checked === "provider"
+        ? target.providerId + " accepted the credential."
+        : target.providerId + " credential is stored and not expired. Nitely cannot check it with the provider; a run will.");
     } else if (res) {
       this.setProviderFlash("error", target.providerId + " credential is " + (res.reason || "invalid") + ". Reconnect it.");
     }

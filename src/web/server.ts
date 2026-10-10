@@ -158,6 +158,7 @@ import {
   PROVIDER_DESCRIPTORS,
   findAuthMethod,
   findDescriptor,
+  providerValueShapeProblem,
 } from "../providers/descriptors.js";
 import { FileProviderConnectionStore } from "../providers/file-store.js";
 import type { ProviderOAuthOptions } from "../providers/file-store.js";
@@ -543,6 +544,8 @@ export interface StartWebServerInput {
   providerStore?: ProviderConnectionStore;
   /** HTTP client for provider OAuth token and identity endpoints. */
   providerOAuthFetch?: typeof fetch;
+  /** HTTP client for checking a stored credential with its provider. */
+  providerValidationFetch?: typeof fetch;
   /** Clock for OAuth expiry and refresh decisions. */
   providerOAuthNow?: () => Date;
   cloneRepository?: CloneRepository;
@@ -8226,6 +8229,8 @@ async function handleApiRequest(
     if (request.method === "POST" && providerId && (!id || action === "rotate")) {
       const body = requireObject(await readRequestJson(request));
       if (typeof body.value !== "string" || !body.value.trim()) throw new WebInputError("value is required");
+      const shapeProblem = providerValueShapeProblem(providerId, existing?.authMethod ?? parsePastedProviderAuthMethod(providerId, body.authMethod), body.value.trim());
+      if (shapeProblem) throw new WebInputError(shapeProblem);
       if (body.label !== undefined && (typeof body.label !== "string" || body.label.length > 128)) throw new WebInputError("invalid label");
       const repositoryId = existing?.credential.repositoryId ?? validateBinding(body.repositoryId);
       const record = await store.setConnection({ providerId, value: body.value.trim(), authMethod: existing?.authMethod ?? parsePastedProviderAuthMethod(providerId, body.authMethod),
@@ -11370,6 +11375,8 @@ async function handleApiRequest(
         throw new WebInputError("value is required");
       }
       const authMethod = parsePastedProviderAuthMethod(providerId, body.authMethod);
+      const shapeProblem = providerValueShapeProblem(providerId, authMethod, value);
+      if (shapeProblem) throw new WebInputError(shapeProblem);
       const connectionId = optionalMetadataString(body, "connectionId");
       await requireExistingProviderCredentialWriteAccess(providerStore, providerId, user, connectionId);
       const label = optionalMetadataString(body, "label");
@@ -11497,7 +11504,7 @@ async function handleApiRequest(
       sendJson(response, 200, { ok: true });
       return true;
     }
-    const result = await validateProviderConnection(providerStore, record);
+    const result = await validateProviderConnection(providerStore, record, input.providerValidationFetch ?? fetch);
     sendJson(response, 200, result);
     return true;
   }
@@ -11645,6 +11652,8 @@ async function handleProviderOAuthCallback(
       ...(tokens.expiresAt ? { expiresAt: tokens.expiresAt } : {}),
       scopes: tokens.scopes ?? adapter.scopes,
       account,
+      // The identity lookup just succeeded with this token.
+      validated: true,
       label: account.login ?? account.email ?? account.displayName,
       metadata: parseProviderCredentialMetadata({}, user),
     });
@@ -11696,25 +11705,88 @@ async function disconnectProviderConnection(
   await providerStore.revokeConnection(record.providerId, { connectionId: record.id });
 }
 
+/**
+ * Check a stored credential. Where the provider offers a cheap authenticated
+ * endpoint the value is sent there and `checked` is `provider`; a pass stamps
+ * `lastValidatedAt`. Otherwise only presence and expiry are checked
+ * (`checked: stored`) and nothing is stamped, so the record never claims a
+ * validation that did not happen.
+ */
 async function validateProviderConnection(
   providerStore: ProviderConnectionStore,
   record: ProviderConnectionRecord,
-): Promise<{ ok: boolean; reason?: string; connection?: ProviderConnectionSummary }> {
+  fetchImpl: typeof fetch,
+): Promise<{ ok: boolean; checked: "provider" | "stored"; reason?: string; connection?: ProviderConnectionSummary }> {
+  let accessToken: string;
   try {
     const connection = await providerStore.getConnection(record.providerId, {
       connectionId: record.id,
     });
-    await connection.getAccessToken();
+    accessToken = await connection.getAccessToken();
   } catch (error) {
     if (error instanceof ReconnectRequiredError) {
-      return { ok: false, reason: error.reason };
+      return { ok: false, checked: "stored", reason: error.reason };
     }
     throw error;
+  }
+  let checked: "provider" | "stored" = "stored";
+  if (record.providerId === "openrouter" && record.authMethod === "api_key") {
+    checked = "provider";
+    let status: number;
+    let body: unknown;
+    try {
+      const response = await fetchImpl("https://openrouter.ai/api/v1/key", {
+        headers: { authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(10_000),
+      });
+      status = response.status;
+      if (status >= 200 && status < 300) {
+        body = await response.json().catch(() => undefined);
+      } else {
+        await response.body?.cancel().catch(() => undefined);
+      }
+    } catch (error) {
+      // Never echo the error text: a client error can quote request headers.
+      return {
+        ok: false,
+        checked,
+        reason: `unverified: OpenRouter could not be reached (${error instanceof Error && error.name ? error.name : "network error"})`,
+      };
+    }
+    if (status === 401 || status === 403) {
+      return { ok: false, checked, reason: `rejected by OpenRouter (${status})` };
+    }
+    if (status < 200 || status >= 300) {
+      return { ok: false, checked, reason: `unverified: OpenRouter answered ${status}` };
+    }
+    const data = typeof body === "object" && body !== null
+      ? (body as { data?: unknown }).data
+      : undefined;
+    if (typeof data !== "object" || data === null) {
+      return { ok: false, checked, reason: "unverified: OpenRouter returned no key details" };
+    }
+    const details = data as { is_management_key?: unknown; is_provisioning_key?: unknown };
+    if (details.is_management_key === true || details.is_provisioning_key === true) {
+      // Management keys answer this endpoint but are blocked from inference.
+      return {
+        ok: false,
+        checked,
+        reason: "a management key, which OpenRouter blocks from inference; use an inference API key from https://openrouter.ai/settings/keys",
+      };
+    }
+    const stamped = await providerStore.recordValidation?.(record.providerId, record.id, accessToken);
+    if (stamped === false) {
+      return {
+        ok: false,
+        checked,
+        reason: "unverified: the credential changed while it was being validated; validate again",
+      };
+    }
   }
   const refreshed = (await providerStore.listConnections?.(record.providerId))?.find(
     (candidate) => candidate.id === record.id,
   ) ?? record;
-  return { ok: true, connection: publicProviderConnection(refreshed) };
+  return { ok: true, checked, connection: publicProviderConnection(refreshed) };
 }
 
 /**

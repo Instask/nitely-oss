@@ -190,6 +190,12 @@ export interface SetConnectionInput {
   readonly scopes?: string[];
   readonly account?: ProviderAccountIdentity;
   readonly metadata?: Partial<ProviderCredentialMetadata>;
+  /**
+   * The value was just proven against the provider (for example an OAuth
+   * token whose identity lookup succeeded). Only then is `lastValidatedAt`
+   * stamped; a pasted value is unvalidated until a provider check passes.
+   */
+  readonly validated?: boolean;
 }
 
 export interface ProviderConnectionStore {
@@ -213,6 +219,11 @@ export interface ProviderConnectionStore {
   updateConnectionMetadata?(providerId: ProviderId, connectionId: string, metadata: { repositoryId?: string | null; label?: string | null }): Promise<ProviderConnectionRecord>;
   /** Makes one connection the runtime default for its (provider, method). */
   setDefaultConnection?(providerId: ProviderId, connectionId: string): Promise<void>;
+  /**
+   * Stamps `lastValidatedAt` after a provider accepted `validatedValue`, only
+   * if that is still the stored credential. Returns whether it stamped.
+   */
+  recordValidation?(providerId: ProviderId, connectionId: string, validatedValue: string): Promise<boolean>;
   /** Files consulted for credentials, primary first, for operator-facing messages. */
   describeCredentialSources?(): string[];
 }
