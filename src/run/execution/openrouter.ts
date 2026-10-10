@@ -98,6 +98,12 @@ export function describeOpenRouterFailure(input: {
   if (/no api key found for openrouter/.test(lower)) {
     return `Pi found no OpenRouter API key. Set ${OPENROUTER_API_KEY_ENV} or connect OpenRouter in the Web Console, then resume the run.`;
   }
+  if (/\bmissing authentication header\b/.test(lower)) {
+    // OpenRouter answers this when the bearer value is not shaped like one of
+    // its keys, so the stored credential is the wrong kind of value rather
+    // than a revoked key.
+    return `OpenRouter did not accept the stored value as an API key (401 Missing Authentication header). OpenRouter keys start with "sk-or-"; replace ${OPENROUTER_API_KEY_ENV} or the OpenRouter connection in the Web Console with a key from https://openrouter.ai/settings/keys, then resume the run.`;
+  }
   if (
     /(?:^|\n)\s*401\b/.test(text) ||
     /\buser not found\b/.test(lower) ||

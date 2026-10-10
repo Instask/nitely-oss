@@ -32,6 +32,25 @@ describe("FileProviderConnectionStore", () => {
     "jira",
   ];
 
+  describe("lastValidatedAt", () => {
+    it("is stamped only for a value proven valid, or after recordValidation", async () => {
+      const store = new FileProviderConnectionStore({ path: storePath, env: {}, commandStatus: async () => false });
+      const pasted = await store.setConnection({ providerId: "openrouter", authMethod: "api_key", value: "sk-or-v1-pasted" });
+      expect(pasted.lastValidatedAt).toBeUndefined();
+
+      await store.recordValidation(pasted.providerId, pasted.id);
+      const [validated] = await store.listConnections("openrouter");
+      expect(validated?.lastValidatedAt).toEqual(expect.any(String));
+
+      // Replacing the value drops the earlier validation.
+      const replaced = await store.setConnection({ providerId: "openrouter", authMethod: "api_key", connectionId: pasted.id, value: "sk-or-v1-new" });
+      expect(replaced.lastValidatedAt).toBeUndefined();
+
+      const oauth = await store.setConnection({ providerId: "github", authMethod: "oauth", value: "gho_token", validated: true });
+      expect(oauth.lastValidatedAt).toEqual(expect.any(String));
+    });
+  });
+
   describe("setConnection", () => {
     it.each(writableProviders)(
       "writes %s value to the file",

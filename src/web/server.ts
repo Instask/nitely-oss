@@ -158,6 +158,7 @@ import {
   PROVIDER_DESCRIPTORS,
   findAuthMethod,
   findDescriptor,
+  providerValueShapeProblem,
 } from "../providers/descriptors.js";
 import { FileProviderConnectionStore } from "../providers/file-store.js";
 import type { ProviderOAuthOptions } from "../providers/file-store.js";
@@ -542,6 +543,8 @@ export interface StartWebServerInput {
   providerStore?: ProviderConnectionStore;
   /** HTTP client for provider OAuth token and identity endpoints. */
   providerOAuthFetch?: typeof fetch;
+  /** HTTP client for checking a stored credential with its provider. */
+  providerValidationFetch?: typeof fetch;
   /** Clock for OAuth expiry and refresh decisions. */
   providerOAuthNow?: () => Date;
   cloneRepository?: CloneRepository;
@@ -8197,6 +8200,8 @@ async function handleApiRequest(
     if (request.method === "POST" && providerId && (!id || action === "rotate")) {
       const body = requireObject(await readRequestJson(request));
       if (typeof body.value !== "string" || !body.value.trim()) throw new WebInputError("value is required");
+      const shapeProblem = providerValueShapeProblem(providerId, existing?.authMethod ?? parsePastedProviderAuthMethod(providerId, body.authMethod), body.value.trim());
+      if (shapeProblem) throw new WebInputError(shapeProblem);
       if (body.label !== undefined && (typeof body.label !== "string" || body.label.length > 128)) throw new WebInputError("invalid label");
       const repositoryId = existing?.credential.repositoryId ?? validateBinding(body.repositoryId);
       const record = await store.setConnection({ providerId, value: body.value.trim(), authMethod: existing?.authMethod ?? parsePastedProviderAuthMethod(providerId, body.authMethod),
@@ -11337,6 +11342,8 @@ async function handleApiRequest(
         throw new WebInputError("value is required");
       }
       const authMethod = parsePastedProviderAuthMethod(providerId, body.authMethod);
+      const shapeProblem = providerValueShapeProblem(providerId, authMethod, value);
+      if (shapeProblem) throw new WebInputError(shapeProblem);
       const connectionId = optionalMetadataString(body, "connectionId");
       await requireExistingProviderCredentialWriteAccess(providerStore, providerId, user, connectionId);
       const label = optionalMetadataString(body, "label");
@@ -11464,7 +11471,7 @@ async function handleApiRequest(
       sendJson(response, 200, { ok: true });
       return true;
     }
-    const result = await validateProviderConnection(providerStore, record);
+    const result = await validateProviderConnection(providerStore, record, input.providerValidationFetch ?? fetch);
     sendJson(response, 200, result);
     return true;
   }
@@ -11612,6 +11619,8 @@ async function handleProviderOAuthCallback(
       ...(tokens.expiresAt ? { expiresAt: tokens.expiresAt } : {}),
       scopes: tokens.scopes ?? adapter.scopes,
       account,
+      // The identity lookup just succeeded with this token.
+      validated: true,
       label: account.login ?? account.email ?? account.displayName,
       metadata: parseProviderCredentialMetadata({}, user),
     });
@@ -11663,25 +11672,60 @@ async function disconnectProviderConnection(
   await providerStore.revokeConnection(record.providerId, { connectionId: record.id });
 }
 
+/**
+ * Check a stored credential. Where the provider offers a cheap authenticated
+ * endpoint the value is sent there and `checked` is `provider`; a pass stamps
+ * `lastValidatedAt`. Otherwise only presence and expiry are checked
+ * (`checked: stored`) and nothing is stamped, so the record never claims a
+ * validation that did not happen.
+ */
 async function validateProviderConnection(
   providerStore: ProviderConnectionStore,
   record: ProviderConnectionRecord,
-): Promise<{ ok: boolean; reason?: string; connection?: ProviderConnectionSummary }> {
+  fetchImpl: typeof fetch,
+): Promise<{ ok: boolean; checked: "provider" | "stored"; reason?: string; connection?: ProviderConnectionSummary }> {
+  let accessToken: string;
   try {
     const connection = await providerStore.getConnection(record.providerId, {
       connectionId: record.id,
     });
-    await connection.getAccessToken();
+    accessToken = await connection.getAccessToken();
   } catch (error) {
     if (error instanceof ReconnectRequiredError) {
-      return { ok: false, reason: error.reason };
+      return { ok: false, checked: "stored", reason: error.reason };
     }
     throw error;
+  }
+  let checked: "provider" | "stored" = "stored";
+  if (record.providerId === "openrouter" && record.authMethod === "api_key") {
+    checked = "provider";
+    let status: number;
+    try {
+      const response = await fetchImpl("https://openrouter.ai/api/v1/key", {
+        headers: { authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(10_000),
+      });
+      status = response.status;
+      await response.body?.cancel().catch(() => undefined);
+    } catch (error) {
+      return {
+        ok: false,
+        checked,
+        reason: `unverified: OpenRouter could not be reached (${error instanceof Error ? error.message : String(error)})`,
+      };
+    }
+    if (status === 401 || status === 403) {
+      return { ok: false, checked, reason: `rejected by OpenRouter (${status})` };
+    }
+    if (status < 200 || status >= 300) {
+      return { ok: false, checked, reason: `unverified: OpenRouter answered ${status}` };
+    }
+    await providerStore.recordValidation?.(record.providerId, record.id);
   }
   const refreshed = (await providerStore.listConnections?.(record.providerId))?.find(
     (candidate) => candidate.id === record.id,
   ) ?? record;
-  return { ok: true, connection: publicProviderConnection(refreshed) };
+  return { ok: true, checked, connection: publicProviderConnection(refreshed) };
 }
 
 /**

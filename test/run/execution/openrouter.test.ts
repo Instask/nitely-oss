@@ -55,6 +55,17 @@ describe("openRouterModelProblem", () => {
   );
 });
 
+describe("describeOpenRouterFailure for a malformed key", () => {
+  it("says the stored value is not an OpenRouter key on 401 Missing Authentication header", () => {
+    const explanation = describeOpenRouterFailure({
+      model: "qwen/qwen3-coder-next",
+      stderr: '401: {"message":"Missing Authentication header","code":401}\n',
+    });
+    expect(explanation).toMatch(/did not accept the stored value as an API key/);
+    expect(explanation).toMatch(/start with "sk-or-"/);
+  });
+});
+
 describe("createOpenRouterAgentArgs", () => {
   it("selects Pi's openrouter provider and passes the exact model id", () => {
     expect(createOpenRouterAgentArgs("qwen/qwen3-coder-next")).toEqual([

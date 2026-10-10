@@ -895,7 +895,7 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
         credential: connectionMetadataForWrite(existing?.credential, input, now),
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
-        lastValidatedAt: now,
+        ...(input.validated === true ? { lastValidatedAt: now } : {}),
       };
       if (!this.connectionManageable(record)) throw new MissingConnectionError(input.providerId, "connection is unavailable in this scope");
       await this.primary.secrets.put(record.credentialRef, {
@@ -1056,6 +1056,24 @@ export class FileProviderConnectionStore implements ProviderConnectionStore {
       );
       await writeConnections(this.primary.path, file);
       await this.appendAuditEvent({ version: 1, action: "default", providerId, createdAt: this.now().toISOString(), result: "success", connectionId: target.id, authMethod: target.authMethod, ...safeAuditMetadata(target.credential) });
+    });
+  }
+
+  async recordValidation(providerId: ProviderId, connectionId: string): Promise<void> {
+    return await withKnowledgeLease({ path: this.primary.path + ".lock", waitMs: 10_000 }, async () => {
+      const file = await this.loadForWrite(this.primary);
+      const target = file.connections.find(
+        (record) => record.id === connectionId && record.providerId === providerId,
+      );
+      if (!target || !this.connectionManageable(target)) {
+        throw new MissingConnectionError(
+          providerId,
+          `provider ${providerId} has no connection ${connectionId}`,
+        );
+      }
+      await this.updateRecord(this.primary, target.id, {
+        lastValidatedAt: this.now().toISOString(),
+      });
     });
   }
 

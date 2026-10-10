@@ -39,6 +39,9 @@ path keeps tool use working for non-Anthropic, non-OpenAI models:
      provider secret store (`connections.secrets.json`, mode `0600`), never in
      `connections.json`; API responses, provider status, run events, and
      artifacts show only connection metadata.
+     A pasted value that does not start with `sk-or-` is refused. **Validate**
+     sends the key to OpenRouter (`GET /api/v1/key`). Only an accepted key gets
+     `lastValidatedAt`; saving a key does not set it.
    - **Environment:** export `OPENROUTER_API_KEY` for the Nitely process.
 3. Select the runtime and an OpenRouter model id in the flow.
 

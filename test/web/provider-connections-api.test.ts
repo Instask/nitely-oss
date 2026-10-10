@@ -32,13 +32,14 @@ async function createRepo() {
   return repo;
 }
 
-async function start(repoPath: string) {
+async function start(repoPath: string, providerValidationFetch?: typeof fetch) {
   const server = await startWebServer({
     repoPath,
     host: "127.0.0.1",
     port: 0,
     providerEnv: {},
     providerCommandStatus: async () => false,
+    ...(providerValidationFetch ? { providerValidationFetch } : {}),
   });
   servers.push(server);
   return server;
@@ -157,6 +158,50 @@ describe("provider connections API", () => {
     expect(JSON.stringify(statuses)).not.toContain("sk-or-v1-console-key-0123456789");
     const stored = await readFile(join(repoPath, ".nitely", "connections.json"), "utf8");
     expect(stored).not.toContain("sk-or-v1-console-key-0123456789");
+  });
+
+  it("refuses a value that is not shaped like an OpenRouter key", async () => {
+    const repoPath = await createRepo();
+    const server = await start(repoPath);
+
+    const refused = await post(server, "/api/providers/openrouter/connection", {
+      value: "ghp_0123456789abcdef0123456789abcdef0123",
+      authMethod: "api_key",
+    });
+    expect(refused.status).toBe(400);
+    const body = await json(refused);
+    expect(body.error.message).toMatch(/start with "sk-or-"/);
+    expect(JSON.stringify(body)).not.toContain("ghp_0123456789abcdef");
+  });
+
+  it("stamps lastValidatedAt only after OpenRouter accepts the stored key", async () => {
+    const repoPath = await createRepo();
+    let status = 401;
+    const seen: Array<{ url: string; authorization: string | null }> = [];
+    const server = await start(repoPath, (async (url: string | URL | Request, init?: RequestInit) => {
+      seen.push({ url: String(url), authorization: new Headers(init?.headers).get("authorization") });
+      return new Response("{}", { status });
+    }) as typeof fetch);
+
+    const saved = await json(await post(server, "/api/providers/openrouter/connection", {
+      value: "sk-or-v1-console-key-0123456789",
+      authMethod: "api_key",
+    }));
+    expect(saved.connection.lastValidatedAt).toBeUndefined();
+    const validatePath = `/api/providers/openrouter/connections/${saved.connection.id}/validate`;
+
+    const rejected = await json(await post(server, validatePath, {}));
+    expect(rejected).toEqual({ ok: false, checked: "provider", reason: "rejected by OpenRouter (401)" });
+    expect(seen).toEqual([
+      { url: "https://openrouter.ai/api/v1/key", authorization: "Bearer sk-or-v1-console-key-0123456789" },
+    ]);
+    const afterReject = await json(await fetch(`${server.url}/api/providers`));
+    expect(JSON.stringify(afterReject)).not.toContain("lastValidatedAt");
+
+    status = 200;
+    const accepted = await json(await post(server, validatePath, {}));
+    expect(accepted).toMatchObject({ ok: true, checked: "provider", connection: { id: saved.connection.id } });
+    expect(accepted.connection.lastValidatedAt).toEqual(expect.any(String));
   });
 
   it("keeps multiple connections, selects a default, and clears one by id", async () => {
