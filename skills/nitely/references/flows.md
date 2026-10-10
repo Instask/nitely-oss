@@ -160,9 +160,9 @@ can mutate the worktree.
 
 | Flow | Use |
 | --- | --- |
-| `implement-spec-bootstrap.json` | Spec + tech design → draft PR (Codex baseline) |
-| `implement-spec-bootstrap-claude.json` | Same topology on the Claude runtime |
-| `implement-spec-bootstrap-grok.json` / `-pi.json` | Grok Build / Pi variants |
+| `implement-spec-bootstrap.json` | Spec + tech design → draft PR. Choose the runtime with `--runtime` |
+| `implement-spec-bootstrap-claude.json` | Deprecated alias of the base Flow with `runtime=claude` |
+| `implement-spec-bootstrap-grok.json` / `-pi.json` | Deprecated aliases: Grok Build, or OpenRouter `qwen/qwen3-coder-next` |
 | `plan-approve-implement-bootstrap.json` | Plan and approval before implementation |
 | `rework-pr-bootstrap.json` | Rework an existing PR |
 | `rework-spec-bootstrap.json` / `rework-tech-design-bootstrap.json` | Rework planning artifacts |

@@ -1,3 +1,4 @@
+import { normalizeRunOverrides, type RunOverrides } from "../flow/overrides.js";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -383,6 +384,7 @@ async function observeGitHubChecks(repoPath: string, target: string): Promise<{ 
 }
 
 export function defaultCiRepairDependencies(input: {
+  overrides?: RunOverrides;
   repoPath: string;
   flowPath: string;
   inputs: Record<string, ResourceReference>;
@@ -414,6 +416,8 @@ export function defaultCiRepairDependencies(input: {
       }
       const result = await runFlow({
         flowPath: source.flowPath,
+        aliasOf: source.aliasOf,
+        overrides: normalizeRunOverrides({ ...source.overrides, ...input.overrides }),
         repoPath: input.repoPath,
         flowDocument: JSON.stringify(flowDocument),
         inputs: {

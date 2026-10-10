@@ -289,6 +289,7 @@ describe("console Flow management", () => {
       const nodes: Record<string, { value: string; checked: boolean; focus: () => void }> = {};
       return {
         fields,
+        reset() {},
         querySelector(selector: string) {
           nodes[selector] ??= { value: "", checked: false, focus() {} };
           return nodes[selector];
@@ -509,6 +510,7 @@ describe("console Flow management", () => {
         "taskFormFlowTemplates",
         "planWork",
         "createTask",
+        "executionOverrides",
       ]);
       c.state = {
         plannerTemplateRepoId: "repo-b",

@@ -1,3 +1,4 @@
+import { createDefaultAgentRuntimeRegistry } from "../run/execution/local.js";
 import { normalizeRunOverrides, RunOverridesError, type RunOverrides } from "../flow/overrides.js";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
@@ -2211,6 +2212,7 @@ function requireCurrentOrganizationPermission(
 
 function taskInputFromJson(value: unknown): {
   overrides?: RunOverrides;
+  aliasOf?: string;
   title: string;
   spec: string;
   techDesign: string;
@@ -2534,6 +2536,7 @@ function taskReworkRequestInputFromJson(value: unknown): {
 
 function draftSpecInputFromJson(value: unknown): {
   overrides?: RunOverrides;
+  aliasOf?: string;
   sourceType: DraftSpecSourceType;
   prompt?: string;
   text?: string;
@@ -5819,6 +5822,7 @@ function appendAcceptedRunCreated(input: {
   inputs: RunFlowInput["inputs"];
   configuration?: RunFlowInput["configuration"];
   overrides?: RunOverrides;
+  aliasOf?: string;
   providerConnections?: RunFlowInput["providerConnections"];
   workItemId: string;
   workItemType?: string;
@@ -5838,6 +5842,7 @@ function appendAcceptedRunCreated(input: {
       inputs: input.inputs,
       configuration: input.configuration,
       overrides: input.overrides,
+      aliasOf: input.aliasOf,
       providerConnections: input.providerConnections,
       branchName: input.branchName,
       workItemId: input.workItemId,
@@ -5870,6 +5875,7 @@ function ensureRunCompletedEvent(
       inputs: runInput.inputs,
       ...(runInput.configuration ? { configuration: runInput.configuration } : {}),
       ...(runInput.overrides ? { overrides: runInput.overrides } : {}),
+      ...(runInput.aliasOf ? { aliasOf: runInput.aliasOf } : {}),
       ...(runInput.providerConnections ? { providerConnections: runInput.providerConnections } : {}),
       workItemId: runInput.workItemId,
       workItemType: runInput.workItemType,
@@ -10708,6 +10714,14 @@ async function handleApiRequest(
       }),
     ]);
     sendJson(response, 200, { run: runStartResponse(outcome) });
+    return true;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/runtimes") {
+    await requireUserContext(request, input, homeRepoPath);
+    sendJson(response, 200, {
+      runtimes: createDefaultAgentRuntimeRegistry().supportedIds().map((id) => ({ id })),
+    });
     return true;
   }
 

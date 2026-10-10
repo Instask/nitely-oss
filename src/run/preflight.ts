@@ -1,4 +1,4 @@
-import { applyRunOverrides, type RunOverrides } from "../flow/overrides.js";
+import { normalizeRunOverrides, type RunOverrides } from "../flow/overrides.js";
 import { constants } from "node:fs";
 import { access, readFile, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -16,6 +16,7 @@ import {
   type RuntimeCandidate,
 } from "../flow/schema.js";
 import {
+  applyResolvedFlowSelection,
   CatalogFlowNotFoundError,
   CatalogFlowDisabledError,
   catalogFlowRunLabel,
@@ -94,6 +95,8 @@ export interface RunPreflightReport {
 
 export interface EvaluateRunPreflightInput {
   overrides?: RunOverrides;
+  /** Set when `flowDocument` is already the alias target, so preflight still strips legacy models. */
+  aliasOf?: string;
   repoPath: string;
   flowPath: string;
   flowDocument?: string;
@@ -186,16 +189,25 @@ function emptyReport(input: {
 
 async function loadPreflightFlow(
   input: EvaluateRunPreflightInput & { repoPath: string },
-): Promise<LoadedFlow | RunPreflightIssue> {
+): Promise<{ loaded: LoadedFlow; aliasOf?: string; overrides?: RunOverrides } | RunPreflightIssue> {
   try {
-    const document = input.flowDocument !== undefined
-      ? input.flowDocument
-      : (await resolveRunFlowSource(input.repoPath, input.flowPath))
-          .flowDocument;
+    let document = input.flowDocument;
+    let aliasOf = input.aliasOf;
+    let sourceOverrides: RunOverrides | undefined;
+    if (document === undefined) {
+      const source = await resolveRunFlowSource(input.repoPath, input.flowPath);
+      document = source.flowDocument;
+      aliasOf = input.aliasOf ?? source.aliasOf;
+      sourceOverrides = source.overrides;
+    }
     // External inputs come from the Flow itself (declared + unproduced stage
     // inputs), so a valid Flow is never reported invalid because the run did
     // not supply an input; checkInputFiles reports those as missing-input.
-    return parseFlowDocument(document, { externalInputs: inferExternalInputs(document) });
+    return {
+      loaded: parseFlowDocument(document, { externalInputs: inferExternalInputs(document) }),
+      ...(aliasOf ? { aliasOf } : {}),
+      overrides: normalizeRunOverrides({ ...sourceOverrides, ...input.overrides }),
+    };
   } catch (error) {
     if (error instanceof FlowValidationError) {
       return issue(
@@ -631,18 +643,22 @@ export async function evaluateRunPreflight(
   }
 
   const inputs = input.inputs ?? {};
-  const loaded = await loadPreflightFlow(input);
-  if ("severity" in loaded) {
+  const prepared = await loadPreflightFlow(input);
+  if ("severity" in prepared) {
     return emptyReport({
       flowPath: input.flowPath,
       outputDirectory,
-      issues: [loaded],
+      issues: [prepared],
     });
   }
+  const loaded = prepared.loaded;
 
   let flow: Flow;
   try {
-    flow = applyRunOverrides(loaded.flow, input.overrides);
+    flow = applyResolvedFlowSelection(loaded.flow, {
+      aliasOf: prepared.aliasOf,
+      overrides: prepared.overrides,
+    });
   } catch (error) {
     return emptyReport({ flowPath: input.flowPath, outputDirectory, issues: [
       issue("blocking", "flow-invalid", error instanceof Error ? error.message : String(error), "Set valid runtime, model and effort overrides."),
@@ -740,9 +756,10 @@ export async function evaluateWorkItemRunPreflight(
             ? input.workItem.flowPath
             : await catalogFlowRunLabel(input.repoPath, resolved),
         flowDocument: resolved.document,
+        ...(resolved.aliasOf ? { aliasOf: resolved.aliasOf } : {}),
         inputs: input.workItem.inputs,
         configuration: input.workItem.configuration,
-        overrides: input.workItem.overrides,
+        overrides: normalizeRunOverrides({ ...resolved.overrides, ...input.workItem.overrides }),
         providerStore: input.providerStore,
         executionBackend: input.executionBackend,
         env: input.env,

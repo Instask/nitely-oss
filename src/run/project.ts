@@ -558,6 +558,7 @@ export interface ProjectedRun {
   flowName?: string;
   flowPath?: string;
   overrides?: RunOverrides;
+  aliasOf?: string;
   flowDocument?: string;
   flowDocumentSha256?: string;
   configurationSnapshotPath?: string;
@@ -1884,6 +1885,7 @@ export function projectRun(
       }
       projection.flowPath = asString(payload.flowPath);
       projection.overrides = normalizeRunOverrides(payload.overrides);
+      projection.aliasOf = asString(payload.aliasOf);
       projection.flowDocument = asString(payload.flowDocument);
       projection.flowDocumentSha256 = asString(payload.flowDocumentSha256);
       projection.configurationSnapshotPath = asString(

@@ -1,10 +1,11 @@
-import type { Effort, Flow } from "./schema.js";
+import { effortSchema, type Effort, type Flow } from "./schema.js";
 
 /** Per-run execution choices applied on top of the stored Flow document. */
 export interface RunOverrides {
   model?: string;
   effort?: Effort;
   runtime?: string;
+  questions?: "ask" | "auto" | "deny";
 }
 
 export class RunOverridesError extends Error {}
@@ -16,7 +17,7 @@ export function normalizeRunOverrides(value: unknown): RunOverrides | undefined 
   }
   const record = value as Record<string, unknown>;
   for (const key of Object.keys(record)) {
-    if (!["model", "effort", "runtime"].includes(key)) {
+    if (!["model", "effort", "runtime", "questions"].includes(key)) {
       throw new RunOverridesError(`unknown overrides field: ${key}`);
     }
   }
@@ -29,11 +30,17 @@ export function normalizeRunOverrides(value: unknown): RunOverrides | undefined 
     result[key] = record[key].trim();
   }
   if (record.effort !== undefined) {
-    const levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-    if (typeof record.effort !== "string" || !levels.includes(record.effort)) {
-      throw new RunOverridesError(`overrides.effort must be one of: ${levels.join(", ")}`);
+    const parsed = effortSchema.safeParse(record.effort);
+    if (!parsed.success) {
+      throw new RunOverridesError(`overrides.effort must be one of: ${effortSchema.options.join(", ")}`);
     }
-    result.effort = record.effort as Effort;
+    result.effort = parsed.data;
+  }
+  if (record.questions !== undefined) {
+    if (record.questions !== "ask" && record.questions !== "auto" && record.questions !== "deny") {
+      throw new RunOverridesError("overrides.questions must be one of: ask, auto, deny");
+    }
+    result.questions = record.questions;
   }
   return Object.keys(result).length ? result : undefined;
 }
@@ -43,9 +50,15 @@ export function applyRunOverrides(flow: Flow, overrides?: RunOverrides): Flow {
   const normalized = normalizeRunOverrides(overrides);
   const result = structuredClone(flow);
   if (!normalized) return result;
+  if (normalized.questions) {
+    result.spec.questions = { ...result.spec.questions, mode: normalized.questions };
+  }
   result.spec.stages = result.spec.stages.map((stage) => {
     if (stage.type !== "agent" && stage.type !== "judge" &&
         !(stage.type === "gate" && stage.mode === "review")) return stage;
+    if (stage.type === "agent" && normalized.questions) {
+      stage = { ...stage, questions: { ...stage.questions, mode: normalized.questions } };
+    }
     if (normalized.runtime) {
       const first = stage.runtimes?.[0];
       const { runtimes: _runtimes, ...single } = stage;

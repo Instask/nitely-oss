@@ -16,7 +16,8 @@ import {
   type FlowStore,
 } from "./store.js";
 import { validateFlowDocument, type FlowValidationReport } from "./validate.js";
-import { DEFAULT_WORK_ITEM_TYPE } from "../flow/schema.js";
+import { DEFAULT_WORK_ITEM_TYPE, type Flow } from "../flow/schema.js";
+import { applyRunOverrides, type RunOverrides } from "../flow/overrides.js";
 import { WebInputError, WebNotFoundError } from "../web/errors.js";
 
 /**
@@ -34,6 +35,60 @@ import { WebInputError, WebNotFoundError } from "../web/errors.js";
  */
 
 const seedKeyPattern = /^flows\/[^/\\]+\.json$/;
+
+/** Legacy variant references stay available for one release as deprecated aliases. */
+const variantAliases: Readonly<Record<string, { aliasOf: string; overrides: RunOverrides }>> = {
+  "flows/implement-spec-bootstrap-grok.json": {
+    aliasOf: "flows/implement-spec-bootstrap.json", overrides: { runtime: "grok" },
+  },
+  "flows/implement-spec-bootstrap-claude.json": {
+    aliasOf: "flows/implement-spec-bootstrap.json", overrides: { runtime: "claude" },
+  },
+  "flows/implement-spec-bootstrap-pi.json": {
+    aliasOf: "flows/implement-spec-bootstrap.json",
+    overrides: { runtime: "openrouter", model: "qwen/qwen3-coder-next" },
+  },
+};
+
+function recordAlias(record: FlowRecord) {
+  if (record.origin !== "system" || !record.seed || flowRecordCustomized(record)) return undefined;
+  return variantAliases[record.seed.key];
+}
+
+/**
+ * Legacy runtimes used their provider defaults, not the base's Codex models.
+ * Keep that compatibility projection separate from the immutable source snapshot.
+ * Explicit model/effort selections are applied afterward through RunOverrides.
+ */
+export function applyCatalogAliasDefaults(flow: Flow, aliasOf?: string): Flow {
+  if (aliasOf !== "flows/implement-spec-bootstrap.json") return flow;
+  const result = structuredClone(flow);
+  for (const stage of result.spec.stages) {
+    if (stage.type !== "agent" && stage.type !== "judge" &&
+        !(stage.type === "gate" && stage.mode === "review")) continue;
+    delete stage.model;
+    delete stage.effort;
+    if (stage.runtimes) {
+      for (const candidate of stage.runtimes) {
+        delete candidate.model;
+        delete candidate.effort;
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * Compatibility projection for a resolved alias, then run selections.
+ * `overrides` must already merge alias defaults under task and per-run fields.
+ * The stored source Flow is not mutated.
+ */
+export function applyResolvedFlowSelection(
+  flow: Flow,
+  input: { aliasOf?: string; overrides?: RunOverrides } = {},
+): Flow {
+  return applyRunOverrides(applyCatalogAliasDefaults(flow, input.aliasOf), input.overrides);
+}
 
 export class CatalogFlowNotFoundError extends WebNotFoundError {
   constructor(readonly reference: string) {
@@ -204,11 +259,17 @@ export interface ResolvedCatalogFlow {
   document: string;
   /** Public catalog id: the seed key for system Flows, the store id otherwise. */
   id: string;
+  /** Deprecated source identity; the document is the current base Flow snapshot. */
+  aliasOf?: string;
+  /** Compatibility defaults, beneath task and explicit run overrides. */
+  overrides?: RunOverrides;
 }
 
 export interface ResolveCatalogFlowOptions extends FlowCatalogOptions {
   /** Reject a disabled Flow. Defaults to true; reads for display pass false. */
   requireEnabled?: boolean;
+  /** Management edits operate on the legacy row itself, not its runtime target. */
+  resolveAliases?: boolean;
 }
 
 /**
@@ -223,9 +284,10 @@ export async function resolveCatalogFlow(
 ): Promise<ResolvedCatalogFlow> {
   const store = openFlowStore(repoPath);
   let record: FlowRecord | undefined;
+  let base: FlowRecord | undefined;
   try {
+    await syncSystemFlows(store, repoPath, options);
     if (isFlowSeedKey(reference)) {
-      await syncSystemFlows(store, repoPath, options);
       record = store.findBySeedKey(reference);
     } else {
       try {
@@ -234,6 +296,8 @@ export async function resolveCatalogFlow(
         record = undefined;
       }
     }
+    const alias = record && (options.resolveAliases ?? true) ? recordAlias(record) : undefined;
+    if (alias) base = store.findBySeedKey(alias.aliasOf);
   } finally {
     store.close();
   }
@@ -242,6 +306,15 @@ export async function resolveCatalogFlow(
   }
   if ((options.requireEnabled ?? true) && !record.enabled) {
     throw new CatalogFlowDisabledError(reference);
+  }
+  const alias = (options.resolveAliases ?? true) ? recordAlias(record) : undefined;
+  if (alias) {
+    if (!base || retiredSeedRecord(base)) throw new CatalogFlowNotFoundError(alias.aliasOf);
+    if ((options.requireEnabled ?? true) && !base.enabled) {
+      throw new CatalogFlowDisabledError(alias.aliasOf);
+    }
+    return { record, document: base.document, id: catalogFlowId(record),
+      aliasOf: alias.aliasOf, overrides: { ...alias.overrides } };
   }
   return { record, document: record.document, id: catalogFlowId(record) };
 }
@@ -284,6 +357,9 @@ export interface CatalogFlowSummary {
   /** The work item type new work gets: the document's, else the runtime default. */
   workItemType: string;
   updatedAt: string;
+  /** Present only while this untouched legacy variant is a deprecated alias. */
+  aliasOf?: string;
+  deprecated?: boolean;
 }
 
 export function catalogFlowSummary(record: FlowRecord): CatalogFlowSummary {
@@ -299,6 +375,7 @@ export function catalogFlowSummary(record: FlowRecord): CatalogFlowSummary {
     shippedVersionRemoved: Boolean(record.seed?.removedAt),
     workItemType: record.workItemType ?? DEFAULT_WORK_ITEM_TYPE,
     updatedAt: record.updatedAt,
+    ...(recordAlias(record) ? { aliasOf: recordAlias(record)!.aliasOf, deprecated: true } : {}),
   };
 }
 
@@ -329,6 +406,7 @@ export async function setCatalogFlowEnabled(
   const { record } = await resolveCatalogFlow(repoPath, reference, {
     ...options,
     requireEnabled: false,
+    resolveAliases: false,
   });
   return withStore(repoPath, (store) => store.updateFlow(record.id, { enabled }));
 }
@@ -347,6 +425,7 @@ export async function updateCatalogFlowDocument(
   const { record } = await resolveCatalogFlow(repoPath, reference, {
     ...options,
     requireEnabled: false,
+    resolveAliases: false,
   });
   return await replaceCatalogFlowDocument(repoPath, record, document);
 }
@@ -384,6 +463,7 @@ export async function resetCatalogFlow(
   const { record } = await resolveCatalogFlow(repoPath, reference, {
     ...options,
     requireEnabled: false,
+    resolveAliases: false,
   });
   if (record.origin !== "system" || !record.seed) {
     throw new WebInputError("only built-in flows have a shipped version to reset to");
@@ -409,6 +489,7 @@ export async function deleteCatalogFlow(
   const { record } = await resolveCatalogFlow(repoPath, reference, {
     ...options,
     requireEnabled: false,
+    resolveAliases: false,
   });
   if (record.origin === "system") {
     throw new WebInputError("built-in flows cannot be deleted; disable them instead");
@@ -425,6 +506,8 @@ export interface RunFlowSource {
   flowDocument: string;
   /** Catalog id when the reference named a catalog Flow. */
   catalogId?: string;
+  aliasOf?: string;
+  overrides?: RunOverrides;
 }
 
 /**
@@ -463,7 +546,8 @@ export async function resolveRunFlowSource(
   const seedKey = catalogSeedKeyForFlowReference(repoPath, reference, options);
   if (seedKey) {
     const resolved = await resolveCatalogFlow(repoPath, seedKey, options);
-    return { flowPath: reference, flowDocument: resolved.document, catalogId: resolved.id };
+    return { flowPath: reference, flowDocument: resolved.document, catalogId: resolved.id,
+      ...(resolved.aliasOf ? { aliasOf: resolved.aliasOf, overrides: resolved.overrides } : {}) };
   }
   return {
     flowPath: reference,
