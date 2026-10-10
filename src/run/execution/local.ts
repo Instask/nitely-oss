@@ -33,6 +33,7 @@ import type {
   RunCommandOptions,
   WorkspaceHandle,
 } from "./types.js";
+import { isPiJsonRuntime, normalizePiJsonResult, PI_JSON_MODE_ARGS } from "./pi-json.js";
 import {
   commandMediationError,
   normalizeCommandMediationPolicy,
@@ -555,7 +556,12 @@ export function createGrokBuildArgs(
 }
 
 export function createPiAgentArgs(model?: string, nativeEffort?: string): string[] {
-  return ["-p", ...(model ? ["--model", model] : []), ...(nativeEffort ? ["--thinking", nativeEffort] : [])];
+  return [
+    "-p",
+    ...PI_JSON_MODE_ARGS,
+    ...(model ? ["--model", model] : []),
+    ...(nativeEffort ? ["--thinking", nativeEffort] : []),
+  ];
 }
 
 class DefaultAgentRuntimeRegistry implements AgentRuntimeRegistry {
@@ -1180,7 +1186,7 @@ function parseClaudeUsage(stdout: string): AgentRuntimeUsage | undefined {
   };
 }
 
-function parseRuntimeUsage(
+export function parseRuntimeUsage(
   runtime: string,
   stdout: string,
 ): AgentRuntimeUsage | undefined {
@@ -1545,6 +1551,11 @@ export class LocalExecutionBackend implements ExecutionBackend {
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
       const logWriters = createStreamingAttemptLogWriters(input.attemptDirectory);
+      // Pi runs in JSON mode: its stdout is an event stream, not the answer.
+      // The stream stays out of the logs; the final answer is written once
+      // the process ends, so stdout.log reads as it did in text mode.
+      const piJson = isPiJsonRuntime(launch.runtime);
+      let piTextWritten = false;
       const clearTimers = () => {
         if (timeout) clearTimeout(timeout);
         if (forceKillTimeout) clearTimeout(forceKillTimeout);
@@ -1563,6 +1574,7 @@ export class LocalExecutionBackend implements ExecutionBackend {
       };
       child.stdout?.on("data", (chunk: Buffer) => {
         stdout.push(chunk);
+        if (piJson) return;
         process.stdout.write(chunk);
         logWriters.writeStdout(chunk);
       });
@@ -1571,9 +1583,27 @@ export class LocalExecutionBackend implements ExecutionBackend {
         process.stderr.write(chunk);
         logWriters.writeStderr(chunk);
       });
+      const piResult = () =>
+        piJson
+          ? normalizePiJsonResult({
+            runtime: launch.runtime,
+            stdout: Buffer.concat(stdout).toString("utf8"),
+            stderr: Buffer.concat(stderr).toString("utf8"),
+            exitCode: 0,
+            ...(input.stage.model ? { model: input.stage.model } : {}),
+          })
+          : undefined;
       const capturedResult = (): AgentResult => {
-        const capturedStdout = Buffer.concat(stdout).toString("utf8");
-        const usage = parseRuntimeUsage(launch.runtime, capturedStdout);
+        const pi = piResult();
+        const capturedStdout = pi?.stdout ?? Buffer.concat(stdout).toString("utf8");
+        if (pi && !piTextWritten) {
+          piTextWritten = true;
+          if (pi.stdout) {
+            process.stdout.write(pi.stdout);
+            logWriters.writeStdout(pi.stdout);
+          }
+        }
+        const usage = pi ? pi.usage : parseRuntimeUsage(launch.runtime, capturedStdout);
         // A resumed session keeps its id; a cold one reports whatever the
         // runtime just started, so the next execution can continue it.
         const sessionId =
@@ -1581,7 +1611,7 @@ export class LocalExecutionBackend implements ExecutionBackend {
           sessionOutcome.sessionId;
         return {
           stdout: capturedStdout,
-          stderr: Buffer.concat(stderr).toString("utf8"),
+          stderr: pi?.stderr ?? Buffer.concat(stderr).toString("utf8"),
           ...(usage ? { usage } : {}),
           ...(globalSkills.outcome ? { globalSkills: globalSkills.outcome } : {}),
           ...(input.session !== undefined || sessionId !== undefined
@@ -1686,16 +1716,19 @@ export class LocalExecutionBackend implements ExecutionBackend {
         const envelopeError = launch.runtime === "claude"
           ? claudeErrorResultMessage(result.stdout ?? "")
           : undefined;
-        if (code === 0 && envelopeError === undefined) {
+        // Text mode exits 1 when Pi's final message is an error; JSON mode
+        // exits 0, so the stream decides.
+        const piFailed = piJson && piResult()?.exitCode !== 0;
+        if (code === 0 && envelopeError === undefined && !piFailed) {
           settle(() => resolvePromise(result));
           return;
         }
-        const message = code === 0
+        const message = code === 0 && envelopeError !== undefined
           ? `${launch.runtime} reported an error: ${envelopeError}`
           : agentRuntimeExitMessage({
             runtime,
             launchRuntime: launch.runtime,
-            exitCode: code ?? 1,
+            exitCode: code === 0 ? 1 : code ?? 1,
             model: input.stage.model,
             stdout: result.stdout ?? "",
             stderr: result.stderr ?? "",

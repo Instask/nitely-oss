@@ -21,10 +21,12 @@ import {
   claudePermissionModeForPolicy,
   createDefaultAgentRuntimeRegistry,
   LocalExecutionBackend,
+  parseRuntimeUsage,
   type AgentRuntimeRegistry,
   type ClaudePermissionMode,
   type RuntimeEnv,
 } from "./local.js";
+import { isPiJsonRuntime, normalizePiJsonResult } from "./pi-json.js";
 import { runSandboxProcess } from "./process-runner.js";
 import {
   assertRuntimeCandidateAllowedByCapabilities,
@@ -1366,11 +1368,27 @@ export class OciExecutionBackend implements ExecutionBackend {
       } else {
         plan.launch.stdin = undefined;
       }
-      const result = await this.executePlan(plan);
+      const executed = await this.executePlan(plan);
+      // Pi runs in JSON mode; give the caller the answer text mode printed
+      // and the usage the stream reported. Other runtimes report usage in
+      // their own output.
+      const result = isPiJsonRuntime(launch.runtime)
+        ? normalizePiJsonResult({
+          runtime: launch.runtime,
+          stdout: executed.stdout,
+          stderr: executed.stderr,
+          exitCode: executed.exitCode,
+          ...(input.stage.model ? { model: input.stage.model } : {}),
+        })
+        : {
+          ...executed,
+          usage: parseRuntimeUsage(launch.runtime, executed.stdout),
+        };
+      const usage = result.usage ? { usage: result.usage } : {};
       if (result.exitCode !== 0) {
         if (
           input.timeoutMs !== undefined &&
-          result.exitCode === 124 &&
+          executed.exitCode === 124 &&
           result.stderr.includes(`process timed out after ${input.timeoutMs}ms`)
         ) {
           throw Object.assign(
@@ -1380,6 +1398,7 @@ export class OciExecutionBackend implements ExecutionBackend {
               timeoutMs: input.timeoutMs,
               stdout: result.stdout,
               stderr: result.stderr,
+              ...usage,
             },
           );
         }
@@ -1392,12 +1411,13 @@ export class OciExecutionBackend implements ExecutionBackend {
             stdout: result.stdout,
             stderr: result.stderr,
           })),
-          { stdout: result.stdout, stderr: result.stderr },
+          { stdout: result.stdout, stderr: result.stderr, ...usage },
         );
       }
       return {
         stdout: result.stdout,
         stderr: result.stderr,
+        ...usage,
         // The container never mounts the operator's home; HOME is a throwaway
         // path inside the sandbox, so no user-global skill pack can load.
         globalSkills: { isolated: true },

@@ -1968,7 +1968,7 @@ describe("LocalExecutionBackend", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
       command: "pi-dev",
-      args: ["-p", "--provider", "openrouter", "--model", "openrouter/qwen/qwen3-coder-next"],
+      args: ["-p", "--mode", "json", "--provider", "openrouter", "--model", "openrouter/qwen/qwen3-coder-next"],
       options: { cwd: "/repo/worktree", stdio: ["pipe", "pipe", "pipe"] },
       stdin: "Implement with OpenRouter.",
     });
@@ -1976,6 +1976,79 @@ describe("LocalExecutionBackend", () => {
     expect(calls[0].options.env?.OPENROUTER_API_KEY).toBe("sk-or-v1-openrouter-secret-value");
     expect(JSON.stringify(calls[0].args)).not.toContain("sk-or-v1-openrouter-secret-value");
     expect(calls[0].stdin).not.toContain("sk-or-v1-openrouter-secret-value");
+  });
+
+  it("reads Pi's JSON stream: answer on stdout and in stdout.log, usage on the result", async () => {
+    const stream = await readFile(join(process.cwd(), "test/fixtures/pi-json/openrouter-two-calls.jsonl"), "utf8");
+    const attemptDirectory = await mkdtemp(join(tmpdir(), "nitely-pi-json-attempt-"));
+    const writes = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      const backend = new LocalExecutionBackend({
+        env: { OPENROUTER_API_KEY: "sk-or-v1-openrouter-secret-value" },
+        spawn: createOutputSpawn(stream, ""),
+      });
+      const result = await backend.runAgent(
+        { runId: "run-agent", path: "/repo/worktree" },
+        {
+          stage: agentStage({ runtime: "openrouter", model: "qwen/qwen3-coder-next" }),
+          prompt: "Implement with OpenRouter.",
+          attemptDirectory,
+        },
+      );
+
+      expect(result.stdout).toBe("Done: implemented the spec.\nTests pass.\n");
+      expect(result.usage).toMatchObject({ inputTokens: 9_800, outputTokens: 100, raw: { calls: 2 } });
+      expect(await readFile(join(attemptDirectory, "stdout.log"), "utf8")).toBe(
+        "Done: implemented the spec.\nTests pass.\n",
+      );
+      expect(writes.mock.calls.map(([chunk]) => String(chunk)).join("")).not.toContain('"type":"agent_start"');
+    } finally {
+      writes.mockRestore();
+      await rm(attemptDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("fails a Pi JSON run whose final message is an error, with the explanation and partial usage", async () => {
+    const stream = [
+      JSON.stringify({ type: "agent_start" }),
+      JSON.stringify({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "c1", name: "bash", arguments: {} }],
+          stopReason: "toolUse",
+          usage: { input: 5_000, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 5_020, cost: { total: 0.0005 } },
+        },
+      }),
+      JSON.stringify({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [],
+          stopReason: "error",
+          errorMessage: '402: {"message":"Insufficient credits","code":402}',
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } },
+        },
+      }),
+      JSON.stringify({ type: "agent_end", messages: [], willRetry: false }),
+      "",
+    ].join("\n");
+    const backend = new LocalExecutionBackend({
+      env: { OPENROUTER_API_KEY: "sk-or-v1-openrouter-secret-value" },
+      spawn: createOutputSpawn(stream, ""),
+    });
+    const failure = await backend.runAgent(
+      { runId: "run-agent", path: "/repo/worktree" },
+      {
+        stage: agentStage({ runtime: "openrouter", model: "qwen/qwen3-coder-next" }),
+        prompt: "Implement with OpenRouter.",
+        attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
+      },
+    ).then(() => undefined, (error: unknown) => error as Error & { usage?: unknown; stderr?: string });
+
+    expect(failure?.message).toMatch(/^openrouter exited with code 1: OpenRouter .*credits/i);
+    expect(failure?.stderr).toContain("Insufficient credits");
+    expect(failure?.usage).toMatchObject({ inputTokens: 5_000, outputTokens: 20, raw: { calls: 2 } });
   });
 
   it("fails OpenRouter stages without a key or a usable model before spawning", async () => {
@@ -2147,7 +2220,7 @@ describe("LocalExecutionBackend", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
       command: "pi-dev",
-      args: ["-p", "--provider", "together", "--model", "moonshotai/Kimi-K3"],
+      args: ["-p", "--mode", "json", "--provider", "together", "--model", "moonshotai/Kimi-K3"],
       options: { cwd: "/repo/worktree", stdio: ["pipe", "pipe", "pipe"] },
       stdin: "Implement with Together.",
     });

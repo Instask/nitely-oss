@@ -9,6 +9,8 @@
  * argv, prompts, or any message built here.
  */
 
+import { PI_JSON_MODE_ARGS } from "./pi-json.js";
+
 export const OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY";
 
 /** Pi's provider id for OpenRouter. */
@@ -54,6 +56,7 @@ export function createOpenRouterAgentArgs(model: string | undefined, nativeEffor
   if (problem) throw new Error(problem);
   return [
     "-p",
+    ...PI_JSON_MODE_ARGS,
     ...(nativeEffort ? ["--thinking", nativeEffort] : []),
     "--provider",
     PI_OPENROUTER_PROVIDER,

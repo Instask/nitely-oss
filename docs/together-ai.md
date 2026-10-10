@@ -46,8 +46,9 @@ until one of the credential sources is configured.
 }
 ```
 
-Nitely launches `pi -p --provider together --model <model>` in the stage
-worktree and sends the prompt on stdin. `together` also works as an ordered
+Nitely launches `pi -p --mode json --provider together --model <model>` in the stage
+worktree and sends the prompt on stdin. Stage output is the final answer, as
+in text mode; the JSON event stream supplies token usage and cost. `together` also works as an ordered
 `runtimes` candidate, for example
 `[{ "runtime": "together", "model": "moonshotai/Kimi-K3" }, { "runtime": "codex" }]`.
 
@@ -107,8 +108,8 @@ Pi CLI as an unavailable candidate and moves to the next one.
   described above.
 - Model validation in Nitely is syntactic. Whether Together serves a model is
   only known when Pi calls the API; that failure is reported at stage exit.
-- Pi does not report token usage to Nitely, so `together` stages record no
-  runtime usage (the same as `pi`, `glm`, and `grok`).
+- Each attempt records `stage.runtime.usage` from Pi's JSON stream, with
+  Pi's estimated cost (see [OpenRouter](openrouter.md) for the fields).
 - Like `pi`, the local backend has no read-only enforcement for this runtime;
   stages with `capabilities.write.scope: none` must use OCI.
 - Pi reads the operator's Pi settings and extensions; Nitely has no global

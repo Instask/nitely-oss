@@ -43,12 +43,14 @@ describe("Together AI runtime helpers", () => {
   it("selects Pi's Together provider and passes the model, never a key", () => {
     expect(createTogetherAgentArgs("moonshotai/Kimi-K3")).toEqual([
       "-p",
+      "--mode",
+      "json",
       "--provider",
       "together",
       "--model",
       "moonshotai/Kimi-K3",
     ]);
-    expect(createTogetherAgentArgs()).toEqual(["-p", "--provider", "together"]);
+    expect(createTogetherAgentArgs()).toEqual(["-p", "--mode", "json", "--provider", "together"]);
     expect(createTogetherAgentArgs(" moonshotai/Kimi-K3 ")).toContain("moonshotai/Kimi-K3");
   });
 

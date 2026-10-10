@@ -1709,9 +1709,11 @@ describe("OciExecutionBackend", () => {
     );
 
     const launch = calls.find((call) => call.args[0] === "run")!;
-    expect(launch.args.slice(-6)).toEqual([
+    expect(launch.args.slice(-8)).toEqual([
       "pi-in-image",
       "-p",
+      "--mode",
+      "json",
       "--provider",
       "openrouter",
       "--model",
@@ -2397,9 +2399,11 @@ describe("OciExecutionBackend", () => {
       { stage, prompt: "Implement with Together.", attemptDirectory: fixture.attempt },
     );
     const launch = calls.find((call) => call.args[0] === "run")!;
-    expect(launch.args.slice(-6)).toEqual([
+    expect(launch.args.slice(-8)).toEqual([
       "pi-in-image",
       "-p",
+      "--mode",
+      "json",
       "--provider",
       "together",
       "--model",
@@ -2427,6 +2431,38 @@ describe("OciExecutionBackend", () => {
         { stage, prompt: "Implement.", attemptDirectory: fixture.attempt },
       ),
     ).rejects.toThrow(/^together exited with code 1: Together AI rejected the API key/);
+  });
+
+  it("returns Pi's answer and usage from the JSON stream, and fails on a final error message", async () => {
+    const fixture = await createFixture();
+    const stream = await readFile(join(process.cwd(), "test/fixtures/pi-json/openrouter-two-calls.jsonl"), "utf8");
+    const backend = (stdout: string) => new OciExecutionBackend({
+      ...openRouterOciOptions([]),
+      processRunner: async (input) => {
+        if (input.args[0] === "run") return { stdout, stderr: "", exitCode: 0 };
+        return await successfulRunner([])(input);
+      },
+    });
+    const run = (stdout: string) => backend(stdout).runAgent(
+      { runId: "openrouter-run", path: fixture.worktree },
+      { stage: openRouterOciStage("qwen/qwen3-coder-next"), prompt: "Implement.", attemptDirectory: fixture.attempt },
+    );
+
+    const result = await run(stream);
+    expect(result.stdout).toBe("Done: implemented the spec.\nTests pass.\n");
+    expect(result.usage).toMatchObject({ inputTokens: 9_800, outputTokens: 100, cachedInputTokens: 4_800 });
+
+    const unauthorized = `${JSON.stringify({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: '401: {"message":"Missing Authentication header","code":401}',
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } },
+      },
+    })}\n${JSON.stringify({ type: "agent_end", messages: [], willRetry: false })}\n`;
+    await expect(run(unauthorized)).rejects.toThrow(/^openrouter exited with code 1: OpenRouter/);
   });
 
   it("rejects a capability path whose symlink escapes the worktree", async () => {
