@@ -140,7 +140,7 @@ describe("together agent runtime", () => {
 
     const attempt = join(repo, ".nitely", "runs", "run-together", "stages", "implement", "1");
     await expect(readFile(join(attempt, "pi-args.txt"), "utf8")).resolves.toBe(
-      "-p\n--provider\ntogether\n--model\nmoonshotai/Kimi-K3\n",
+      "-p\n--mode\njson\n--provider\ntogether\n--model\nmoonshotai/Kimi-K3\n",
     );
     await expect(readFile(join(attempt, "key-source.txt"), "utf8")).resolves.toBe("stored\n");
     await expectNoSecretPersisted(repo, "run-together");

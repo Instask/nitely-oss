@@ -79,7 +79,7 @@ async function writeFakePi(repo: string, mode: FakePiMode): Promise<string> {
     "cat > /dev/null",
     "printf '%s\\n' \"$@\" >> \"$NITELY_ATTEMPT_DIR/pi-args.txt\"",
     `if [ "$OPENROUTER_API_KEY" = "${STORED_KEY}" ]; then echo stored; elif [ "$OPENROUTER_API_KEY" = "${ENV_KEY}" ]; then echo environment; else echo none; fi > "$NITELY_ATTEMPT_DIR/key-source.txt"`,
-    "model=\"$5\"",
+    "model=\"$7\"",
     "echo 'Warning: Model \"x\" not found for provider \"openrouter\". Using custom model id.' >&2",
   ];
   if (mode === "reject-key") lines.push(fail(PI_REJECTED_KEY_STDERR));
@@ -171,7 +171,7 @@ describe("openrouter agent runtime", () => {
     });
     const attempt = attemptDir(repo, "run-or");
     await expect(readFile(join(attempt, "pi-args.txt"), "utf8")).resolves.toBe(
-      "-p\n--provider\nopenrouter\n--model\nopenrouter/qwen/qwen3-coder-next\n",
+      "-p\n--mode\njson\n--provider\nopenrouter\n--model\nopenrouter/qwen/qwen3-coder-next\n",
     );
     await expect(readFile(join(attempt, "key-source.txt"), "utf8")).resolves.toBe("stored\n");
     await expect(readFile(join(attempt, "implementation.md"), "utf8")).resolves.toBe(
@@ -250,10 +250,10 @@ describe("openrouter agent runtime", () => {
     });
     await expect(
       readFile(join(attemptDir(repo, "run-or-fallback", 1), "pi-args.txt"), "utf8"),
-    ).resolves.toBe("-p\n--provider\nopenrouter\n--model\nopenrouter/qwen/qwen3-coder-next:free\n");
+    ).resolves.toBe("-p\n--mode\njson\n--provider\nopenrouter\n--model\nopenrouter/qwen/qwen3-coder-next:free\n");
     await expect(
       readFile(join(attemptDir(repo, "run-or-fallback", 2), "pi-args.txt"), "utf8"),
-    ).resolves.toBe("-p\n--provider\nopenrouter\n--model\nopenrouter/moonshotai/kimi-k3\n");
+    ).resolves.toBe("-p\n--mode\njson\n--provider\nopenrouter\n--model\nopenrouter/moonshotai/kimi-k3\n");
     await expect(
       readFile(join(attemptDir(repo, "run-or-fallback", 2), "implementation.md"), "utf8"),
     ).resolves.toBe("done with openrouter/moonshotai/kimi-k3\n");
