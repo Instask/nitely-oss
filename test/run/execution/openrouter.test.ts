@@ -70,6 +70,8 @@ describe("createOpenRouterAgentArgs", () => {
   it("selects Pi's openrouter provider and passes the exact model id", () => {
     expect(createOpenRouterAgentArgs("qwen/qwen3-coder-next")).toEqual([
       "-p",
+      "--mode",
+      "json",
       "--provider",
       "openrouter",
       "--model",

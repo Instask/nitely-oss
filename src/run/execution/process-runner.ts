@@ -36,6 +36,7 @@ export async function runSandboxProcess(
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
+    const stdoutCapture = input.stdoutCapture;
     let capturedBytes = 0;
     let outputExceeded = false;
     let timedOut = false;
@@ -69,22 +70,58 @@ export async function runSandboxProcess(
     input.signal?.addEventListener("abort", abort, { once: true });
     const removeAbortListener = () =>
       input.signal?.removeEventListener("abort", abort);
+    let stderrBytes = 0;
+    const exceeded = () => {
+      if (!outputExceeded && input.maxOutputBytes !== undefined) {
+        outputExceeded = true;
+        terminate(outputLimitError(input.maxOutputBytes));
+      }
+    };
     const capture = (target: Buffer[], chunk: Buffer) => {
       capturedBytes += chunk.byteLength;
       if (
         input.maxOutputBytes !== undefined &&
         capturedBytes > input.maxOutputBytes
       ) {
-        if (!outputExceeded) {
-          outputExceeded = true;
-          terminate(outputLimitError(input.maxOutputBytes));
-        }
+        exceeded();
         return;
       }
       target.push(chunk);
     };
-    child.stdout.on("data", (chunk: Buffer) => capture(stdout, chunk));
-    child.stderr.on("data", (chunk: Buffer) => capture(stderr, chunk));
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (!stdoutCapture) {
+        capture(stdout, chunk);
+        return;
+      }
+      if (outputExceeded) return;
+      stdoutCapture.write(chunk);
+      if (
+        input.maxOutputBytes !== undefined &&
+        stdoutCapture.size() + stderrBytes > input.maxOutputBytes
+      ) {
+        exceeded();
+      }
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      if (!stdoutCapture) {
+        capture(stderr, chunk);
+        return;
+      }
+      if (outputExceeded) return;
+      stderrBytes += chunk.byteLength;
+      if (
+        input.maxOutputBytes !== undefined &&
+        stdoutCapture.size() + stderrBytes > input.maxOutputBytes
+      ) {
+        exceeded();
+        return;
+      }
+      stderr.push(chunk);
+    });
+    const captured = () => ({
+      stdout: stdoutCapture ? stdoutCapture.text() : Buffer.concat(stdout).toString("utf8"),
+      stderr: Buffer.concat(stderr).toString("utf8"),
+    });
     child.on("error", (error) => {
       clearTimers();
       removeAbortListener();
@@ -103,12 +140,13 @@ export async function runSandboxProcess(
       clearTimers();
       removeAbortListener();
       if (terminalError) {
-        reject(terminalError);
+        // Keep what the process wrote before it was stopped: a cancelled or
+        // capped agent still reported (and was billed for) model calls.
+        reject(Object.assign(terminalError, captured()));
         return;
       }
       resolve({
-        stdout: Buffer.concat(stdout).toString("utf8"),
-        stderr: Buffer.concat(stderr).toString("utf8"),
+        ...captured(),
         exitCode: timedOut ? 124 : code ?? 1,
       });
     });

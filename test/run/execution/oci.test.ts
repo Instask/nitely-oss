@@ -1709,9 +1709,11 @@ describe("OciExecutionBackend", () => {
     );
 
     const launch = calls.find((call) => call.args[0] === "run")!;
-    expect(launch.args.slice(-6)).toEqual([
+    expect(launch.args.slice(-8)).toEqual([
       "pi-in-image",
       "-p",
+      "--mode",
+      "json",
       "--provider",
       "openrouter",
       "--model",
@@ -2397,9 +2399,11 @@ describe("OciExecutionBackend", () => {
       { stage, prompt: "Implement with Together.", attemptDirectory: fixture.attempt },
     );
     const launch = calls.find((call) => call.args[0] === "run")!;
-    expect(launch.args.slice(-6)).toEqual([
+    expect(launch.args.slice(-8)).toEqual([
       "pi-in-image",
       "-p",
+      "--mode",
+      "json",
       "--provider",
       "together",
       "--model",
@@ -2427,6 +2431,114 @@ describe("OciExecutionBackend", () => {
         { stage, prompt: "Implement.", attemptDirectory: fixture.attempt },
       ),
     ).rejects.toThrow(/^together exited with code 1: Together AI rejected the API key/);
+  });
+
+  it("returns Pi's answer and usage from the JSON stream, and fails on a final error message", async () => {
+    const fixture = await createFixture();
+    const stream = await readFile(join(process.cwd(), "test/fixtures/pi-json/openrouter-two-calls.jsonl"), "utf8");
+    const backend = (stdout: string) => new OciExecutionBackend({
+      ...openRouterOciOptions([]),
+      processRunner: async (input) => {
+        if (input.args[0] === "run") return { stdout, stderr: "", exitCode: 0 };
+        return await successfulRunner([])(input);
+      },
+    });
+    const run = (stdout: string) => backend(stdout).runAgent(
+      { runId: "openrouter-run", path: fixture.worktree },
+      { stage: openRouterOciStage("qwen/qwen3-coder-next"), prompt: "Implement.", attemptDirectory: fixture.attempt },
+    );
+
+    const result = await run(stream);
+    expect(result.stdout).toBe("Done: implemented the spec.\nTests pass.\n");
+    expect(result.usage).toMatchObject({ inputTokens: 9_800, outputTokens: 100, cachedInputTokens: 4_800 });
+
+    const unauthorized = `${JSON.stringify({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: '401: {"message":"Missing Authentication header","code":401}',
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } },
+      },
+    })}\n${JSON.stringify({ type: "agent_end", messages: [], willRetry: false })}\n`;
+    await expect(run(unauthorized)).rejects.toThrow(/^openrouter exited with code 1: OpenRouter/);
+  });
+
+  describe("Pi partial usage when the agent is stopped", () => {
+    const usageRecord = (input: number, cacheRead: number, output: number, cost: number) => ({
+      input, output, cacheRead, cacheWrite: 0, totalTokens: input + output + cacheRead, cost: { total: cost },
+    });
+    const partialStream = [
+      { type: "session", version: 3, id: "s", timestamp: "t", cwd: "/w" },
+      { type: "message_start", message: { role: "assistant", content: [] } },
+      { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Reading." }], usage: usageRecord(4_000, 0, 20, 0.002), stopReason: "toolUse" } },
+      { type: "message_start", message: { role: "assistant", content: [] } },
+      { type: "message_update", usage: usageRecord(300, 4_000, 7, 0.0004), assistantMessageEvent: { type: "text_delta", delta: "x" } },
+    ].map((record) => JSON.stringify(record)).join("\n") + '\n{"type":"message_upd';
+
+    async function stoppedRun(processRunner: (input: SandboxProcessInput) => Promise<SandboxProcessResult>) {
+      const fixture = await createFixture();
+      const backend = new OciExecutionBackend({
+        ...openRouterOciOptions([]),
+        processRunner: async (input) => {
+          if (input.args[0] === "run") return await processRunner(input);
+          return await successfulRunner([])(input);
+        },
+      });
+      return await backend.runAgent(
+        { runId: "openrouter-run", path: fixture.worktree },
+        { stage: openRouterOciStage("qwen/qwen3-coder-next"), prompt: "Implement.", attemptDirectory: fixture.attempt, timeoutMs: 5_000 },
+      ).then(
+        () => { throw new Error("expected the agent to fail"); },
+        (error: unknown) => error as Error & { usage?: Record<string, unknown>; stdout?: string; stderr?: string; code?: string },
+      );
+    }
+    const expectPartialUsage = (error: { usage?: Record<string, unknown> }) =>
+      expect(error.usage).toMatchObject({ inputTokens: 8_300, cachedInputTokens: 4_000, outputTokens: 27, raw: { calls: 2 } });
+
+    it("keeps usage when the AbortSignal cancels the run, without raw JSONL", async () => {
+      const error = await stoppedRun(async () => {
+        throw Object.assign(new Error("sandbox process aborted"), { name: "AbortError", code: "ABORT_ERR", stdout: partialStream, stderr: "" });
+      });
+      expect(error.code).toBe("ABORT_ERR");
+      expectPartialUsage(error);
+      expect(error.stdout).toBe("");
+      expect(`${error.message}${error.stdout}${error.stderr}`).not.toContain('"type"');
+    });
+
+    it("keeps usage when the output limit stops the run", async () => {
+      const error = await stoppedRun(async () => {
+        throw Object.assign(new Error("sandbox process output exceeded 16777216 bytes"), { code: "OUTPUT_LIMIT_EXCEEDED", stdout: partialStream, stderr: "" });
+      });
+      expect(error.code).toBe("OUTPUT_LIMIT_EXCEEDED");
+      expectPartialUsage(error);
+      expect(error.stdout).not.toContain('"type"');
+    });
+
+    it("keeps usage on a timeout and keeps the timeout semantics", async () => {
+      const error = await stoppedRun(async () => ({
+        stdout: partialStream,
+        stderr: "process timed out after 5000ms\n",
+        exitCode: 124,
+      }));
+      expect(error).toMatchObject({ code: "EXECUTION_TIMEOUT", timeoutMs: 5_000 });
+      expect(error.message).toBe("openrouter timed out after 5000ms");
+      expectPartialUsage(error);
+      expect(error.stdout).not.toContain('"type"');
+    });
+
+    it("redacts the provider key from a stopped run's partial output", async () => {
+      const leaked = `${partialStream.slice(0, partialStream.lastIndexOf("\n"))}\n${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [], stopReason: "error", errorMessage: `401 for key ${OPENROUTER_OCI_SECRET}`, usage: usageRecord(0, 0, 0, 0) },
+      })}\n`;
+      const error = await stoppedRun(async () => {
+        throw Object.assign(new Error("sandbox process aborted"), { name: "AbortError", code: "ABORT_ERR", stdout: leaked, stderr: `stderr ${OPENROUTER_OCI_SECRET}\n` });
+      });
+      expect(JSON.stringify({ message: error.message, stdout: error.stdout, stderr: error.stderr, usage: error.usage })).not.toContain(OPENROUTER_OCI_SECRET);
+      expect(error.stderr).toContain("401 for key");
+    });
   });
 
   it("rejects a capability path whose symlink escapes the worktree", async () => {

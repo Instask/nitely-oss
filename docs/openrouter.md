@@ -74,8 +74,12 @@ until one of the credential sources is configured, and block a lone
 }
 ```
 
-Nitely launches `pi -p --provider openrouter --model openrouter/<model>` in
-the stage worktree and sends the prompt on stdin. Pi strips exactly one
+Nitely launches `pi -p --mode json --provider openrouter --model openrouter/<model>` in
+the stage worktree and sends the prompt on stdin. JSON mode streams Pi's
+events, including every model call's token usage and cost. Nitely keeps the
+stage output as before: stdout and `stdout.log` hold the final answer that
+text mode would print, and a final error message still fails the stage with
+exit code 1. Pi strips exactly one
 `openrouter/` prefix, so the id OpenRouter receives is the stage's `model`
 unchanged, including OpenRouter's own `openrouter/...` ids such as
 `openrouter/auto`.
@@ -205,9 +209,17 @@ exits.
 - OpenRouter presets (`@preset/...`) and request-level routing options
   (provider order, data policy) are not exposed in the flow; set them on the
   OpenRouter account or key.
-- Pi does not report token usage or cost to Nitely, so `openrouter` stages
-  record no runtime usage (the same as `pi`, `glm`, and `grok`). Use the
-  OpenRouter dashboard for spend.
+- Each attempt records `stage.runtime.usage` summed over Pi's model calls
+  (input, cached input, output, total tokens, and cost), including the
+  partial usage of an attempt that failed, timed out, or was cancelled. The
+  run detail, Console, and evidence show per-stage and per-run totals. The
+  cost is Pi's estimate from its model price table (`classification:
+  estimated`, `method: pi-model-pricing`), so the OpenRouter Activity page
+  stays authoritative for billing.
+  Nitely keeps only the records it needs from Pi's event stream (assistant
+  message ends, the latest cumulative usage of the call in flight, and
+  compaction usage) and drops per-tool output snapshots, so long runs stay
+  well under the OCI output cap.
 - Like `pi`, the local backend has no read-only enforcement for this runtime;
   stages with `capabilities.write.scope: none` must use OCI.
 - Pi reads the operator's Pi settings and extensions; Nitely has no global

@@ -337,6 +337,14 @@ Run projection folds these events onto attempt, stage, and run context usage.
 The Web Console run details expose per-stage context usage and run-total context
 usage when the run has these events; older runs simply omit the fields.
 
+`stage.context.usage` measures only the initial prompt. What the agent loop
+actually consumed is in `stage.runtime.usage`, written per attempt when the
+runtime reports it. `codex` and `claude` report it in their JSON output. The
+Pi-based runtimes (`pi`, `openrouter`, `together`) run Pi with `--mode json`
+and sum every model call. A failed, timed-out, or cancelled attempt records the
+usage reported up to that point. The run detail, Console, and evidence show
+per-stage and per-run totals. `glm` and `grok` report nothing.
+
 ## Operator Question Policy
 
 Agent stages may write `question.json` to ask a human for a decision. A

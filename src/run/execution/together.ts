@@ -10,6 +10,8 @@
  * through the `TOGETHER_API_KEY` environment variable (never argv).
  */
 
+import { PI_JSON_MODE_ARGS } from "./pi-json.js";
+
 /** The variable Pi's built-in Together provider reads, and Nitely projects. */
 export const TOGETHER_API_KEY_ENV = "TOGETHER_API_KEY";
 
@@ -50,6 +52,7 @@ export function togetherModelProblem(model: string | undefined): string | undefi
 export function createTogetherAgentArgs(model?: string, nativeEffort?: string): string[] {
   return [
     "-p",
+    ...PI_JSON_MODE_ARGS,
     ...(nativeEffort ? ["--thinking", nativeEffort] : []),
     "--provider",
     TOGETHER_PI_PROVIDER,

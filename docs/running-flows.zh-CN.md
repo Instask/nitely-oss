@@ -174,6 +174,13 @@ Run projection 会把这些 event 聚合到 attempt、stage 和 run context usag
 Web Console run detail 会在存在这些 event 时展示 per-stage context usage 和
 run-total context usage；旧 run 没有这些字段时会自然省略。
 
+`stage.context.usage` 只衡量初始 prompt。agent 循环实际消耗的 token 记录在
+`stage.runtime.usage`，每个 attempt 一条，前提是 runtime 上报了用量：`codex` 和
+`claude` 来自各自的 JSON 输出；基于 Pi 的 runtime（`pi`、`openrouter`、`together`）
+以 `--mode json` 运行 Pi，并累加每次模型调用的 token 与费用（Pi 按其价格表估算）。
+失败、超时或被取消的 attempt 会记录截至当时已上报的用量。Run detail、Console 和
+evidence 展示 per-stage 与 per-run 汇总。`glm` 和 `grok` 不上报用量。
+
 ## 操作员提问策略
 
 Agent stage 可以写 `question.json` 向人请求决定。提问策略决定之后的行为，可以设在 Flow 上
