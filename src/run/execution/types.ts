@@ -67,7 +67,53 @@ export interface AgentRuntimeUsage {
     };
   };
   raw?: unknown;
+  /**
+   * Per-call log for traces. Not part of the usage record: run-flow writes it
+   * as its own `stage.runtime.calls` event.
+   */
+  callLog?: AgentRuntimeCall[];
+  /** Calls left out of `callLog` once it reached its cap. */
+  callLogDropped?: number;
 }
+
+/**
+ * One model call or tool execution inside an agent attempt, as the runtime
+ * reported it. Pi-based runtimes report these in `usage.callLog`, run-flow
+ * persists them as `stage.runtime.calls`, and the trace exporter turns them
+ * into spans. Token counts follow the attempt
+ * totals: `inputTokens` includes cache reads and writes. `output`,
+ * `toolCalls[].arguments` are present only when content capture is on.
+ */
+export type AgentRuntimeCall =
+  | {
+      kind: "llm";
+      operation?: "compaction";
+      startedAt?: string;
+      endedAt?: string;
+      provider?: string;
+      model?: string;
+      responseModel?: string;
+      inputTokens: number;
+      outputTokens: number;
+      totalTokens: number;
+      cacheReadInputTokens: number;
+      cacheWriteInputTokens: number;
+      costUsd?: number;
+      stopReason?: string;
+      error?: string;
+      /** The call was cut off; its usage is what streamed so far. */
+      incomplete?: true;
+      toolCalls?: Array<{ id?: string; name?: string; arguments?: string }>;
+      output?: string;
+    }
+  | {
+      kind: "tool";
+      toolCallId?: string;
+      toolName?: string;
+      startedAt?: string;
+      endedAt?: string;
+      isError?: boolean;
+    };
 
 export interface AgentResult {
   stdout?: string;

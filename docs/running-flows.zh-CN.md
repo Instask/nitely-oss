@@ -181,6 +181,10 @@ run-total context usage；旧 run 没有这些字段时会自然省略。
 失败、超时或被取消的 attempt 会记录截至当时已上报的用量。Run detail、Console 和
 evidence 展示 per-stage 与 per-run 汇总。`glm` 和 `grok` 不上报用量。
 
+基于 Pi 的 runtime 还会把 attempt 内每次模型调用和工具执行记录到
+`stage.runtime.calls`。配置了 OTLP endpoint 时，每个 run 会根据这些 event 导出为一条
+OpenTelemetry trace，见 [Run Traces](tracing.md)（英文）。
+
 ## 操作员提问策略
 
 Agent stage 可以写 `question.json` 向人请求决定。提问策略决定之后的行为，可以设在 Flow 上

@@ -27,6 +27,7 @@ import {
   type RuntimeEnv,
 } from "./local.js";
 import {
+  captureCallContent,
   createPiJsonCapture,
   isPiJsonRuntime,
   normalizePiJsonResult,
@@ -493,6 +494,7 @@ function withPartialAgentOutput(
       stderr,
       exitCode: 1,
       ...(input.model ? { model: input.model } : {}),
+      ...(captureCallContent() ? { captureContent: true } : {}),
     });
     Object.assign(carrier, { stdout: normalized.stdout, stderr: normalized.stderr });
     if (carrier !== source) Object.assign(source, { stdout: normalized.stdout, stderr: normalized.stderr });
@@ -1430,7 +1432,7 @@ export class OciExecutionBackend implements ExecutionBackend {
         plan.launch.stdin = undefined;
       }
       const piJson = isPiJsonRuntime(launch.runtime);
-      if (piJson) plan.launch.stdoutCapture = createPiJsonCapture();
+      if (piJson) plan.launch.stdoutCapture = createPiJsonCapture({ captureContent: captureCallContent() });
       let executed: SandboxProcessResult;
       try {
         executed = await this.executePlan(plan);
@@ -1451,6 +1453,7 @@ export class OciExecutionBackend implements ExecutionBackend {
           stderr: executed.stderr,
           exitCode: executed.exitCode,
           ...(input.stage.model ? { model: input.stage.model } : {}),
+          ...(captureCallContent() ? { captureContent: true } : {}),
         })
         : {
           ...executed,
