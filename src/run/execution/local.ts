@@ -34,6 +34,7 @@ import type {
   WorkspaceHandle,
 } from "./types.js";
 import {
+  captureCallContent,
   createPiJsonCapture,
   isPiJsonRuntime,
   normalizePiJsonResult,
@@ -1561,7 +1562,7 @@ export class LocalExecutionBackend implements ExecutionBackend {
       // the process ends, so stdout.log reads as it did in text mode.
       const piJson = isPiJsonRuntime(launch.runtime);
       // Bounded: Pi streams per-token and per-tool-snapshot records.
-      const piCapture = piJson ? createPiJsonCapture() : undefined;
+      const piCapture = piJson ? createPiJsonCapture({ captureContent: captureCallContent() }) : undefined;
       let piTextWritten = false;
       const clearTimers = () => {
         if (timeout) clearTimeout(timeout);
@@ -1601,6 +1602,7 @@ export class LocalExecutionBackend implements ExecutionBackend {
             stderr: Buffer.concat(stderr).toString("utf8"),
             exitCode: 0,
             ...(input.stage.model ? { model: input.stage.model } : {}),
+            ...(captureCallContent() ? { captureContent: true } : {}),
           })
           : undefined;
       const capturedResult = (): AgentResult => {
