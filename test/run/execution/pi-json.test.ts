@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { normalizeRuntimeUsageForPersistence } from "../../../src/eval/usage.js";
 import { createPiJsonCapture, normalizePiJsonResult, readPiJsonStream } from "../../../src/run/execution/pi-json.js";
 
 const fixturePath = join(process.cwd(), "test/fixtures/pi-json/openrouter-two-calls.jsonl");
@@ -28,12 +29,32 @@ describe("readPiJsonStream", () => {
       provenance: {
         provider: "openrouter",
         model: "qwen/qwen3-coder-next-20260901",
-        source: { kind: "provider-reported", reference: "pi.json.message_end.usage" },
+        source: { kind: "calculated", reference: "pi.json.message_end.usage" },
       },
       raw: { calls: 2, uncachedInputTokens: 5_000, cacheReadInputTokens: 4_800, cacheWriteInputTokens: 0 },
     });
     expect(outcome.usage?.cost).toMatchObject({ classification: "estimated", method: "pi-model-pricing" });
     expect((outcome.usage?.cost as { usd: number }).usd).toBeCloseTo(0.000778, 9);
+    // What run-flow persists must accept it, or the stage fails after the agent succeeded.
+    expect(normalizeRuntimeUsageForPersistence(outcome.usage)).toMatchObject({
+      inputTokens: 9_800,
+      cost: { classification: "estimated", method: "pi-model-pricing" },
+    });
+  });
+
+  it("keeps provider-reported provenance when Pi reports no cost", () => {
+    const stream = [
+      JSON.stringify({ type: "message_start", message: { role: "assistant" } }),
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [], usage: { input: 10, output: 2 }, stopReason: "stop" },
+      }),
+      JSON.stringify({ type: "agent_settled" }),
+    ].join("\n");
+    const usage = readPiJsonStream(stream).usage;
+    expect(usage?.cost).toBeUndefined();
+    expect(usage?.provenance?.source.kind).toBe("provider-reported");
+    expect(() => normalizeRuntimeUsageForPersistence(usage)).not.toThrow();
   });
 
   it("keeps the partial usage of a run cut off mid-call, without an answer", async () => {

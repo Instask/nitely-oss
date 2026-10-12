@@ -187,7 +187,13 @@ export function readPiJsonStream(
         provider: options.provider ?? "pi",
         ...(responseModel ?? options.model ? { model: responseModel ?? options.model } : {}),
         observedAt: (options.observedAt ?? new Date()).toISOString(),
-        source: { kind: "provider-reported", reference: "pi.json.message_end.usage" },
+        // Token counts come from the provider; the cost is Pi's own estimate
+        // from its model pricing, which persistence accepts only as
+        // calculated provenance.
+        source: {
+          kind: totals.costReported ? "calculated" : "provider-reported",
+          reference: "pi.json.message_end.usage",
+        },
       },
       raw: {
         calls: totals.calls,
