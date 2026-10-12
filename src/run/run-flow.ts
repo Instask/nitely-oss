@@ -314,6 +314,12 @@ import type {
 import type { NormalizedReviewFeedback } from "../review-feedback/model.js";
 import { normalizeRuntimeUsageForPersistence } from "../eval/usage.js";
 import {
+  exportRunTrace,
+  otlpTraceConfigFromEnv,
+  type ExportRunTraceInput,
+  type RunTraceExportResult,
+} from "../telemetry/run-trace-otel.js";
+import {
   createExecutionBackend,
   normalizeExecutionBackendName,
 } from "./execution/backend.js";
@@ -706,6 +712,8 @@ export interface RunFlowDependencies {
   fingerprintKnowledgeRepositoryQuery?: typeof defaultFingerprintKnowledgeRepositoryQuery;
   pinKnowledgeRepositorySnapshots?: typeof defaultPinKnowledgeRepositorySnapshots;
   queryKnowledgeRepositories?: typeof defaultQueryKnowledgeRepositories;
+  /** Replaces the OpenTelemetry trace export that follows every run. */
+  exportRunTrace?: (input: ExportRunTraceInput) => Promise<RunTraceExportResult>;
 }
 
 export interface RunFlowResult {
@@ -7423,6 +7431,23 @@ function appendRuntimeUsageEvent(input: {
       input.context,
     ),
   });
+  // The per-call log feeds traces; it is kept out of the usage record, whose
+  // raw metadata is bounded far below a long attempt's call count.
+  if (input.usage.callLog && input.usage.callLog.length > 0) {
+    input.eventStore.append({
+      runId: input.runId,
+      stageId: input.stageId,
+      attempt: input.attempt,
+      type: "stage.runtime.calls",
+      payload: redactRuntimeUnknown(
+        {
+          calls: input.usage.callLog,
+          ...(input.usage.callLogDropped ? { dropped: input.usage.callLogDropped } : {}),
+        },
+        input.context,
+      ),
+    });
+  }
 }
 
 function appendGlobalSkillsEvent(input: {
@@ -12703,11 +12728,22 @@ export async function runFlow(
   input: RunFlowInput,
   dependencies: RunFlowDependencies = {},
 ): Promise<RunFlowResult> {
+  let createdRunId: string | undefined;
+  const createRunId = dependencies.createRunId ?? createDefaultRunId;
+  const tracked: RunFlowDependencies = {
+    ...dependencies,
+    createRunId: () => {
+      createdRunId = createRunId();
+      return createdRunId;
+    },
+  };
+  let resumed = false;
   try {
-    return await runFlowOnce(input, dependencies);
+    return await runFlowOnce(input, tracked);
   } catch (error) {
     const runId = autoAnsweredRunId(error);
     if (!runId) throw error;
+    resumed = true;
     return await resumeRun(
       {
         repoPath: input.repoPath,
@@ -12716,6 +12752,39 @@ export async function runFlow(
       },
       dependencies,
     );
+  } finally {
+    // resumeRun exports the trace itself.
+    if (createdRunId && !resumed) await exportRunTraceAfterRun(input.repoPath, createdRunId, dependencies);
+  }
+}
+
+/**
+ * Export the run's OpenTelemetry trace when an OTLP endpoint is configured.
+ * Bounded by NITELY_OTEL_EXPORT_TIMEOUT_MS and never throws, so it cannot
+ * change the run's result.
+ */
+async function exportRunTraceAfterRun(
+  repoPath: string,
+  runId: string,
+  dependencies: RunFlowDependencies,
+): Promise<void> {
+  const exporter = dependencies.exportRunTrace ?? exportRunTrace;
+  if (!dependencies.exportRunTrace && !otlpTraceConfigFromEnv()) return;
+  try {
+    await exporter({
+      runId,
+      listEvents: () => {
+        const store = (dependencies.createEventStore ??
+          ((path: string) => new EventStore(path)))(eventStorePath(resolve(repoPath)));
+        try {
+          return store.list(runId);
+        } finally {
+          store.close();
+        }
+      },
+    });
+  } catch {
+    // exportRunTrace never throws; an injected one must not fail the run either.
   }
 }
 
@@ -14753,18 +14822,22 @@ export async function resumeRun(
   dependencies: RunFlowDependencies = {},
 ): Promise<RunFlowResult> {
   let current: ResumeRunInput = input;
-  for (let resumes = 0; ; resumes += 1) {
-    try {
-      return await resumeRunOnce(current, dependencies);
-    } catch (error) {
-      const runId = autoAnsweredRunId(error);
-      if (!runId || resumes >= MAX_AUTO_ANSWER_RESUMES) throw error;
-      current = {
-        repoPath: input.repoPath,
-        runId,
-        ...(input.executionBackend ? { executionBackend: input.executionBackend } : {}),
-      };
+  try {
+    for (let resumes = 0; ; resumes += 1) {
+      try {
+        return await resumeRunOnce(current, dependencies);
+      } catch (error) {
+        const runId = autoAnsweredRunId(error);
+        if (!runId || resumes >= MAX_AUTO_ANSWER_RESUMES) throw error;
+        current = {
+          repoPath: input.repoPath,
+          runId,
+          ...(input.executionBackend ? { executionBackend: input.executionBackend } : {}),
+        };
+      }
     }
+  } finally {
+    await exportRunTraceAfterRun(input.repoPath, current.runId, dependencies);
   }
 }
 

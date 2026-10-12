@@ -39,7 +39,7 @@ import {
   recordRepoIndexQuery,
 } from "../../src/repo-index/index.js";
 import { createCodexExecArgs, resumeRun, runFlow, resolveMaxInputTokens, fitPromptToBudget } from "../../src/run/run-flow.js";
-import { readPiJsonStream } from "../../src/run/execution/pi-json.js";
+import { createPiJsonCapture, readPiJsonStream } from "../../src/run/execution/pi-json.js";
 import { LocalExecutionBackend } from "../../src/run/execution/local.js";
 import { DEFAULT_MAX_RUNTIME_TOKENS } from "../../src/run/budget-defaults.js";
 import { listNotificationDeliveryReceipts } from "../../src/web/notification-delivery.js";
@@ -15603,6 +15603,64 @@ describe("runFlow", () => {
       cost: { classification: "estimated", method: "pi-model-pricing" },
     });
     expect(projectRun(events).status).toBe("completed");
+  });
+
+  it("records the call log beside the usage and exports the run's trace after it returns", async () => {
+    const repo = await createRepo();
+    const flowPath = join(repo, "flows", "trace-export.json");
+    await writeJson(flowPath, {
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "trace-export" },
+      spec: {
+        stages: [
+          {
+            id: "implement",
+            type: "agent",
+            runtime: "mock",
+            prompt: "Implement the change.",
+            inputs: [],
+            outputs: ["implementation"],
+          },
+        ],
+      },
+    });
+    const stream = await readFile(join(process.cwd(), "test/fixtures/pi-json/openrouter-two-calls.jsonl"), "utf8");
+    const capture = createPiJsonCapture();
+    capture.write(stream);
+    const piUsage = readPiJsonStream(capture.text(), { provider: "openrouter" }).usage;
+    const exported: Array<{ runId: string; types: string[] }> = [];
+
+    await runFlow(
+      { flowPath, repoPath: repo, inputs: {} },
+      {
+        createRunId: () => "run-trace-export",
+        backend: backendWithAgent(repo, async (_workspace, input) => {
+          await writeFile(join(input.attemptDirectory, "implementation.md"), "implemented\n", "utf8");
+          return { stdout: "", stderr: "", ...(piUsage ? { usage: piUsage } : {}) };
+        }),
+        exportRunTrace: async (input) => {
+          exported.push({ runId: input.runId, types: input.listEvents().map((event) => event.type) });
+          throw new Error("collector exploded");
+        },
+      },
+    );
+
+    const store = new EventStore(join(repo, ".nitely", "events.db"));
+    const events = store.list("run-trace-export");
+    store.close();
+    expect(projectRun(events).status).toBe("completed");
+    const usage = events.find((event) => event.type === "stage.runtime.usage");
+    expect(usage?.payload).not.toHaveProperty("callLog");
+    const calls = events.find((event) => event.type === "stage.runtime.calls");
+    expect(calls).toMatchObject({ stageId: "implement", attempt: 1 });
+    expect((calls?.payload as { calls: Array<{ kind: string }> }).calls.map((call) => call.kind))
+      .toEqual(["llm", "tool", "llm"]);
+    // Exported once, after the run's terminal event was written.
+    expect(exported).toHaveLength(1);
+    expect(exported[0]?.runId).toBe("run-trace-export");
+    expect(exported[0]?.types).toContain("stage.runtime.calls");
+    expect(exported[0]?.types.at(-1)).toBe("run.completed");
   });
 
   it("records stage.runtime.usage when the execution backend reports usage", async () => {
