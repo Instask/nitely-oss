@@ -298,6 +298,67 @@ describe.skipIf(!linuxX64)("command mediator", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it("runs an allowed shebang body through the checked interpreter", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "nitely-mediator-shebang-"));
+    try {
+      const script = join(directory, "script.sh");
+      await writeFile(
+        script,
+        "#!/bin/sh -e\necho kept\nfalse\necho leaked\n",
+        { mode: 0o755 },
+      );
+      await writePolicy(directory, ["dash", "script.sh"], []);
+      const result = await runMediator(directory, [
+        "/bin/sh",
+        "-c",
+        `"${script}"; echo wrapper:$?`,
+      ], {});
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain("kept");
+      expect(result.stdout).toContain("wrapper:1");
+      expect(result.stdout).not.toContain("leaked");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("executes the interpreter inode it checked when the shebang path is replaced", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "nitely-mediator-interp-"));
+    const link = join(directory, "interp");
+    try {
+      const good = join(directory, "goodbin");
+      const bad = join(directory, "badbin");
+      const goodMarker = join(directory, "good-ran");
+      const badMarker = join(directory, "bad-ran");
+      const script = join(directory, "script.sh");
+      await compileMarker(good, goodMarker);
+      await compileMarker(bad, badMarker);
+      await symlink(good, link);
+      await writeFile(script, `#!${link}\n`, { mode: 0o755 });
+      const loop = join(directory, "loopbin");
+      await compile(loop, symlinkLoopSource());
+      await writePolicy(directory, ["script.sh", "goodbin"], ["badbin"]);
+      let sawGood = false;
+      for (let attempt = 0; attempt < 4 && !sawGood; attempt += 1) {
+        const swapper = spawn("python3", ["-c", swapperSource(), link, good, bad], {
+          stdio: "ignore",
+        });
+        try {
+          const result = await runMediator(directory, [loop, script], {}, 30_000);
+          expect(result.code).toBe(0);
+          expect(result.stderr).toBe("");
+          sawGood = await readFile(goodMarker, "utf8").then(() => true, () => false);
+        } finally {
+          swapper.kill("SIGKILL");
+        }
+        await expect(readFile(badMarker, "utf8")).rejects.toThrow();
+      }
+      expect(sawGood).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 function runMediator(

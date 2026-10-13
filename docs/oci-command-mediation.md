@@ -32,7 +32,8 @@ be rejected up front:
 - An interpreter performs the exec (`python3 -c` calling `execv`).
 - A script's shebang names an interpreter. The kernel runs that interpreter
   inside the script's `execve`, so checking only the script path is not
-  enough.
+  enough. Replacing the interpreter path after that check must not select a
+  different file.
 - A subprocess or another thread performs the exec, including a thread that
   rewrites the pathname after the check has read it.
 - The work directory replaces a symlink after the check has resolved it and
@@ -73,14 +74,20 @@ is still running when the deadline passes, the exec is denied. The parent
 then opens the executable with an `O_NOFOLLOW` walk and holds that inode.
 Allow does not resume the original pathname. It points the syscall at the
 held inode through the supervisor's `/proc` file descriptor, so replacing a
-symlink in the work directory cannot change the file the kernel runs. Deny
-sets the syscall number to -1 and the return value to `EPERM`, which skips
-the syscall instead of continuing it. `PTRACE_O_EXITKILL` is set, and the
-child also requests `SIGKILL` if the parent dies, so a dead supervisor does
-not leave an unmediated process running.
+symlink in the work directory cannot change the file the kernel runs. A
+script is handled the same way and then copied. The copy's shebang names the
+pinned interpreter inode, and the syscall is pointed at the copy. The kernel
+opens that descriptor instead of resolving the shebang path again. If the
+interpreter inode cannot be pinned, or the private copy cannot be made, the
+script is denied. Deny sets the syscall number to -1 and the return value to
+`EPERM`, which skips the syscall instead of continuing it.
+`PTRACE_O_EXITKILL` is set, and the child also requests `SIGKILL` if the
+parent dies, so a dead supervisor does not leave an unmediated process
+running.
 
-The first exec is exempt from the command policy and is pinned the same way.
-If that inode cannot be pinned, the exec is denied.
+The first exec is exempt from the command policy and is pinned the same way,
+including when that exec is a script. If its inode or its interpreter cannot
+be pinned, the exec is denied.
 
 The decision follows the stage's existing `capabilities.commands` rules.
 There is no second policy language. It uses the filename the kernel was
@@ -89,9 +96,10 @@ given and the canonical path in the tracee's mount namespace, not `argv[0]`.
 - A deny rule matches either the requested path or the resolved path.
 - An allow-list matches only the resolved path. `/tmp/fake-id` pointing at
   `/usr/bin/touch` is `touch`, not `fake-id`.
-- A shebang is checked as well as the script. If the interpreter does not
-  pass, the exec is denied. A shebang whose interpreter is itself a script
-  is denied.
+- A shebang is checked as well as the script. The interpreter that runs is
+  the inode opened at check time. If the interpreter does not pass, or that
+  inode cannot be held, the exec is denied. A shebang whose interpreter is
+  itself a script is denied.
 - `execveat` with `AT_EMPTY_PATH`, a memfd, an empty filename, or a path that
   does not resolve is denied.
 - Argument vectors longer than 64 words, or a pathname that does not fit in

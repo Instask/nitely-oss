@@ -6,16 +6,19 @@ PTRACE_SEIZE, and the child installs a seccomp filter that stops native
 execve and execveat. x32 syscall numbers are killed. Allow does not resume
 the original path: every other thread is stopped first, the executable inode
 is pinned with an O_NOFOLLOW walk, and the syscall is pointed at that inode.
-If a thread cannot be stopped, or the inode cannot be pinned, the exec is
-denied. Deny sets the syscall number to -1, which skips it and returns
-EPERM. That path does not use SECCOMP_USER_NOTIF continue, which the kernel
-documents as unsafe for policy.
+A script's interpreter inode is pinned as well. The kernel receives a private
+copy of the script whose shebang names that held descriptor, so it cannot
+look the interpreter path up again. If a thread cannot be stopped, the inode
+cannot be pinned, or that private copy cannot be made, the exec is denied.
+Deny sets the syscall number to -1, which skips it and returns EPERM. That
+path does not use SECCOMP_USER_NOTIF continue, which the kernel documents as
+unsafe for policy.
 
 The first exec is the runtime argv Nitely built and is exempt from the
-policy, but it is pinned the same way. Every later exec is decided from the
-execve filename and the pinned inode, never from argv[0]. If ptrace or
-seccomp cannot be installed, the child is killed and this process exits
-without executing the workload.
+policy, but it is pinned the same way, including a shebang interpreter. Every
+later exec is decided from the execve filename and the pinned inode, never
+from argv[0]. If ptrace or seccomp cannot be installed, the child is killed
+and this process exits without executing the workload.
 
 x86_64 only. A PATH shim is not used: absolute paths, shells, symlinks, and
 interpreters bypass it.
@@ -40,6 +43,12 @@ AT_EMPTY_PATH = 0x1000
 MAX_ARGC = 64
 MAX_PATH = 4096
 MAX_SYMLINKS = 40
+# Binaries stay on the pinned inode. Scripts are copied so the shebang can
+# name that inode; larger files are denied rather than executed unpinned.
+SCRIPT_SNAPSHOT_LIMIT = 32 * 1024 * 1024
+# linux/memfd.h. Python 3.11 does not export this name. Required when
+# vm.memfd_noexec is 1; mode 2 rejects memfd execution entirely.
+MFD_EXEC = 0x0010
 
 PTRACE_CONT = 7
 PTRACE_SYSCALL = 24
@@ -634,17 +643,142 @@ def pin_inode(pid: int, filename: str, dirfd: int | None) -> tuple[int, str] | N
             _close_quiet(fd)
 
 
-def shebang_interpreter_fd(fd: int) -> str | None:
+def read_shebang(fd: int) -> tuple[str, str] | None:
+    """Return the interpreter token and its optional argument.
+
+    None means the file is not a shebang. An empty interpreter means the
+    shebang cannot be trusted, including a line that does not fit in the
+    kernel's 256-byte buffer.
+    """
     try:
-        header = os.pread(fd, 128, 0)
+        header = os.pread(fd, 256, 0)
     except OSError:
         return None
     if not header.startswith(b"#!"):
         return None
-    line = header.split(b"\n", 1)[0][2:].decode("utf-8", "replace").strip()
-    if line == "":
-        return ""
-    return line.split()[0]
+    newline = header.find(b"\n")
+    if newline < 0 and len(header) >= 256:
+        return ("", "")
+    line = header[2:] if newline < 0 else header[2:newline]
+    text = line.decode("utf-8", "surrogateescape").lstrip(" \t")
+    if text.strip(" \t") == "":
+        return ("", "")
+    parts = text.split(None, 1)
+    if not parts or parts[0] == "":
+        return ("", "")
+    optional = parts[1].strip(" \t") if len(parts) > 1 else ""
+    if "\x00" in parts[0] or "\x00" in optional:
+        return ("", "")
+    return parts[0], optional
+
+
+def shebang_interpreter_fd(fd: int) -> str | None:
+    parsed = read_shebang(fd)
+    if parsed is None:
+        return None
+    return parsed[0]
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        wrote = os.write(fd, view)
+        if wrote <= 0:
+            raise OSError(errno.EIO, "short write")
+        view = view[wrote:]
+
+
+def _memfd_noexec() -> int:
+    try:
+        with open("/proc/sys/vm/memfd_noexec", encoding="ascii") as handle:
+            return int(handle.read().strip() or "0")
+    except (OSError, ValueError):
+        return 0
+
+
+def _create_writable_private() -> int | None:
+    noexec = _memfd_noexec()
+    if noexec < 2:
+        flags = os.MFD_CLOEXEC | (MFD_EXEC if noexec == 1 else 0)
+        try:
+            return os.memfd_create("nitely-script", flags)
+        except (AttributeError, OSError):
+            pass
+    for directory in ("/dev/shm", "/tmp"):
+        try:
+            return os.open(directory, os.O_TMPFILE | os.O_RDWR | os.O_CLOEXEC, 0o700)
+        except OSError:
+            continue
+    return None
+
+
+def script_bound_to_interpreter(
+    script_fd: int,
+    interpreter_fd: int,
+    interpreter: str,
+) -> int | None:
+    """Copy the script so its shebang opens the held interpreter inode.
+
+    The kernel reads the shebang after exec resumes and looks that path up
+    itself. The copy names /proc/<supervisor>/fd/<interpreter>, which stays
+    attached to the inode checked above. The original script fd is left open
+    for the caller.
+    """
+    if interpreter == "" or "\x00" in interpreter:
+        return None
+    try:
+        size = os.fstat(script_fd).st_size
+    except OSError:
+        return None
+    if size < 2 or size > SCRIPT_SNAPSHOT_LIMIT:
+        return None
+    parsed = read_shebang(script_fd)
+    if parsed is None or parsed[0] != interpreter:
+        return None
+    _token, optional = parsed
+    proc_path = f"/proc/{os.getpid()}/fd/{interpreter_fd}"
+    if any(character in proc_path for character in " \t\n\x00"):
+        return None
+    rewritten = (
+        f"#!{proc_path} {optional}\n" if optional else f"#!{proc_path}\n"
+    ).encode("utf-8", "surrogateescape")
+    # The newline has to sit inside the kernel's 256-byte shebang buffer.
+    if len(rewritten) > 256:
+        return None
+    try:
+        header = os.pread(script_fd, min(256, size), 0)
+    except OSError:
+        return None
+    newline = header.find(b"\n")
+    if newline < 0:
+        if len(header) != size:
+            return None
+        body_offset = size
+    else:
+        body_offset = newline + 1
+    writable = _create_writable_private()
+    if writable is None:
+        return None
+    try:
+        _write_all(writable, rewritten)
+        remaining = size - body_offset
+        offset = body_offset
+        while remaining > 0:
+            chunk = os.pread(script_fd, min(1 << 20, remaining), offset)
+            if not chunk:
+                raise OSError(errno.EIO, "short script")
+            _write_all(writable, chunk)
+            offset += len(chunk)
+            remaining -= len(chunk)
+        if os.fstat(script_fd).st_size != size:
+            raise OSError(errno.EIO, "script changed")
+        # A file still open for writing returns ETXTBSY from exec. Reopen
+        # read-only, then drop the writable descriptor. The inode remains.
+        return os.open(f"/proc/self/fd/{writable}", os.O_RDONLY | os.O_CLOEXEC)
+    except OSError:
+        return None
+    finally:
+        _close_quiet(writable)
 
 
 def vm_write(pid: int, address: int, data: bytes) -> None:
@@ -925,6 +1059,8 @@ class Supervisor:
         if decision["decision"] == "deny" or pin is None:
             if pin is not None:
                 _close_quiet(pin[0])
+                for held in pin[2]:
+                    _close_quiet(held)
             if decision["decision"] != "deny":
                 decision = {
                     "argc": decision.get("argc", 0),
@@ -940,16 +1076,22 @@ class Supervisor:
             self.evidence.decision(decision)
             self.resume_group(pid)
             return
-        fd, hold = pin
+        fd, hold, extra = pin
         try:
             redirect_exec(pid, regs, f"/proc/{os.getpid()}/fd/{fd}")
         except OSError:
             _close_quiet(fd)
+            for held in extra:
+                _close_quiet(held)
             self._deny(pid, "executable path could not be resolved")
             return
         if hold:
-            self.script_pins.setdefault(pid, []).append(fd)
+            held_fds = self.script_pins.setdefault(pid, [])
+            held_fds.append(fd)
+            held_fds.extend(extra)
         else:
+            for held in extra:
+                _close_quiet(held)
             previous = self.binary_pins.get(pid)
             if previous is not None and previous != fd:
                 _close_quiet(previous)
@@ -962,7 +1104,7 @@ class Supervisor:
         self,
         pid: int,
         regs: ctypes.Array[ctypes.c_ulonglong],
-    ) -> tuple[dict[str, object], tuple[int, bool] | None]:
+    ) -> tuple[dict[str, object], tuple[int, bool, list[int]] | None]:
         number = int(regs[REG_ORIG_RAX])
         if number == NR_EXECVE:
             filename = read_c_string(pid, int(regs[REG_RDI])) or ""
@@ -997,19 +1139,8 @@ class Supervisor:
             return unresolved, None
         fd, canonical = pinned
         shebang = shebang_interpreter_fd(fd)
-        if self.launch_pending and pid == self.root:
-            self.launch_pending = False
-            return (
-                {
-                    "argc": argc,
-                    "decision": "allow",
-                    "event": "launch",
-                    "program": program_basename(canonical or filename),
-                    "reason": "launch exempt",
-                },
-                (fd, shebang is not None),
-            )
         interpreter: str | None = None
+        interp_fd: int | None = None
         if shebang is not None:
             if shebang == "":
                 interpreter = ""
@@ -1020,8 +1151,62 @@ class Supervisor:
                 else:
                     interp_fd, interp_path = resolved
                     nested = shebang_interpreter_fd(interp_fd)
-                    _close_quiet(interp_fd)
-                    interpreter = "" if nested is not None else interp_path
+                    if nested is not None:
+                        _close_quiet(interp_fd)
+                        interp_fd = None
+                        interpreter = ""
+                    else:
+                        interpreter = interp_path
+
+        def close_checked() -> None:
+            _close_quiet(fd)
+            if interp_fd is not None:
+                _close_quiet(interp_fd)
+
+        def denied_script(program: str) -> tuple[dict[str, object], None]:
+            close_checked()
+            return {
+                "argc": argc,
+                "decision": "deny",
+                "event": "decision",
+                "program": program,
+                "reason": "shebang interpreter denied",
+            }, None
+
+        def executable(
+            record: dict[str, object],
+        ) -> tuple[dict[str, object], tuple[int, bool, list[int]] | None]:
+            if shebang is None:
+                return record, (fd, False, [])
+            # Keep the interpreter fd open. The private copy's shebang names
+            # it, and the kernel opens that path only after this syscall resumes.
+            if interp_fd is None or not interpreter:
+                return denied_script(str(record.get("program") or "unresolved"))
+            bound = script_bound_to_interpreter(fd, interp_fd, shebang)
+            _close_quiet(fd)
+            if bound is None:
+                _close_quiet(interp_fd)
+                return {
+                    "argc": argc,
+                    "decision": "deny",
+                    "event": "decision",
+                    "program": str(record.get("program") or "unresolved"),
+                    "reason": "shebang interpreter denied",
+                }, None
+            return record, (bound, True, [interp_fd])
+
+        program = program_basename(canonical or filename)
+        if self.launch_pending and pid == self.root:
+            self.launch_pending = False
+            if interpreter == "":
+                return denied_script(program)
+            return executable({
+                "argc": argc,
+                "decision": "allow",
+                "event": "launch",
+                "program": program,
+                "reason": "launch exempt",
+            })
         args = argv[1:] if argv else []
         decided = decide_mediated_exec(
             self.policy,
@@ -1034,15 +1219,15 @@ class Supervisor:
             "argc": argc,
             "decision": decided["decision"],
             "event": "decision",
-            "program": program_basename(canonical or filename),
+            "program": program,
             "reason": decided["reason"],
         }
         if "rule" in decided:
             record["rule"] = decided["rule"]
         if decided["decision"] != "allow":
-            _close_quiet(fd)
+            close_checked()
             return record, None
-        return record, (fd, shebang is not None)
+        return executable(record)
 
     def handle(self, pid: int, status: int) -> None:
         if os.WIFSTOPPED(status):
