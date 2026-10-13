@@ -103,6 +103,24 @@ export interface ReviewerScorecardCaseOutcome {
   falsePositives: number;
   ambiguousMatches: number;
   passed?: boolean;
+  /**
+   * sha256 over the ground truth that drives the metrics: the known-good flag
+   * and each gold defect's id, severity and category. Two scorecards only
+   * compare a case when this matches.
+   */
+  groundTruthSha256: string;
+}
+
+/** Hash of the case ground truth that recall, P0/P1 and pass rates depend on. */
+export function reviewerCaseGroundTruthSha256(evalCase: EvalCase): string {
+  const review = evalCase.reviewEvaluation;
+  const truth = {
+    knownGood: review?.knownGood ?? false,
+    defects: [...(review?.expectedDefects ?? [])]
+      .map((defect) => ({ id: defect.id, severity: defect.severity, category: defect.category }))
+      .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)),
+  };
+  return `sha256:${createHash("sha256").update(stableJson(truth)).digest("hex")}`;
 }
 
 export interface ReviewerCorpusAssessment {
@@ -291,7 +309,9 @@ export function buildReviewerScorecard(input: {
       if (passed !== true) knownGoodFailures += 1;
     } else {
       defectiveCases += 1;
-      if (passed === true) defectivePasses += 1;
+      // No reviewer output on a defective case lets the defect through, the
+      // same way it counts as a miss in recall.
+      if (passed === true || !score) defectivePasses += 1;
     }
     if (!score) unscored.push(evalCase.id);
     const provenance = score?.provenance;
@@ -320,6 +340,7 @@ export function buildReviewerScorecard(input: {
       falsePositives,
       ambiguousMatches: caseAmbiguous,
       ...(passed !== undefined ? { passed } : {}),
+      groundTruthSha256: reviewerCaseGroundTruthSha256(evalCase),
     });
   }
   latencies.sort((left, right) => left - right);
@@ -413,6 +434,8 @@ export interface ReviewerScorecardComparison {
   candidate: { subjectId: string; windowId: string; manifestSha256: string };
   matchedCaseIds: string[];
   unmatchedCaseIds: string[];
+  /** Cases present in both scorecards whose ground truth differs. */
+  groundTruthMismatchCaseIds: string[];
   status: ReviewerComparisonStatus;
   reasons: string[];
   metrics: ReviewerPairedMetricComparison[];
@@ -439,18 +462,26 @@ export function compareReviewerScorecards(input: {
   const candidateCases = new Map(input.candidate.cases.map((entry) => [entry.caseId, entry]));
   const matched: Array<[ReviewerScorecardCaseOutcome, ReviewerScorecardCaseOutcome]> = [];
   const unmatched = new Set<string>();
+  const truthMismatch: string[] = [];
   for (const [caseId, baseline] of baselineCases) {
     const candidate = candidateCases.get(caseId);
-    if (
-      candidate &&
-      candidate.knownGood === baseline.knownGood &&
-      sameIds(candidate.defectIds, baseline.defectIds)
-    ) {
-      matched.push([baseline, candidate]);
-    } else {
+    if (!candidate) {
       unmatched.add(caseId);
+      continue;
     }
+    if (
+      !baseline.groundTruthSha256 ||
+      candidate.groundTruthSha256 !== baseline.groundTruthSha256 ||
+      candidate.knownGood !== baseline.knownGood ||
+      !sameIds(candidate.defectIds, baseline.defectIds)
+    ) {
+      unmatched.add(caseId);
+      truthMismatch.push(caseId);
+      continue;
+    }
+    matched.push([baseline, candidate]);
   }
+  truthMismatch.sort();
   for (const caseId of candidateCases.keys()) {
     if (!baselineCases.has(caseId)) unmatched.add(caseId);
   }
@@ -507,13 +538,20 @@ export function compareReviewerScorecards(input: {
       `${matched.length} matched cases; at least ${minMatched} are needed before a direction is reported`,
     );
   }
-  const status: ReviewerComparisonStatus = metrics.some((entry) => entry.status === "advisory-regression")
+  if (truthMismatch.length > 0) {
+    reasons.push(
+      `ground truth (known-good flag, defect ids, severity or category) differs for ${truthMismatch.length} shared case(s): ${truthMismatch.join(", ")}; the scorecards are not comparable until the annotations agree`,
+    );
+  }
+  const metricStatus: ReviewerComparisonStatus = metrics.some((entry) => entry.status === "advisory-regression")
     ? "advisory-regression"
     : metrics.some((entry) => entry.status === "insufficient-evidence")
       ? "insufficient-evidence"
       : metrics.some((entry) => entry.status === "advisory-improvement")
         ? "advisory-improvement"
         : "no-significant-change";
+  const status: ReviewerComparisonStatus =
+    truthMismatch.length > 0 ? "insufficient-evidence" : metricStatus;
   return {
     schemaVersion: REVIEWER_SCORECARD_COMPARISON_SCHEMA,
     mode: "advisory",
@@ -529,6 +567,7 @@ export function compareReviewerScorecards(input: {
     },
     matchedCaseIds: matched.map(([baseline]) => baseline.caseId),
     unmatchedCaseIds: [...unmatched].sort(),
+    groundTruthMismatchCaseIds: truthMismatch,
     status,
     reasons,
     metrics,

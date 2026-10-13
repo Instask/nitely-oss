@@ -208,6 +208,9 @@ describe("reviewer scorecard", () => {
     expect(card.unscoredCaseIds).toHaveLength(24);
     expect(card.metrics.overallDefectRecall.value).toBe(0);
     expect(card.metrics.failOnKnownGoodRate.value).toBe(1);
+    // Silence on a defective case is a wrongful pass, consistent with recall.
+    expect(card.metrics.passOnDefectiveRate.value).toBe(1);
+    expect(card.metrics.passOnDefectiveRate.trials).toBe(card.corpus.defectiveCaseCount);
   });
 });
 
@@ -247,7 +250,33 @@ describe("reviewer scorecard comparison", () => {
       candidate: scorecard(review(changed, "strong"), "b"),
     });
     expect(comparison.unmatchedCaseIds).toEqual(["defect-0"]);
+    expect(comparison.groundTruthMismatchCaseIds).toEqual(["defect-0"]);
     expect(comparison.matchedCaseIds).toHaveLength(23);
-    expect(comparison.status).toBe("no-significant-change");
+    expect(comparison.status).toBe("insufficient-evidence");
+  });
+
+  it.each([
+    ["severity", { severity: "low" as const }],
+    ["category", { category: "relabelled" }],
+  ])("treats a changed defect %s as not comparable", (_field, patch) => {
+    const cases = corpus();
+    const target = cases.find((entry) => (entry.reviewEvaluation?.expectedDefects.length ?? 0) > 0)!;
+    const changed = cases.map((entry) => {
+      if (entry !== target) return entry;
+      const defects = entry.reviewEvaluation!.expectedDefects.map((defect, index) =>
+        index === 0 ? { ...defect, ...patch } : defect);
+      return { ...entry, reviewEvaluation: { ...entry.reviewEvaluation!, expectedDefects: defects } };
+    });
+    const baseline = scorecard(review(cases, "strong"), "a");
+    const candidate = scorecard(review(changed, "strong"), "b");
+    const before = baseline.cases.find((entry) => entry.caseId === target.id)!;
+    const after = candidate.cases.find((entry) => entry.caseId === target.id)!;
+    expect(after.defectIds).toEqual(before.defectIds);
+    expect(after.groundTruthSha256).not.toBe(before.groundTruthSha256);
+    const comparison = compareReviewerScorecards({ baseline, candidate });
+    expect(comparison.groundTruthMismatchCaseIds).toEqual([target.id]);
+    expect(comparison.matchedCaseIds).not.toContain(target.id);
+    expect(comparison.status).toBe("insufficient-evidence");
+    expect(comparison.reasons.join("\n")).toMatch(/ground truth .* differs .*not comparable/);
   });
 });
