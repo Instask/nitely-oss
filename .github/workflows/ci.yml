@@ -15,7 +15,8 @@ jobs:
     # Linux is the deployment target, and a large part of the suite asserts
     # Linux descriptor-relative path anchoring that cannot run on macOS, so
     # this is the only platform where a green run means anything.
-    runs-on: ubuntu-latest
+    # Keep fork PR code on GitHub-hosted machines.
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64"]') }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -45,7 +46,8 @@ jobs:
     name: Built package smoke
     # Same Linux gate as the test job. This one checks the tarball users
     # install: build, pack, entrypoints, and the mocked golden path.
-    runs-on: ubuntu-latest
+    # Keep fork PR code on GitHub-hosted machines.
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && 'ubuntu-latest' || fromJSON('["self-hosted","Linux","X64"]') }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
