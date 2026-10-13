@@ -17,8 +17,16 @@ against the default branch, and deployments build from this repository.
 
 ## Verification Boundary
 
-`.github/workflows/ci.yml` runs `pnpm run check` and `pnpm run test:run` on
-Linux for every PR and every push to the default branch. It is the merge gate.
+`.github/workflows/ci.yml` runs two Linux jobs for every PR and every push
+to the default branch. Both are the merge gate.
+
+- `Typecheck and tests` runs `pnpm run check` and `pnpm run test:run`.
+- `Built package smoke` runs `pnpm run build`, packs the tarball users
+  install, and runs `pnpm run package:smoke` against that install. The smoke
+  covers the CLI, the public API and runner-control-plane exports, the static
+  Web assets, and `nitely smoke golden-path` with mocked providers. A broken
+  `bin` or `exports` path fails this job. On failure it uploads command logs
+  and golden-path proof flags, not the fixture repository or run evidence.
 
 - **Never describe a failure as a pre-existing baseline and merge past it.** If
   `pnpm run check` is red, either the fix belongs in your PR or your PR waits.

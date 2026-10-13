@@ -40,3 +40,40 @@ jobs:
 
       - name: Tests
         run: pnpm run test:run
+
+  package-smoke:
+    name: Built package smoke
+    # Same Linux gate as the test job. This one checks the tarball users
+    # install: build, pack, entrypoints, and the mocked golden path.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # `pnpm pack` runs prepack, which builds again. This step is the explicit
+      # build gate; the smoke then packs that publish path and installs it.
+      - name: Build
+        run: pnpm run build
+
+      - name: Pack, install, and smoke
+        run: pnpm run package:smoke
+
+      # Command logs and proof flags only. The smoke deletes the fixture
+      # repository and run evidence before this upload.
+      - name: Upload package smoke diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-smoke-diagnostics
+          path: package-smoke-diagnostics/
+          if-no-files-found: warn
+          retention-days: 7

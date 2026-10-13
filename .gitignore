@@ -1,4 +1,5 @@
 .worktrees/
+package-smoke-diagnostics/
 # Local copy installed by scripts/install-nitely-skill --project .
 .claude/skills/nitely/
 node_modules/
