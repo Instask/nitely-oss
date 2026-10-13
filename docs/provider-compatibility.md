@@ -75,8 +75,14 @@ that is not an upper bound, is `unverified-budget`: the USD cap is not proven,
 and it is never counted as verified. Exceeding a cap is `blocked-budget`
 (an estimate above the cap also blocks); missing usage, a non-zero exit, a
 timeout or a missing observation is `failed`; everything not run is
-`skipped`. Each result keeps the CLI version, source SHA, stage ids, latency,
-tokens and cost provenance, and stderr is redacted before it is stored.
+`skipped`. Non-finite, negative, or non-integer token counts (including
+optional `inputTokens` / `outputTokens`), illegal `cost.usd`, negative or
+non-finite latency, a negative exit code, or an invalid run cap is
+`invalid-observation`: the reason names the field, and it is never counted as
+verified. Caps themselves must be finite and positive (`maxTotalTokens` and
+`timeoutMs` as safe integers). Each result keeps the CLI version, source SHA,
+stage ids, latency, tokens and cost provenance, and stderr is redacted before
+it is stored.
 
 Running live smoke in CI needs provider secrets that are available only to
 trusted, manually dispatched or scheduled workflows, plus a small synthetic

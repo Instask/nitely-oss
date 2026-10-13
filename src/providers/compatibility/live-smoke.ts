@@ -101,6 +101,8 @@ export interface LiveSmokeObservation {
   latencyMs: number;
   stageIds: string[];
   usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
     totalTokens?: number;
     cost?: { classification: "actual" | "estimated"; usd: number } | { classification: "unknown" };
   };
@@ -118,6 +120,11 @@ export type LiveSmokeOutcome =
    * Never counted as verified.
    */
   | "unverified-budget"
+  /**
+   * An observation or run budget contained a non-finite, negative, or otherwise
+   * illegal numeric value. Never counted as verified; the reason names the field.
+   */
+  | "invalid-observation"
   | "skipped";
 
 export interface LiveSmokeResult {
@@ -143,11 +150,57 @@ export interface LiveSmokeReport {
 
 const STDERR_EXCERPT_CHARACTERS = 2_000;
 
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isNonNegativeFinite(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+/** Returns a field path when a numeric observation value is illegal. */
+function invalidObservationField(observation: LiveSmokeObservation): string | undefined {
+  if (observation.exitCode !== null && !isNonNegativeSafeInteger(observation.exitCode)) {
+    return "exitCode";
+  }
+  if (!isNonNegativeFinite(observation.latencyMs)) {
+    return "latencyMs";
+  }
+  const usage = observation.usage;
+  if (!usage) return undefined;
+  for (const field of ["inputTokens", "outputTokens", "totalTokens"] as const) {
+    if (usage[field] !== undefined && !isNonNegativeSafeInteger(usage[field])) {
+      return `usage.${field}`;
+    }
+  }
+  const cost = usage.cost;
+  if (cost && cost.classification !== "unknown" && !isNonNegativeFinite(cost.usd)) {
+    return "usage.cost.usd";
+  }
+  return undefined;
+}
+
+/** Returns a budget field path when a run cap is not a finite positive number. */
+function invalidBudgetField(budget: LiveSmokeBudget): string | undefined {
+  if (!isNonNegativeSafeInteger(budget.maxTotalTokens) || budget.maxTotalTokens <= 0) {
+    return "budget.maxTotalTokens";
+  }
+  if (!isNonNegativeFinite(budget.maxCostUsd) || budget.maxCostUsd <= 0) {
+    return "budget.maxCostUsd";
+  }
+  if (!isNonNegativeSafeInteger(budget.timeoutMs) || budget.timeoutMs <= 0) {
+    return "budget.timeoutMs";
+  }
+  return undefined;
+}
+
 /**
  * Turns a plan and the observed runs into a report. A provider is verified only
  * when it was planned to run, ran to exit 0 without timing out, reported token
  * usage, and stayed within the token and (when known) currency cap. Unknown
- * cost is reported as unknown, never as zero.
+ * cost is reported as unknown, never as zero. Non-finite, negative, or
+ * non-integer token counts, illegal cost/latency/exit values, and invalid run
+ * caps are `invalid-observation` and never verified.
  */
 export function evaluateLiveSmoke(input: {
   plan: readonly LiveSmokePlanEntry[];
@@ -161,9 +214,29 @@ export function evaluateLiveSmoke(input: {
     if (entry.action === "skip") {
       return { provider: entry.provider, outcome: "skipped", reason: `${entry.reason}: ${entry.detail}` };
     }
+    const badBudget = invalidBudgetField(entry.budget);
+    if (badBudget) {
+      return {
+        provider: entry.provider,
+        outcome: "invalid-observation",
+        reason: `invalid-observation: ${badBudget}`,
+      };
+    }
     const observation = input.observations.find((candidate) => candidate.provider === entry.provider);
     if (!observation) {
       return { provider: entry.provider, outcome: "failed", reason: "planned run produced no observation" };
+    }
+    const badField = invalidObservationField(observation);
+    if (badField) {
+      return {
+        provider: entry.provider,
+        outcome: "invalid-observation",
+        reason: `invalid-observation: ${badField}`,
+        ...(observation.cliVersion ? { cliVersion: observation.cliVersion } : {}),
+        sourceSha: observation.sourceSha,
+        ...(Number.isFinite(observation.latencyMs) ? { latencyMs: observation.latencyMs } : {}),
+        stageIds: observation.stageIds,
+      };
     }
     const costProvenance = observation.usage?.cost?.classification ?? "unknown";
     const costUsd = observation.usage?.cost && observation.usage.cost.classification !== "unknown"
@@ -215,6 +288,7 @@ export function evaluateLiveSmoke(input: {
     failed: 0,
     "blocked-budget": 0,
     "unverified-budget": 0,
+    "invalid-observation": 0,
     skipped: 0,
   };
   for (const result of results) summary[result.outcome] += 1;
