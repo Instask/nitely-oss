@@ -12,7 +12,7 @@ import {
  * a trusted context (never a fork pull request), with a credential present and
  * an explicit per-run token and currency cap. Every provider that does not run
  * gets a recorded skip reason, and only a provider whose run completed inside
- * its budget with usage provenance is reported as verified.
+ * its token and proven USD budget with usage provenance is reported as verified.
  */
 
 export const LIVE_SMOKE_REPORT_SCHEMA = "nitely.provider-live-smoke.v1";
@@ -112,6 +112,12 @@ export type LiveSmokeOutcome =
   | "verified"
   | "failed"
   | "blocked-budget"
+  /**
+   * Ran within the token cap, but the USD cap cannot be shown to hold: cost
+   * was unknown, or only an estimate that is not a reliable upper bound.
+   * Never counted as verified.
+   */
+  | "unverified-budget"
   | "skipped";
 
 export interface LiveSmokeResult {
@@ -196,9 +202,21 @@ export function evaluateLiveSmoke(input: {
       }
       return { ...base, outcome: "failed", reason: "token usage is unknown, so the token cap cannot be shown to hold" };
     }
+    if (costProvenance === "unknown" || costUsd === undefined) {
+      return { ...base, outcome: "unverified-budget", reason: `cost is unknown, so the ${entry.budget.maxCostUsd} USD cap cannot be shown to hold` };
+    }
+    if (costProvenance === "estimated" && !providerCompatibilityEntry(entry.provider, matrix)?.output.estimatedCostIsUpperBound) {
+      return { ...base, outcome: "unverified-budget", reason: `cost ${costUsd} USD is an estimate that is not a reliable upper bound, so the ${entry.budget.maxCostUsd} USD cap cannot be shown to hold` };
+    }
     return { ...base, outcome: "verified", reason: "completed within budget" };
   });
-  const summary: Record<LiveSmokeOutcome, number> = { verified: 0, failed: 0, "blocked-budget": 0, skipped: 0 };
+  const summary: Record<LiveSmokeOutcome, number> = {
+    verified: 0,
+    failed: 0,
+    "blocked-budget": 0,
+    "unverified-budget": 0,
+    skipped: 0,
+  };
   for (const result of results) summary[result.outcome] += 1;
   return { schemaVersion: LIVE_SMOKE_REPORT_SCHEMA, matrixRevision: matrix.revision, results, summary };
 }

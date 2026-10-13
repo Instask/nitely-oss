@@ -67,12 +67,12 @@ describe("live smoke verdicts", () => {
     });
     expect(report.results.map((result) => [result.provider, result.outcome])).toEqual([
       ["claude", "verified"],
-      ["openrouter", "verified"],
+      ["openrouter", "unverified-budget"],
       ["together", "skipped"],
     ]);
     expect(report.results[0]).toMatchObject({ cliVersion: "2.0.0", costProvenance: "actual", costUsd: 0.01, sourceSha: "c".repeat(40) });
     expect(report.results[1]).toMatchObject({ costProvenance: "estimated" });
-    expect(report.summary).toEqual({ verified: 2, failed: 0, "blocked-budget": 0, skipped: 1 });
+    expect(report.summary).toEqual({ verified: 1, failed: 0, "blocked-budget": 0, "unverified-budget": 1, skipped: 1 });
   });
 
   it("blocks a run that exceeds its token or currency cap", () => {
@@ -105,5 +105,43 @@ describe("live smoke verdicts", () => {
       observations: [{ ...observation, provider: "claude", timedOut: true, usage: { totalTokens: 1 } }],
     });
     expect(timedOut.results[0]!.outcome).toBe("failed");
+  });
+
+  it("does not verify a run whose cost is unknown or only a non-bounding estimate", () => {
+    const report = evaluateLiveSmoke({
+      plan,
+      observations: [
+        { ...observation, provider: "claude", usage: { totalTokens: 900 } },
+        { ...observation, provider: "openrouter", usage: { totalTokens: 900, cost: { classification: "unknown" } } },
+      ],
+    });
+    expect(report.results.slice(0, 2).map((result) => result.outcome)).toEqual(["unverified-budget", "unverified-budget"]);
+    expect(report.results[0]!.reason).toMatch(/cost is unknown/);
+    expect(report.results[0]!.costProvenance).toBe("unknown");
+    expect(report.summary.verified).toBe(0);
+    expect(report.summary["unverified-budget"]).toBe(2);
+  });
+
+  it("verifies actual cost under the cap, blocks actual cost over it, and trusts estimates only as upper bounds", () => {
+    const report = evaluateLiveSmoke({
+      plan,
+      observations: [
+        { ...observation, provider: "claude", usage: { totalTokens: 900, cost: { classification: "actual", usd: 0.04 } } },
+        { ...observation, provider: "openrouter", usage: { totalTokens: 900, cost: { classification: "actual", usd: 0.06 } } },
+      ],
+    });
+    expect(report.results.slice(0, 2).map((result) => result.outcome)).toEqual(["verified", "blocked-budget"]);
+
+    const bounded = {
+      ...PROVIDER_COMPATIBILITY_MATRIX,
+      entries: PROVIDER_COMPATIBILITY_MATRIX.entries.map((entry) =>
+        entry.runtime === "openrouter" ? { ...entry, output: { ...entry.output, estimatedCostIsUpperBound: true } } : entry),
+    };
+    const estimate = evaluateLiveSmoke({
+      plan,
+      matrix: bounded,
+      observations: [{ ...observation, provider: "openrouter", usage: { totalTokens: 900, cost: { classification: "estimated", usd: 0.01 } } }],
+    });
+    expect(estimate.results[1]!.outcome).toBe("verified");
   });
 });

@@ -36,6 +36,12 @@ export interface ProviderCompatibilityEntry {
     format: "codex-jsonl" | "claude-json" | "pi-jsonl" | "text";
     tokenUsage: "provider-reported" | "none";
     cost: ProviderCostClassification;
+    /**
+     * True only when an "estimated" cost is a reliable upper bound on what the
+     * provider bills (for example, priced at the maximum published rate). Live
+     * smoke treats an estimate without this flag as not proving the USD cap.
+     */
+    estimatedCostIsUpperBound?: boolean;
     /** Where usage provenance points, when usage is reported. */
     usageReference?: string;
   };
@@ -182,6 +188,9 @@ export function validateProviderCompatibilityMatrix(
     }
     if (entry.status !== "live-verified" && entry.liveVerified) {
       problems.push(`${entry.runtime} records live evidence but is not live-verified`);
+    }
+    if (entry.output.estimatedCostIsUpperBound && entry.output.cost !== "estimated") {
+      problems.push(`${entry.runtime} marks a cost upper bound without estimated cost`);
     }
     if (entry.output.tokenUsage === "none" && entry.output.cost !== "unknown") {
       problems.push(`${entry.runtime} claims ${entry.output.cost} cost without usage`);

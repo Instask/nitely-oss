@@ -67,8 +67,13 @@ currency and timeout cap is set, and its credential is present.
 
 `evaluateLiveSmoke` produces a `nitely.provider-live-smoke.v1` report. A
 provider is `verified` only when it was planned, exited 0 within the timeout,
-reported token usage and stayed within the token and (when known) currency
-cap. Exceeding a cap is `blocked-budget`; missing usage, a non-zero exit, a
+reported token usage and stayed within the token and currency cap, with the
+cost either `actual` or an `estimated` cost that the matrix row marks as a
+reliable upper bound (`estimatedCostIsUpperBound`; no row does yet). A run that
+stayed inside the token cap but whose cost is unknown, or only an estimate
+that is not an upper bound, is `unverified-budget`: the USD cap is not proven,
+and it is never counted as verified. Exceeding a cap is `blocked-budget`
+(an estimate above the cap also blocks); missing usage, a non-zero exit, a
 timeout or a missing observation is `failed`; everything not run is
 `skipped`. Each result keeps the CLI version, source SHA, stage ids, latency,
 tokens and cost provenance, and stderr is redacted before it is stored.
