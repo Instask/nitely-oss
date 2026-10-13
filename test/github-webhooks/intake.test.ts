@@ -1488,6 +1488,66 @@ describe("GitHub webhook intake", () => {
     });
   });
 
+  it("coalesces a newer delivery for the same issue into one task", async () => {
+    const repoPath = await createRepo();
+    const service = intake(repoPath);
+    const issue = issuePayload().issue as Record<string, unknown>;
+    await service.accept(signedDelivery({
+      deliveryId: "issue-older",
+      payload: issuePayload({
+        issue: { ...issue, updated_at: "2026-07-16T03:59:10.000Z" },
+      }),
+    }));
+    await service.accept(signedDelivery({
+      deliveryId: "issue-newer",
+      payload: issuePayload({
+        issue: { ...issue, updated_at: "2026-07-16T03:59:50.000Z" },
+      }),
+    }));
+
+    await service.drain();
+
+    const older = await getGitHubWebhookDelivery(repoPath, "issue-older");
+    const newer = await getGitHubWebhookDelivery(repoPath, "issue-newer");
+    expect(newer).toMatchObject({
+      state: "completed",
+      taskId: expect.stringMatching(/^github-delivery-/),
+    });
+    expect(older).toMatchObject({ state: "completed", reason: "coalesced" });
+    expect(older.taskId).toBeUndefined();
+    await expect(listTasks(repoPath)).resolves.toHaveLength(1);
+  });
+
+  it("keeps the newer wake when an older delivery arrives later", async () => {
+    const repoPath = await createRepo();
+    const service = intake(repoPath);
+    const issue = issuePayload().issue as Record<string, unknown>;
+    await service.accept(signedDelivery({
+      deliveryId: "issue-first-newer",
+      payload: issuePayload({
+        issue: { ...issue, updated_at: "2026-07-16T03:59:50.000Z" },
+      }),
+    }));
+    await service.accept(signedDelivery({
+      deliveryId: "issue-late-older",
+      payload: issuePayload({
+        issue: { ...issue, updated_at: "2026-07-16T03:59:10.000Z" },
+      }),
+    }));
+
+    await service.drain();
+
+    await expect(getGitHubWebhookDelivery(repoPath, "issue-first-newer")).resolves.toMatchObject({
+      state: "completed",
+      taskId: expect.stringMatching(/^github-delivery-/),
+    });
+    await expect(getGitHubWebhookDelivery(repoPath, "issue-late-older")).resolves.toMatchObject({
+      state: "completed",
+      reason: "coalesced",
+    });
+    await expect(listTasks(repoPath)).resolves.toHaveLength(1);
+  });
+
   it("parses complete environment configuration and fails closed when partial", () => {
     expect(
       githubWebhookConfigurationFromEnv({

@@ -16,6 +16,12 @@ import {
 } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
+import {
+  claimWorkWake,
+  finishWorkWake,
+  recordWorkWake,
+  releaseWorkWake,
+} from "../coordination/claims.js";
 import { generateDraftSpec } from "../spec-artifacts/draft.js";
 import {
   createTask,
@@ -2393,6 +2399,13 @@ export class GitHubWebhookIntake {
       request,
     };
     const created = await createDeliveryRecord(this.#stateRepoPath, queued);
+    if (!created.duplicate) {
+      recordWorkWake(this.#stateRepoPath, {
+        domain: workWakeDomain(request),
+        cursor: request.eventAt,
+        deliveryId,
+      });
+    }
     return acceptance(created.record, created.duplicate);
   }
 
@@ -2587,7 +2600,27 @@ export class GitHubWebhookIntake {
           updatedAt: this.#configuration.now().toISOString(),
         };
         await updateDeliveryRecord(this.#stateRepoPath, processing);
+        let wakeClaimed = false;
+        const wakeDomain = workWakeDomain(current.request);
         try {
+          const wakeClaim = claimWorkWake(this.#stateRepoPath, {
+            domain: wakeDomain,
+            deliveryId: current.deliveryId,
+            owner: `delivery:${current.deliveryId}`,
+            now: this.#configuration.now().toISOString(),
+            leaseMs: 120_000,
+          });
+          if (wakeClaim === "skip") {
+            await updateDeliveryRecord(this.#stateRepoPath, {
+              ...processing,
+              state: "completed",
+              reason: "coalesced",
+              lease: undefined,
+              updatedAt: this.#configuration.now().toISOString(),
+            });
+            return;
+          }
+          wakeClaimed = true;
           const target = await this.#resolveRepository(
             current.request.repository.nitelyRepositoryId,
           );
@@ -2624,7 +2657,25 @@ export class GitHubWebhookIntake {
             lease: undefined,
             updatedAt: this.#configuration.now().toISOString(),
           });
+          wakeClaimed = false;
+          try {
+            finishWorkWake(this.#stateRepoPath, {
+              domain: wakeDomain,
+              deliveryId: current.deliveryId,
+              now: this.#configuration.now().toISOString(),
+            });
+          } catch {
+            // The delivery already names its task. A later wake can proceed
+            // once this lease expires.
+          }
         } catch {
+          if (wakeClaimed) {
+            releaseWorkWake(this.#stateRepoPath, {
+              domain: wakeDomain,
+              deliveryId: current.deliveryId,
+              now: this.#configuration.now().toISOString(),
+            });
+          }
           const failed: GitHubWebhookDeliveryRecord = {
             ...processing,
             state: "failed",
@@ -2678,6 +2729,13 @@ export class GitHubWebhookIntake {
       await releaseDeliveryLease(this.#stateRepoPath, lease).catch(() => {});
     }
   }
+}
+
+function workWakeDomain(request: GitHubWebhookRequest): string {
+  if (request.kind === "ExecutionRequest") {
+    return `github-issue:${request.repository.fullName}#${request.source.number}`;
+  }
+  return `github-pr:${request.repository.fullName}#${request.pullRequest.number}`;
 }
 
 function mergeStatusPublication(
