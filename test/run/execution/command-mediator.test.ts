@@ -229,12 +229,82 @@ describe.skipIf(!linuxX64)("command mediator", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it("kills x32 syscall numbers in the seccomp program", async () => {
+    const arch = 0xc000003e;
+    const x32 = 0x40000000;
+    expect(await seccompDecision(arch, 59)).toBe("TRACE");
+    expect(await seccompDecision(arch, 322)).toBe("TRACE");
+    expect(await seccompDecision(arch, 59 | x32)).toBe("KILL");
+    expect(await seccompDecision(arch, 322 | x32)).toBe("KILL");
+    expect(await seccompDecision(arch, x32)).toBe("KILL");
+    expect(await seccompDecision(arch, 0)).toBe("ALLOW");
+    expect(await seccompDecision(0x40000003, 59)).toBe("KILL");
+  });
+
+  it("stops sibling threads before an exec is allowed", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "nitely-mediator-threads-"));
+    try {
+      const good = join(directory, "goodbin");
+      const bad = join(directory, "badbin");
+      const goodMarker = join(directory, "good-ran");
+      const badMarker = join(directory, "bad-ran");
+      await compileMarker(good, goodMarker);
+      await compileMarker(bad, badMarker);
+      const racer = join(directory, "racer");
+      await compile(racer, threadRacerSource());
+      await writePolicy(directory, ["goodbin"], ["badbin"]);
+      let sawGood = false;
+      for (let attempt = 0; attempt < 4 && !sawGood; attempt += 1) {
+        const result = await runMediator(directory, [racer, good, bad], {}, 20_000);
+        expect(result.code).toBe(0);
+        expect(result.stderr).toBe("");
+        sawGood = await readFile(goodMarker, "utf8").then(() => true, () => false);
+      }
+      expect(sawGood).toBe(true);
+      await expect(readFile(badMarker, "utf8")).rejects.toThrow();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("executes the inode it checked when a symlink is replaced concurrently", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "nitely-mediator-symlink-"));
+    const link = join(directory, "tool");
+    try {
+      const good = join(directory, "goodbin");
+      const bad = join(directory, "badbin");
+      const goodMarker = join(directory, "good-ran");
+      const badMarker = join(directory, "bad-ran");
+      await compileMarker(good, goodMarker);
+      await compileMarker(bad, badMarker);
+      await symlink(good, link);
+      const loop = join(directory, "loopbin");
+      await compile(loop, symlinkLoopSource());
+      await writePolicy(directory, ["goodbin"], ["badbin"]);
+      const swapper = spawn("python3", ["-c", swapperSource(), link, good, bad], {
+        stdio: "ignore",
+      });
+      try {
+        const result = await runMediator(directory, [loop, link], {}, 30_000);
+        expect(result.code).toBe(0);
+        expect(result.stderr).toBe("");
+        await expect(readFile(goodMarker, "utf8")).resolves.toContain("1");
+        await expect(readFile(badMarker, "utf8")).rejects.toThrow();
+      } finally {
+        swapper.kill("SIGKILL");
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 function runMediator(
   directory: string,
   argv: string[],
   env: Record<string, string>,
+  timeoutMs = 15_000,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const child = spawn(
     "python3",
@@ -257,7 +327,7 @@ function runMediator(
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
       reject(new Error("mediator timed out"));
-    }, 15_000);
+    }, timeoutMs);
     child.once("error", (error) => {
       clearTimeout(timer);
       reject(error);
@@ -297,4 +367,144 @@ async function waitForSleep(parent: number): Promise<number> {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error("sleep workload did not start");
+}
+
+function seccompDecision(arch: number, number: number): Promise<string> {
+  const child = spawn("python3", [
+    mediator,
+    "--seccomp-decision",
+    `0x${arch.toString(16)}`,
+    `0x${number.toString(16)}`,
+  ]);
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+  child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      if (code !== 0) {
+        reject(new Error(Buffer.concat(stderr).toString() || `seccomp decision exited ${code}`));
+        return;
+      }
+      resolve(Buffer.concat(stdout).toString().trim());
+    });
+  });
+}
+
+async function writePolicy(
+  directory: string,
+  allow: string[],
+  deny: string[],
+): Promise<void> {
+  await writeFile(join(directory, "policy.json"), JSON.stringify({
+    mode: "allow-list",
+    allow,
+    deny,
+    advisory: false,
+    policyId: "commands/v1:mediator-race",
+  }));
+}
+
+function compile(output: string, source: string): Promise<void> {
+  const child = spawn("gcc", ["-O2", "-pthread", "-x", "c", "-o", output, "-"], {
+    stdio: ["pipe", "ignore", "pipe"],
+  });
+  const stderr: Buffer[] = [];
+  child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+  const exited = new Promise<number>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code) => resolve(code ?? 1));
+  });
+  child.stdin.end(source);
+  return exited.then((code) => {
+    if (code !== 0) {
+      throw new Error(Buffer.concat(stderr).toString() || `gcc exited ${code}`);
+    }
+  });
+}
+
+function compileMarker(output: string, marker: string): Promise<void> {
+  return compile(output, `#include <fcntl.h>
+#include <unistd.h>
+int main(void) {
+  int fd = open(${JSON.stringify(marker)}, O_CREAT | O_WRONLY | O_APPEND, 0644);
+  if (fd < 0) return 1;
+  if (write(fd, "1", 1) != 1) return 1;
+  close(fd);
+  return 0;
+}
+`);
+}
+
+function threadRacerSource(): string {
+  return `#define _GNU_SOURCE
+#include <errno.h>
+#include <pthread.h>
+#include <string.h>
+#include <unistd.h>
+static char pathbuf[4096];
+static char *bad_path;
+static void *mutate(void *unused) {
+  (void)unused;
+  size_t n = strlen(bad_path);
+  for (;;) {
+    memcpy(pathbuf, bad_path, n + 1);
+    usleep(1000);
+  }
+  return NULL;
+}
+int main(int argc, char **argv) {
+  if (argc != 3) return 2;
+  bad_path = argv[2];
+  pthread_t thread;
+  if (pthread_create(&thread, NULL, mutate, NULL) != 0) return 2;
+  for (int i = 0; i < 80; i++) {
+    size_t n = strlen(argv[1]);
+    memcpy(pathbuf, argv[1], n + 1);
+    char *args[] = {pathbuf, NULL};
+    execve(pathbuf, args, environ);
+    if (errno != EPERM) return 3;
+  }
+  return 0;
+}
+`;
+}
+
+function symlinkLoopSource(): string {
+  return `#define _GNU_SOURCE
+#include <errno.h>
+#include <sys/wait.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+  if (argc != 2) return 2;
+  for (int i = 0; i < 40; i++) {
+    pid_t child = fork();
+    if (child < 0) return 2;
+    if (child == 0) {
+      char *args[] = {argv[1], NULL};
+      execve(argv[1], args, environ);
+      _exit(errno == EPERM ? 0 : 4);
+    }
+    int status = 0;
+    if (waitpid(child, &status, 0) < 0) return 2;
+  }
+  return 0;
+}
+`;
+}
+
+function swapperSource(): string {
+  return `import os, sys
+link, good, bad = sys.argv[1:]
+while True:
+    for target in (good, bad):
+        nxt = link + ".next"
+        try:
+            os.unlink(nxt)
+        except FileNotFoundError:
+            pass
+        os.symlink(target, nxt)
+        os.replace(nxt, link)
+`;
 }

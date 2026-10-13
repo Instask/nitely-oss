@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Supervise agent execve/execveat calls inside an OCI workload.
 
-The mediator is the container's first process. It forks, traces the child with
-ptrace, and installs a seccomp filter that stops only execve and execveat.
-Allow continues the syscall after every sibling thread is stopped, so another
-thread cannot rewrite the pathname while it is being read. Deny sets the
-syscall number to -1, which skips it and returns EPERM. That path does not use
-SECCOMP_USER_NOTIF continue, which the kernel documents as unsafe for policy.
+The mediator is the container's first process. It forks, seizes the child with
+PTRACE_SEIZE, and the child installs a seccomp filter that stops native
+execve and execveat. x32 syscall numbers are killed. Allow does not resume
+the original path: every other thread is stopped first, the executable inode
+is pinned with an O_NOFOLLOW walk, and the syscall is pointed at that inode.
+If a thread cannot be stopped, or the inode cannot be pinned, the exec is
+denied. Deny sets the syscall number to -1, which skips it and returns
+EPERM. That path does not use SECCOMP_USER_NOTIF continue, which the kernel
+documents as unsafe for policy.
 
-The first exec is the runtime argv Nitely built and is exempt. Every later
-exec is decided from the execve filename and its canonical path, never from
-argv[0]. If ptrace or seccomp cannot be installed, the child is killed and
-this process exits without executing the workload.
+The first exec is the runtime argv Nitely built and is exempt from the
+policy, but it is pinned the same way. Every later exec is decided from the
+execve filename and the pinned inode, never from argv[0]. If ptrace or
+seccomp cannot be installed, the child is killed and this process exits
+without executing the workload.
 
 x86_64 only. A PATH shim is not used: absolute paths, shells, symlinks, and
 interpreters bypass it.
@@ -25,6 +29,7 @@ import fcntl
 import json
 import os
 import signal
+import stat
 import sys
 import time
 from typing import Iterable
@@ -36,14 +41,15 @@ MAX_ARGC = 64
 MAX_PATH = 4096
 MAX_SYMLINKS = 40
 
-PTRACE_TRACEME = 0
 PTRACE_CONT = 7
+PTRACE_SYSCALL = 24
 PTRACE_GETREGS = 12
 PTRACE_SETREGS = 13
 PTRACE_SETOPTIONS = 0x4200
 PTRACE_GETEVENTMSG = 0x4201
 PTRACE_GETREGSET = 0x4204
 PTRACE_SETREGSET = 0x4205
+PTRACE_SEIZE = 0x4206
 PTRACE_INTERRUPT = 0x4207
 NT_PRSTATUS = 1
 
@@ -75,6 +81,7 @@ TRACE_OPTIONS = (
 WAIT_WALL = 0x40000000
 NR_EXECVE = 59
 NR_EXECVEAT = 322
+X32_SYSCALL_BIT = 0x40000000
 PR_SET_PDEATHSIG = 1
 PR_SET_NO_NEW_PRIVS = 38
 PR_SET_SECCOMP = 22
@@ -85,8 +92,10 @@ SECCOMP_RET_TRACE = 0x7FF00000
 SECCOMP_RET_ALLOW = 0x7FFF0000
 BPF_LD_W_ABS = 0x20
 BPF_JMP_JEQ_K = 0x15
+BPF_JMP_JSET_K = 0x45
 BPF_RET_K = 0x06
 SYS_PROCESS_VM_READV = 310
+SYS_PROCESS_VM_WRITEV = 311
 
 REG_R10 = 7
 REG_R8 = 8
@@ -95,6 +104,7 @@ REG_RDX = 12
 REG_RSI = 13
 REG_RDI = 14
 REG_ORIG_RAX = 15
+REG_RSP = 19
 
 
 class SockFilter(ctypes.Structure):
@@ -495,83 +505,138 @@ def thread_ids(tgid: int) -> list[int]:
         return [tgid]
 
 
-def thread_stopped(tid: int) -> bool:
+def _close_quiet(fd: int) -> None:
     try:
-        with open(f"/proc/{tid}/status", encoding="utf-8") as handle:
-            for line in handle:
-                if line.startswith("State:"):
-                    return line.split()[1] in {"t", "T"}
+        os.close(fd)
     except OSError:
-        return False
-    return False
+        pass
 
 
-def canonical_in_pid(pid: int, absolute: str) -> str | None:
-    if not absolute.startswith("/") or "\x00" in absolute:
-        return None
-    root = f"/proc/{pid}/root"
-    segments = absolute.split("/")
-    output: list[str] = []
-    index = 0
-    hops = 0
-    while index < len(segments):
-        segment = segments[index]
-        index += 1
-        if segment in ("", "."):
-            continue
-        if segment == "..":
-            if output:
-                output.pop()
-            continue
-        host = root + "/" + "/".join([*output, segment])
-        try:
-            link = os.readlink(host)
-        except OSError as error:
-            if error.errno == errno.EINVAL:
-                output.append(segment)
-                continue
-            return None
-        hops += 1
-        if hops > MAX_SYMLINKS:
-            return None
-        if os.path.isabs(link):
-            output = []
-        segments = link.split("/") + segments[index:]
-        index = 0
-    final = root + ("/" + "/".join(output) if output else "")
-    if not os.path.exists(final):
-        return None
-    return "/" + "/".join(output) if output else "/"
+def _split_components(text: str) -> list[str]:
+    return [part for part in text.split("/") if part not in ("", ".")]
 
 
-def resolve_filename(pid: int, filename: str, dirfd: int | None) -> str | None:
+def pin_inode(pid: int, filename: str, dirfd: int | None) -> tuple[int, str] | None:
+    """Open the final regular file with O_NOFOLLOW and return that fd.
+
+    Symlink components are read once and the walk continues from that text.
+    The fd keeps the inode that was opened, so a later replacement of a
+    directory entry cannot change which file is executed.
+    """
     if filename == "" or "\x00" in filename:
         return None
-    if filename.startswith("/"):
-        absolute = filename
-    else:
-        if dirfd is not None and dirfd != AT_FDCWD:
-            try:
-                base = os.readlink(f"/proc/{pid}/fd/{dirfd}")
-            except OSError:
-                return None
-            if base.endswith(" (deleted)") or not base.startswith("/"):
-                return None
-        else:
-            try:
-                base = os.readlink(f"/proc/{pid}/cwd")
-            except OSError:
-                return None
-        absolute = os.path.normpath(os.path.join(base, filename))
-    if not absolute.startswith("/"):
-        return None
-    return canonical_in_pid(pid, absolute)
+    opened: list[int] = []
 
+    def take(fd: int) -> int:
+        opened.append(fd)
+        return fd
 
-def shebang_interpreter(pid: int, canonical: str) -> str | None:
     try:
-        with open(f"/proc/{pid}/root{canonical}", "rb") as handle:
-            header = handle.read(128)
+        root = take(os.open(
+            f"/proc/{pid}/root",
+            os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC,
+        ))
+        if filename.startswith("/"):
+            directory = root
+            canonical: list[str] = []
+            parts = _split_components(filename)
+        else:
+            if dirfd is not None and dirfd != AT_FDCWD:
+                base_link = os.readlink(f"/proc/{pid}/fd/{dirfd}")
+                directory = take(os.open(
+                    f"/proc/{pid}/fd/{dirfd}",
+                    os.O_PATH | os.O_CLOEXEC,
+                ))
+            else:
+                base_link = os.readlink(f"/proc/{pid}/cwd")
+                directory = take(os.open(
+                    f"/proc/{pid}/cwd",
+                    os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC,
+                ))
+            if base_link.endswith(" (deleted)") or not base_link.startswith("/"):
+                return None
+            canonical = _split_components(base_link)
+            parts = _split_components(filename)
+        hops = 0
+        index = 0
+        while index < len(parts):
+            segment = parts[index]
+            index += 1
+            if segment == "..":
+                if canonical:
+                    canonical.pop()
+                parent = take(os.open(
+                    "..",
+                    os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=directory,
+                ))
+                if directory != root:
+                    opened.remove(directory)
+                    _close_quiet(directory)
+                directory = parent
+                continue
+            last = index >= len(parts)
+            flags = (
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+                if last
+                else os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+            )
+            try:
+                nxt = take(os.open(segment, flags, dir_fd=directory))
+            except OSError as error:
+                # O_DIRECTORY|O_NOFOLLOW reports a symlink as ENOTDIR. A final
+                # symlink is ELOOP. Either way the walk continues from the
+                # link text rather than from a later lookup.
+                if error.errno not in (errno.ELOOP, errno.ENOTDIR):
+                    return None
+                try:
+                    link = os.readlink(segment, dir_fd=directory)
+                except OSError:
+                    return None
+                hops += 1
+                if hops > MAX_SYMLINKS:
+                    return None
+                extra = _split_components(link)
+                if link.startswith("/"):
+                    parts = extra + parts[index:]
+                    index = 0
+                    if directory != root:
+                        opened.remove(directory)
+                        _close_quiet(directory)
+                    directory = root
+                    canonical = []
+                else:
+                    parts = extra + parts[index:]
+                    index = 0
+                continue
+            info = os.fstat(nxt)
+            if last:
+                if not stat.S_ISREG(info.st_mode):
+                    return None
+                canonical.append(segment)
+                opened.remove(nxt)
+                if directory != root:
+                    opened.remove(directory)
+                    _close_quiet(directory)
+                return nxt, "/" + "/".join(canonical)
+            if not stat.S_ISDIR(info.st_mode):
+                return None
+            canonical.append(segment)
+            if directory != root:
+                opened.remove(directory)
+                _close_quiet(directory)
+            directory = nxt
+        return None
+    except OSError:
+        return None
+    finally:
+        for fd in opened:
+            _close_quiet(fd)
+
+
+def shebang_interpreter_fd(fd: int) -> str | None:
+    try:
+        header = os.pread(fd, 128, 0)
     except OSError:
         return None
     if not header.startswith(b"#!"):
@@ -582,19 +647,98 @@ def shebang_interpreter(pid: int, canonical: str) -> str | None:
     return line.split()[0]
 
 
-def install_seccomp_filter() -> None:
-    # Kill a non-x86_64 syscall ABI. Trace execve/execveat. Allow the rest.
-    filters = (SockFilter * 8)(
-        SockFilter(BPF_LD_W_ABS, 0, 0, 4),
-        SockFilter(BPF_JMP_JEQ_K, 1, 0, AUDIT_ARCH_X86_64),
-        SockFilter(BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS),
-        SockFilter(BPF_LD_W_ABS, 0, 0, 0),
-        SockFilter(BPF_JMP_JEQ_K, 2, 0, NR_EXECVE),
-        SockFilter(BPF_JMP_JEQ_K, 1, 0, NR_EXECVEAT),
-        SockFilter(BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW),
-        SockFilter(BPF_RET_K, 0, 0, SECCOMP_RET_TRACE),
+def vm_write(pid: int, address: int, data: bytes) -> None:
+    if address <= 0 or not data:
+        raise OSError(errno.EFAULT, "empty remote write")
+    buffer = ctypes.create_string_buffer(data)
+    local = IOVec(ctypes.cast(buffer, ctypes.c_void_p), len(data))
+    remote = IOVec(ctypes.c_void_p(address), len(data))
+    written = LIBC.syscall(
+        SYS_PROCESS_VM_WRITEV,
+        pid,
+        ctypes.byref(local),
+        1,
+        ctypes.byref(remote),
+        1,
+        0,
     )
-    program = SockFprog(8, filters)
+    if written != len(data):
+        error = ctypes.get_errno()
+        raise OSError(error or errno.EIO, os.strerror(error) if error else "short write")
+
+
+def redirect_exec(
+    pid: int,
+    regs: ctypes.Array[ctypes.c_ulonglong],
+    path: str,
+) -> None:
+    encoded = path.encode("utf-8") + b"\x00"
+    if len(encoded) > 240:
+        raise OSError(errno.ENAMETOOLONG, "pinned path")
+    address = int(regs[REG_RSP]) - 256
+    if address <= 0:
+        raise OSError(errno.EFAULT, "stack")
+    vm_write(pid, address, encoded)
+    number = int(regs[REG_ORIG_RAX])
+    if number == NR_EXECVE:
+        regs[REG_RDI] = address
+    elif number == NR_EXECVEAT:
+        regs[REG_RSI] = address
+        regs[REG_R8] = int(regs[REG_R8]) & ~AT_EMPTY_PATH
+    else:
+        raise OSError(errno.EINVAL, "syscall")
+    set_registers(pid, regs)
+
+
+def exec_seccomp_program() -> list[tuple[int, int, int, int]]:
+    # Kill other ABIs and every x32 syscall. Trace native execve/execveat.
+    return [
+        (BPF_LD_W_ABS, 0, 0, 4),
+        (BPF_JMP_JEQ_K, 1, 0, AUDIT_ARCH_X86_64),
+        (BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS),
+        (BPF_LD_W_ABS, 0, 0, 0),
+        (BPF_JMP_JSET_K, 0, 1, X32_SYSCALL_BIT),
+        (BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS),
+        (BPF_JMP_JEQ_K, 2, 0, NR_EXECVE),
+        (BPF_JMP_JEQ_K, 1, 0, NR_EXECVEAT),
+        (BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW),
+        (BPF_RET_K, 0, 0, SECCOMP_RET_TRACE),
+    ]
+
+
+def execute_seccomp_program(arch: int, number: int) -> int:
+    packet = bytearray(64)
+    packet[0:4] = (number & 0xFFFFFFFF).to_bytes(4, "little")
+    packet[4:8] = (arch & 0xFFFFFFFF).to_bytes(4, "little")
+    program = exec_seccomp_program()
+    accumulator = 0
+    pc = 0
+    for _step in range(64):
+        if pc < 0 or pc >= len(program):
+            return SECCOMP_RET_KILL_PROCESS
+        code, jt, jf, constant = program[pc]
+        if code == BPF_LD_W_ABS:
+            accumulator = int.from_bytes(packet[constant:constant + 4], "little")
+            pc += 1
+            continue
+        if code == BPF_JMP_JEQ_K:
+            pc += 1 + (jt if accumulator == constant else jf)
+            continue
+        if code == BPF_JMP_JSET_K:
+            pc += 1 + (jt if (accumulator & constant) != 0 else jf)
+            continue
+        if code == BPF_RET_K:
+            return constant
+        return SECCOMP_RET_KILL_PROCESS
+    return SECCOMP_RET_KILL_PROCESS
+
+
+def install_seccomp_filter() -> None:
+    program = exec_seccomp_program()
+    filters = (SockFilter * len(program))(*(
+        SockFilter(code, jt, jf, constant) for code, jt, jf, constant in program
+    ))
+    sock = SockFprog(len(program), filters)
     if LIBC.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
         raise OSError(ctypes.get_errno(), "no_new_privs")
     LIBC.prctl.argtypes = [
@@ -604,20 +748,20 @@ def install_seccomp_filter() -> None:
         ctypes.c_ulong,
         ctypes.c_ulong,
     ]
-    if LIBC.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.byref(program), 0, 0) != 0:
+    if LIBC.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.byref(sock), 0, 0) != 0:
         raise OSError(ctypes.get_errno(), "seccomp")
 
 
-def child_main(parent: int, argv: list[str]) -> None:
+def child_main(parent: int, ready_fd: int, argv: list[str]) -> None:
     if LIBC.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
         os._exit(127)
     if os.getppid() != parent:
         os._exit(127)
     try:
-        ptrace(PTRACE_TRACEME, 0)
+        os.read(ready_fd, 1)
     except OSError:
         os._exit(127)
-    os.kill(os.getpid(), signal.SIGSTOP)
+    os.close(ready_fd)
     try:
         install_seccomp_filter()
     except OSError:
@@ -660,6 +804,9 @@ class Supervisor:
         self.root_status: int | None = None
         self.queue: list[tuple[int, int]] = []
         self.live: set[int] = {root}
+        self.binary_pins: dict[int, int] = {}
+        self.script_pins: dict[int, list[int]] = {}
+        self.syscall_resume: int | None = None
 
     def wait_next(self, hang: bool) -> tuple[int, int] | None:
         if self.queue:
@@ -674,6 +821,7 @@ class Supervisor:
         return pid, status
 
     def note_exit(self, pid: int, status: int) -> None:
+        self._release_pins(pid)
         self.live.discard(pid)
         self.fresh.discard(pid)
         if pid == self.root or tgid_of(pid) == self.root and pid == self.root:
@@ -681,68 +829,110 @@ class Supervisor:
         if tgid_of(pid) == pid and pid == self.root:
             self.root_status = status
 
+    def _release_binary_pin(self, pid: int) -> None:
+        fd = self.binary_pins.pop(pid, None)
+        if fd is not None:
+            _close_quiet(fd)
+
+    def _release_pins(self, pid: int) -> None:
+        self._release_binary_pin(pid)
+        for fd in self.script_pins.pop(pid, []):
+            _close_quiet(fd)
+
     def freeze(self, origin: int) -> bool:
         tgid = tgid_of(origin)
-        pending: set[int] = set()
-        for tid in thread_ids(tgid):
-            if tid == origin or thread_stopped(tid):
-                continue
-            try:
-                ptrace(PTRACE_INTERRUPT, tid)
-            except OSError:
-                continue
-            pending.add(tid)
+        stopped = {origin, *(pid for pid, _status in self.queue)}
+        requested: set[int] = set()
         deadline = time.monotonic() + 0.5
-        while pending and time.monotonic() < deadline:
-            item = self.wait_next(False)
-            if item is None:
-                time.sleep(0.005)
-                continue
-            pid, status = item
-            if not os.WIFSTOPPED(status):
-                self.note_exit(pid, status)
+        while time.monotonic() < deadline:
+            pending: set[int] = set()
+            for tid in thread_ids(tgid):
+                if tid in stopped:
+                    continue
+                if tid not in requested:
+                    try:
+                        ptrace(PTRACE_INTERRUPT, tid)
+                    except OSError as error:
+                        if error.errno == errno.ESRCH:
+                            stopped.add(tid)
+                            continue
+                        return False
+                    requested.add(tid)
+                pending.add(tid)
+            if not pending:
+                return True
+            while pending and time.monotonic() < deadline:
+                item = self.wait_next(False)
+                if item is None:
+                    time.sleep(0.005)
+                    break
+                pid, status = item
+                if pid == origin:
+                    continue
+                if not os.WIFSTOPPED(status):
+                    self.note_exit(pid, status)
+                    pending.discard(pid)
+                    stopped.add(pid)
+                    continue
                 pending.discard(pid)
-                continue
-            event = event_of(status)
-            if pid in pending and event in (0, PTRACE_EVENT_STOP):
-                pending.discard(pid)
-                continue
-            self.queue.append((pid, status))
-        return not pending
+                stopped.add(pid)
+                if event_of(status) != PTRACE_EVENT_STOP:
+                    self.queue.append((pid, status))
+        return False
 
     def resume_group(self, origin: int) -> None:
-        tgid = tgid_of(origin)
-        for tid in thread_ids(tgid):
+        queued = {pid for pid, _status in self.queue}
+        syscall_origin = self.syscall_resume == origin
+        self.syscall_resume = None
+        for tid in thread_ids(tgid_of(origin)):
+            if tid in queued and tid != origin:
+                continue
+            if tid == origin and syscall_origin:
+                try:
+                    ptrace(PTRACE_SYSCALL, tid)
+                except OSError as error:
+                    if error.errno not in (errno.ESRCH, errno.EIO):
+                        raise
+                continue
             cont(tid, 0)
 
-    def decide_stop(self, pid: int) -> None:
-        if not self.freeze(pid):
-            self.evidence.decision(
-                {
-                    "argc": 0,
-                    "decision": "deny",
-                    "event": "decision",
-                    "program": "unresolved",
-                    "reason": "trace group could not be stopped",
-                }
-            )
-            try:
-                skip_syscall(pid)
-            except OSError:
-                os.kill(pid, signal.SIGKILL)
-            self.resume_group(pid)
-            return
-        try:
-            regs = get_registers(pid)
-            decision = self.decide_registers(pid, regs)
-        except OSError:
-            decision = {
+    def _deny(self, pid: int, reason: str) -> None:
+        self.evidence.decision(
+            {
                 "argc": 0,
                 "decision": "deny",
                 "event": "decision",
                 "program": "unresolved",
-                "reason": "executable path could not be resolved",
+                "reason": reason,
             }
+        )
+        try:
+            skip_syscall(pid)
+        except OSError:
+            os.kill(pid, signal.SIGKILL)
+        self.resume_group(pid)
+
+    def decide_stop(self, pid: int) -> None:
+        if not self.freeze(pid):
+            self._deny(pid, "trace group could not be stopped")
+            return
+        try:
+            regs = get_registers(pid)
+            decision, pin = self.decide_registers(pid, regs)
+        except OSError:
+            self._deny(pid, "executable path could not be resolved")
+            return
+        if decision["decision"] == "deny" or pin is None:
+            if pin is not None:
+                _close_quiet(pin[0])
+            if decision["decision"] != "deny":
+                decision = {
+                    "argc": decision.get("argc", 0),
+                    "decision": "deny",
+                    "event": "decision",
+                    "program": "unresolved",
+                    "reason": "executable path could not be resolved",
+                }
             try:
                 skip_syscall(pid)
             except OSError:
@@ -750,11 +940,21 @@ class Supervisor:
             self.evidence.decision(decision)
             self.resume_group(pid)
             return
-        if decision["decision"] == "deny":
-            try:
-                skip_syscall(pid)
-            except OSError:
-                os.kill(pid, signal.SIGKILL)
+        fd, hold = pin
+        try:
+            redirect_exec(pid, regs, f"/proc/{os.getpid()}/fd/{fd}")
+        except OSError:
+            _close_quiet(fd)
+            self._deny(pid, "executable path could not be resolved")
+            return
+        if hold:
+            self.script_pins.setdefault(pid, []).append(fd)
+        else:
+            previous = self.binary_pins.get(pid)
+            if previous is not None and previous != fd:
+                _close_quiet(previous)
+            self.binary_pins[pid] = fd
+        self.syscall_resume = pid
         self.evidence.decision(decision)
         self.resume_group(pid)
 
@@ -762,7 +962,7 @@ class Supervisor:
         self,
         pid: int,
         regs: ctypes.Array[ctypes.c_ulonglong],
-    ) -> dict[str, object]:
+    ) -> tuple[dict[str, object], tuple[int, bool] | None]:
         number = int(regs[REG_ORIG_RAX])
         if number == NR_EXECVE:
             filename = read_c_string(pid, int(regs[REG_RDI])) or ""
@@ -780,39 +980,48 @@ class Supervisor:
             dirfd = None
             flags = 0
         argc = 0 if argv is None else len(argv)
-        if self.launch_pending and pid == self.root:
-            self.launch_pending = False
-            return {
-                "argc": argc,
-                "decision": "allow",
-                "event": "launch",
-                "program": program_basename(filename),
-                "reason": "launch exempt",
-            }
+        unresolved = {
+            "argc": argc,
+            "decision": "deny",
+            "event": "decision",
+            "program": "unresolved",
+            "reason": "executable path could not be resolved",
+        }
         if argv is None or (flags & AT_EMPTY_PATH and filename == "") or number not in (
             NR_EXECVE,
             NR_EXECVEAT,
         ):
-            return {
-                "argc": argc,
-                "decision": "deny",
-                "event": "decision",
-                "program": "unresolved",
-                "reason": "executable path could not be resolved",
-            }
-        canonical = resolve_filename(pid, filename, dirfd)
+            return unresolved, None
+        pinned = pin_inode(pid, filename, dirfd)
+        if pinned is None:
+            return unresolved, None
+        fd, canonical = pinned
+        shebang = shebang_interpreter_fd(fd)
+        if self.launch_pending and pid == self.root:
+            self.launch_pending = False
+            return (
+                {
+                    "argc": argc,
+                    "decision": "allow",
+                    "event": "launch",
+                    "program": program_basename(canonical or filename),
+                    "reason": "launch exempt",
+                },
+                (fd, shebang is not None),
+            )
         interpreter: str | None = None
-        if canonical:
-            shebang = shebang_interpreter(pid, canonical)
-            if shebang is not None:
-                if shebang == "":
+        if shebang is not None:
+            if shebang == "":
+                interpreter = ""
+            else:
+                resolved = pin_inode(pid, shebang, None)
+                if resolved is None:
                     interpreter = ""
                 else:
-                    resolved = resolve_filename(pid, shebang, None)
-                    if resolved is None or shebang_interpreter(pid, resolved) is not None:
-                        interpreter = ""
-                    else:
-                        interpreter = resolved
+                    interp_fd, interp_path = resolved
+                    nested = shebang_interpreter_fd(interp_fd)
+                    _close_quiet(interp_fd)
+                    interpreter = "" if nested is not None else interp_path
         args = argv[1:] if argv else []
         decided = decide_mediated_exec(
             self.policy,
@@ -830,9 +1039,14 @@ class Supervisor:
         }
         if "rule" in decided:
             record["rule"] = decided["rule"]
-        return record
+        if decided["decision"] != "allow":
+            _close_quiet(fd)
+            return record, None
+        return record, (fd, shebang is not None)
 
     def handle(self, pid: int, status: int) -> None:
+        if os.WIFSTOPPED(status):
+            self._release_binary_pin(pid)
         if os.WIFEXITED(status) or os.WIFSIGNALED(status):
             self.note_exit(pid, status)
             if pid == self.root:
@@ -929,29 +1143,46 @@ def supervise(policy: dict[str, object], evidence_path: str, argv: list[str]) ->
             "policyId": policy["policyId"],
         }
     )
+    ready_read, ready_write = os.pipe()
+    os.set_inheritable(ready_read, True)
+    os.set_inheritable(ready_write, False)
     parent = os.getpid()
     root = os.fork()
     if root == 0:
-        child_main(parent, argv)
+        os.close(ready_write)
+        child_main(parent, ready_read, argv)
         os._exit(127)
+    os.close(ready_read)
     signal.signal(signal.SIGTERM, lambda _signum, _frame: os._exit(128 + signal.SIGTERM))
-    try:
-        pid, status = os.waitpid(root, WAIT_WALL)
-    except ChildProcessError:
-        evidence.close("ptrace wait failed")
+
+    def abandon(reason: str) -> int:
+        _close_quiet(ready_write)
+        try:
+            os.kill(root, signal.SIGKILL)
+        except OSError:
+            pass
+        evidence.close(reason)
         return 127
-    if os.WIFEXITED(status) or os.WIFSIGNALED(status):
-        evidence.close("ptrace unavailable")
-        if os.WIFEXITED(status):
-            return os.WEXITSTATUS(status)
-        return 127
+
     try:
-        set_options(pid)
+        ptrace(PTRACE_SEIZE, root, 0, TRACE_OPTIONS)
+        ptrace(PTRACE_INTERRUPT, root)
+        while True:
+            try:
+                _pid, status = os.waitpid(root, WAIT_WALL)
+                break
+            except InterruptedError:
+                continue
+    except (OSError, ChildProcessError):
+        return abandon("ptrace unavailable")
+    if not os.WIFSTOPPED(status) or event_of(status) != PTRACE_EVENT_STOP:
+        return abandon("ptrace unavailable")
+    try:
+        os.write(ready_write, b"\n")
+        os.close(ready_write)
     except OSError:
-        os.kill(pid, signal.SIGKILL)
-        evidence.close("ptrace options unavailable")
-        return 127
-    cont(pid, 0)
+        return abandon("ptrace unavailable")
+    cont(root, 0)
     code = Supervisor(root, policy, evidence).run()
     evidence.close()
     return code
@@ -960,6 +1191,22 @@ def supervise(policy: dict[str, object], evidence_path: str, argv: list[str]) ->
 def main(argv: list[str]) -> int:
     if argv and argv[0] == "--decide-only":
         return decide_only()
+    if argv and argv[0] == "--seccomp-decision":
+        if len(argv) != 3:
+            sys.stderr.write("command mediator: arch and syscall number are required\n")
+            return 127
+        try:
+            action = execute_seccomp_program(int(argv[1], 0), int(argv[2], 0))
+        except ValueError:
+            sys.stderr.write("command mediator: arch and syscall number are required\n")
+            return 127
+        names = {
+            SECCOMP_RET_KILL_PROCESS: "KILL",
+            SECCOMP_RET_TRACE: "TRACE",
+            SECCOMP_RET_ALLOW: "ALLOW",
+        }
+        sys.stdout.write(names.get(action, "KILL") + "\n")
+        return 0
     policy_path = ""
     evidence_path = ""
     index = 0

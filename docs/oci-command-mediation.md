@@ -33,7 +33,12 @@ be rejected up front:
 - A script's shebang names an interpreter. The kernel runs that interpreter
   inside the script's `execve`, so checking only the script path is not
   enough.
-- A subprocess or another thread performs the exec.
+- A subprocess or another thread performs the exec, including a thread that
+  rewrites the pathname after the check has read it.
+- The work directory replaces a symlink after the check has resolved it and
+  before the kernel walks that path again.
+- The syscall uses the x32 ABI. x32 and x86_64 share `AUDIT_ARCH_X86_64`, and
+  an x32 number sets `__X32_SYSCALL_BIT`.
 
 A `PATH` wrapper does not survive these. An absolute path never consults
 `PATH`. A shell, an interpreter, a symlink, and a direct `execve` do not
@@ -52,17 +57,30 @@ safe. Allowing it by `CONTINUE` is not.
 
 On Linux x86_64 the OCI backend runs `oci-ptrace-seccomp`. The container
 command is a small Python supervisor, using the `python3` already in the
-runner image. It forks the workload and traces it. The child installs a
-seccomp filter that returns `SECCOMP_RET_TRACE` for `execve` (59) and
-`execveat` (322) and allows every other syscall. The parent is not under
-that filter.
+runner image. It forks the workload and attaches with `PTRACE_SEIZE`. The
+child waits until that attach has stopped it, then installs a seccomp filter.
+`PTRACE_INTERRUPT` is only valid for a seized tracee, so the supervisor does
+not use `PTRACE_TRACEME`.
 
-For each stop the parent interrupts the other threads in the thread group,
-then reads the filename and the argument vector. Allow resumes the syscall
-only after that read. Deny sets the syscall number to -1 and the return value
-to `EPERM`, which skips the syscall instead of continuing it. `PTRACE_O_EXITKILL`
-is set, and the child also requests `SIGKILL` if the parent dies, so a dead
-supervisor does not leave an unmediated process running.
+The filter returns `SECCOMP_RET_TRACE` for native `execve` (59) and
+`execveat` (322). A syscall number with `__X32_SYSCALL_BIT` set is killed,
+as is any architecture other than x86_64. Every other x86_64 syscall is
+allowed. The parent is not under that filter.
+
+For each exec stop the parent interrupts the other threads in the thread
+group and waits until they are stopped. If any interrupt fails, or a thread
+is still running when the deadline passes, the exec is denied. The parent
+then opens the executable with an `O_NOFOLLOW` walk and holds that inode.
+Allow does not resume the original pathname. It points the syscall at the
+held inode through the supervisor's `/proc` file descriptor, so replacing a
+symlink in the work directory cannot change the file the kernel runs. Deny
+sets the syscall number to -1 and the return value to `EPERM`, which skips
+the syscall instead of continuing it. `PTRACE_O_EXITKILL` is set, and the
+child also requests `SIGKILL` if the parent dies, so a dead supervisor does
+not leave an unmediated process running.
+
+The first exec is exempt from the command policy and is pinned the same way.
+If that inode cannot be pinned, the exec is denied.
 
 The decision follows the stage's existing `capabilities.commands` rules.
 There is no second policy language. It uses the filename the kernel was
