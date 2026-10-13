@@ -120,6 +120,7 @@ This file is the front door. The operator manual is split by job:
 - [Running flows](docs/running-flows.md) — validate, run, inputs, evidence, agent runtimes.
 - [Execution backends](docs/execution-backends.md) — local, mise, and OCI.
 - [Rework and recovery](docs/rework-and-recovery.md) — rework, resume, and retry.
+- [Work coordination](docs/work-coordination.md) — freshness gates and claims for overlapping runs.
 - [Web Console](docs/web-console.md).
 - [Remote operations](docs/remote-operations.md) — CLI against a running server.
 - [Local MCP server](docs/local-mcp.md).

@@ -38,6 +38,7 @@ import {
   queryRepoIndex,
   recordRepoIndexQuery,
 } from "../../src/repo-index/index.js";
+import { changeMutationDomains, runGuardedMutation } from "../../src/coordination/claims.js";
 import { createCodexExecArgs, resumeRun, runFlow, resolveMaxInputTokens, fitPromptToBudget } from "../../src/run/run-flow.js";
 import { LocalExecutionBackend } from "../../src/run/execution/local.js";
 import { DEFAULT_MAX_RUNTIME_TOKENS } from "../../src/run/budget-defaults.js";
@@ -13374,6 +13375,90 @@ describe("runFlow", () => {
     expect(evidence).toContain("Outcome: reused");
     expect(evidence).toContain("Metadata update: updated");
     expect(evidence).toContain("Metadata transport: github-rest-api");
+  });
+
+  it("holds a publish when the branch was already published from another run", async () => {
+    const repo = await createRepo();
+    await mkdir(join(repo, "specs"), { recursive: true });
+    await writeFile(join(repo, "specs", "change.md"), "Create feature.txt", "utf8");
+    const flowPath = join(repo, "flows", "stale-publish.json");
+    await writeJson(flowPath, {
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "stale-publish" },
+      spec: {
+        stages: [
+          {
+            id: "implement",
+            type: "agent",
+            runtime: "codex",
+            prompt: "Implement the change.",
+            inputs: ["spec"],
+            outputs: ["implementation"],
+          },
+          {
+            id: "publish",
+            type: "publish-change",
+            provider: "github",
+            inputs: ["implementation"],
+            outputs: ["change-request"],
+          },
+        ],
+      },
+    });
+    await runGuardedMutation({
+      repoPath: repo,
+      domains: changeMutationDomains({
+        action: "publish",
+        branch: "nitely/run-stale",
+        worktreePath: join(repo, "other-worktree"),
+      }),
+      observedHead: "none",
+      runId: "run-earlier",
+      idempotencyKey: "publish:run-earlier:publish:nitely/run-stale",
+      effect: async () => ({ url: "https://github.com/acme/widgets/pull/4" }),
+      resultOf: () => ({
+        url: "https://github.com/acme/widgets/pull/4",
+        head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      }),
+    });
+    let publishCalls = 0;
+    const scmProvider: ScmProvider = {
+      type: "github",
+      publishChange: async () => {
+        publishCalls += 1;
+        throw new Error("stale publish must not reach the provider");
+      },
+    };
+
+    await expect(runFlow(
+      {
+        flowPath,
+        repoPath: repo,
+        inputs: {
+          spec: { connector: "local-file", uri: "specs/change.md" },
+        },
+      },
+      {
+        createRunId: () => "run-stale",
+        executeAgent: async ({ attemptDirectory, worktreePath }) => {
+          await writeFile(join(worktreePath, "feature.txt"), "implemented\n", "utf8");
+          await writeFile(join(attemptDirectory, "implementation.md"), "implemented\n", "utf8");
+        },
+        scmProvider,
+      },
+    )).rejects.toThrow(/work coordination hold: stale-cursor/);
+
+    expect(publishCalls).toBe(0);
+    const evidence = await readFile(
+      join(repo, ".nitely", "runs", "run-stale", "evidence.md"),
+      "utf8",
+    );
+    expect(evidence).toContain("HOLD");
+    expect(evidence).toContain("stale-cursor");
+    const events = new EventStore(join(repo, ".nitely", "events.db"));
+    expect(events.list("run-stale").some((event) => event.type === "coordination.held")).toBe(true);
+    events.close();
   });
 
   it("uses an agent-produced title artifact when publishing a change request", async () => {

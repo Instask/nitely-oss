@@ -4,6 +4,13 @@ import {
   resolveRuntimeEffort,
   type ResolvedRuntimeEffort,
 } from "./execution/effort.js";
+import {
+  changeMutationDomains,
+  collectCoordinationEvidence,
+  runGuardedMutation,
+  type GuardedMutation,
+  type StoredEffectRecord,
+} from "../coordination/claims.js";
 import { applyResolvedFlowSelection, resolveRunFlowSource } from "../flows/catalog.js";
 import { execFile } from "node:child_process";
 import {
@@ -3722,6 +3729,107 @@ async function executeSyncChangeStage(input: {
   return metadata;
 }
 
+function coordinationStopMessage(decision: GuardedMutation<unknown>): string {
+  if (decision.decision === "conflict") {
+    return `work coordination conflict: ${decision.ownerRunId}`;
+  }
+  if (decision.decision === "hold" || decision.decision === "unknown" || decision.decision === "reevaluation-limit") {
+    return `work coordination ${decision.decision}: ${decision.reason}`;
+  }
+  return "work coordination rejected";
+}
+
+function appendCoordinationStop(input: {
+  eventStore: EventStore;
+  runId: string;
+  stageId: string;
+  attempt: number;
+  context: RuntimeContext;
+  decision: GuardedMutation<unknown>;
+}): void {
+  const type = input.decision.decision === "conflict"
+    ? "coordination.conflict"
+    : input.decision.decision === "unknown"
+      ? "coordination.unknown"
+      : "coordination.held";
+  input.eventStore.append({
+    runId: input.runId,
+    stageId: input.stageId,
+    attempt: input.attempt,
+    type,
+    payload: redactRuntimeUnknown({
+      decision: input.decision.decision,
+      ...("reason" in input.decision ? { reason: input.decision.reason } : {}),
+      ...("ownerRunId" in input.decision ? { ownerRunId: input.decision.ownerRunId } : {}),
+      ...("nextCursor" in input.decision ? { nextCursor: input.decision.nextCursor } : {}),
+      ...("delta" in input.decision ? { delta: input.decision.delta } : {}),
+    }, input.context),
+  });
+}
+
+async function guardedChangeResult<T>(input: {
+  repoPath: string;
+  domains: readonly string[];
+  observedHead: string;
+  runId: string;
+  stageId: string;
+  attempt: number;
+  attemptDirectory: string;
+  idempotencyKey: string;
+  eventStore: EventStore;
+  context: RuntimeContext;
+  effect: () => Promise<T>;
+  resultOf: (result: T) => StoredEffectRecord;
+  fromReplay: (record: StoredEffectRecord) => T;
+}): Promise<T> {
+  const guarded = await runGuardedMutation({
+    repoPath: input.repoPath,
+    domains: input.domains,
+    observedHead: input.observedHead,
+    runId: input.runId,
+    idempotencyKey: input.idempotencyKey,
+    attemptDirectory: input.attemptDirectory,
+    effect: input.effect,
+    resultOf: input.resultOf,
+  });
+  if (guarded.decision === "proceed") return guarded.result;
+  if (guarded.decision === "replay") {
+    if (!guarded.record.url) {
+      const unknown: GuardedMutation<unknown> = { decision: "unknown", reason: "effect-started" };
+      appendCoordinationStop({ ...input, decision: unknown });
+      throw new Error(coordinationStopMessage(unknown));
+    }
+    return input.fromReplay(guarded.record);
+  }
+  appendCoordinationStop({ ...input, decision: guarded });
+  throw new Error(coordinationStopMessage(guarded));
+}
+
+function changeDomainsForStage(input: {
+  action: "publish" | "update";
+  branch?: string;
+  worktreePath: string;
+  inputs: Map<string, InputArtifact>;
+  pull?: { owner: string; repository: string; number: number };
+}): string[] {
+  const sourceIssue = githubSourceIssueFromInputs(input.inputs);
+  return changeMutationDomains({
+    action: input.action,
+    ...(input.branch ? { branch: input.branch } : {}),
+    worktreePath: input.worktreePath,
+    ...(input.pull ? { pull: input.pull } : {}),
+    ...(sourceIssue
+      ? {
+          issue: {
+            owner: sourceIssue.owner,
+            repository: sourceIssue.repository,
+            number: sourceIssue.number,
+          },
+        }
+      : {}),
+  });
+}
+
 async function executePublishChangeStage(input: {
   runId: string;
   stage: Extract<Stage, { type: "publish-change" }>;
@@ -3793,11 +3901,34 @@ async function executePublishChangeStage(input: {
     title: redactRuntimeText(resolvedTitle.title, input.context) ?? resolvedTitle.title,
     body: await readFile(evidencePath, "utf8"),
   };
-  const published = input.dependencies.publishChange
-    ? await input.dependencies.publishChange(publishInput)
-    : input.dependencies.scmProvider
-      ? await publishWithProvider(input.dependencies.scmProvider, publishInput)
-      : await defaultPublishChange(publishInput, input.stage.provider, input.providerStore);
+  const publishedHead = (await currentBranchHeadSha(input.worktreePath)) ?? "none";
+  const published = await guardedChangeResult({
+    repoPath: input.repoPath,
+    domains: changeDomainsForStage({
+      action: "publish",
+      branch: input.branchName,
+      worktreePath: input.worktreePath,
+      inputs: input.inputArtifacts,
+    }),
+    observedHead: "none",
+    runId: input.runId,
+    stageId: input.stage.id,
+    attempt: input.attempt,
+    attemptDirectory: input.attemptDirectory,
+    idempotencyKey: `publish:${input.runId}:${input.stage.id}:${input.branchName}`,
+    eventStore: input.eventStore,
+    context: input.context,
+    effect: () => input.dependencies.publishChange
+      ? input.dependencies.publishChange(publishInput)
+      : input.dependencies.scmProvider
+        ? publishWithProvider(input.dependencies.scmProvider, publishInput)
+        : defaultPublishChange(publishInput, input.stage.provider, input.providerStore),
+    resultOf: (result) => ({ url: result.url, head: publishedHead }),
+    fromReplay: (record) => ({
+      url: record.url ?? "",
+      evidencePath,
+    }),
+  });
   const headCommit = await currentBranchHeadSha(input.worktreePath);
   input.eventStore.append({
     runId: input.runId,
@@ -3907,12 +4038,52 @@ async function executeUpdateChangeStage(input: {
     input.dependencies,
     input.providerStore,
   );
-  const updated = await updateChangeRequest({
-    provider,
+  const target = input.reworkTarget.resolved;
+  const updated = await guardedChangeResult({
     repoPath: input.repoPath,
-    worktreePath: input.worktreePath,
-    target: input.reworkTarget.resolved,
-    title: resolvedTitle.title,
+    domains: changeDomainsForStage({
+      action: "update",
+      branch: target.headBranch,
+      worktreePath: input.worktreePath,
+      inputs: input.inputArtifacts,
+      pull: {
+        owner: target.owner,
+        repository: target.repository,
+        number: target.number,
+      },
+    }),
+    observedHead: target.headSha,
+    runId: input.runId,
+    stageId: input.stage.id,
+    attempt: input.attempt,
+    attemptDirectory: input.attemptDirectory,
+    idempotencyKey: `update:${input.runId}:${input.stage.id}:${target.owner}/${target.repository}#${target.number}`,
+    eventStore: input.eventStore,
+    context: input.context,
+    effect: () => updateChangeRequest({
+      provider,
+      repoPath: input.repoPath,
+      worktreePath: input.worktreePath,
+      target,
+      title: resolvedTitle.title,
+    }),
+    resultOf: (result) => ({ url: result.url, head: result.updatedHeadSha }),
+    fromReplay: (record) => ({
+      url: record.url ?? target.url,
+      number: target.number,
+      changeRequest: {
+        provider: "github" as const,
+        url: record.url ?? target.url,
+        number: target.number,
+        owner: target.owner,
+        repository: target.repository,
+        baseBranch: target.baseBranch,
+        headBranch: target.headBranch,
+        draft: false,
+      },
+      previousHeadSha: target.headSha,
+      updatedHeadSha: record.head,
+    }),
   });
   if (!input.recordTitleBeforeUpdate) {
     input.onChangeTitleResolved(changeTitle);
@@ -11032,6 +11203,10 @@ async function writeEvidence(input: {
     worktreePath: input.worktreePath,
     baseBranch: input.baseBranch,
   });
+  const coordinationText = await collectCoordinationEvidence(input.runDirectory);
+  const coordinationSection = coordinationText
+    ? ["## Work Coordination", "", coordinationText, ""]
+    : [];
   const sourceIssue = githubSourceIssueFromInputs(input.inputs);
   const sourceIssueSection = sourceIssue
     ? [
@@ -11873,6 +12048,7 @@ async function writeEvidence(input: {
     "",
     attemptFileLines,
     "",
+    ...coordinationSection,
     "## Completed Stages",
     "",
     input.completedStages.map((stage) => `- ${stage}`).join("\n"),

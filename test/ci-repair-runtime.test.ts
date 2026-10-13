@@ -4,6 +4,8 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { ciRepairIdempotencyKey } from "../src/ci-repair.js";
+import { changeMutationDomains, runGuardedMutation } from "../src/coordination/claims.js";
 import { EventStore } from "../src/events/store.js";
 import { listEvidenceRuns } from "../src/evidence/catalog.js";
 import { parseCiFailureObservation, submitCiRepair } from "../src/ci-repair/runtime.js";
@@ -91,5 +93,76 @@ describe("CI repair runtime", () => {
       "ci-repair.completed",
     ]);
     events.close();
+  });
+
+  it("holds a repair when the pull request head changed and does not apply it", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-ci-repair-"));
+    await runGuardedMutation({
+      repoPath,
+      domains: changeMutationDomains({
+        action: "repair",
+        pull: { owner: "acme", repository: "nitely", number: 42 },
+      }),
+      observedHead: "bbbbbbb",
+      runId: "earlier-repair",
+      idempotencyKey: "earlier-repair",
+      effect: async () => ({ head: "bbbbbbb" }),
+      resultOf: () => ({ head: "bbbbbbb" }),
+    });
+    let applyCalls = 0;
+    const submitted = await submitCiRepair({
+      repoPath,
+      observation,
+      currentHeadSha: observation.headSha,
+      dependencies: {
+        applySamePullRequestRepair: async () => {
+          applyCalls += 1;
+          return { updatedHeadSha: "should-not-apply" };
+        },
+        runLocalChecks: async () => true,
+        runStructuredReview: async () => true,
+        observeRemoteResult: async () => ({ headSha: "should-not-apply", passed: true }),
+      },
+    });
+
+    expect(applyCalls).toBe(0);
+    expect(submitted.result.outcome).toBe("needs-human");
+    expect(submitted.result.reason).toContain("stale-cursor");
+  });
+
+  it("replays a completed repair claim without applying the pull request again", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-ci-repair-"));
+    const idempotencyKey = ciRepairIdempotencyKey(observation);
+    await runGuardedMutation({
+      repoPath,
+      domains: changeMutationDomains({
+        action: "repair",
+        pull: { owner: "acme", repository: "nitely", number: 42 },
+      }),
+      observedHead: observation.headSha,
+      runId: `ci-repair:${idempotencyKey}`,
+      idempotencyKey,
+      effect: async () => ({ head: "bbbbbbb" }),
+      resultOf: () => ({ head: "bbbbbbb" }),
+    });
+    let applyCalls = 0;
+    const submitted = await submitCiRepair({
+      repoPath,
+      observation,
+      currentHeadSha: observation.headSha,
+      dependencies: {
+        applySamePullRequestRepair: async () => {
+          applyCalls += 1;
+          return { updatedHeadSha: "should-not-apply" };
+        },
+        runLocalChecks: async () => true,
+        runStructuredReview: async () => true,
+        observeRemoteResult: async () => ({ headSha: "bbbbbbb", passed: true }),
+      },
+    });
+
+    expect(applyCalls).toBe(0);
+    expect(submitted.result.outcome).toBe("repaired");
+    expect(submitted.evidence.samePullRequestUpdate?.updatedHeadSha).toBe("bbbbbbb");
   });
 });
