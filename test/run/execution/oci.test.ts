@@ -1315,14 +1315,13 @@ describe("OciExecutionBackend", () => {
     expect(launch?.stdin).toContain("stated, not enforced");
   });
 
-  it("leaves the prompt alone and reports the mechanism when one mediates commands", async () => {
+  it("supervises an enforced command policy instead of asking the agent to comply", async () => {
     const fixture = await createFixture();
     const calls: SandboxProcessInput[] = [];
     const backend = new OciExecutionBackend({
       image: "nitely-runner:test",
       processRunner: successfulRunner(calls),
       runtimeRegistry: offlineRuntimeRegistry(),
-      commandMediation: { id: "test-mediator", supports: () => true },
     });
 
     await backend.runAgent(
@@ -1343,15 +1342,156 @@ describe("OciExecutionBackend", () => {
       },
     );
 
-    const launch = calls.find((call) => call.args[0] === "run");
-    expect(launch?.stdin).toBe("Implement.");
+    const launches = calls.filter((call) => call.args[0] === "run");
+    const probe = launches.find((call) => call.args.includes("--entrypoint"));
+    const workload = launches.find((call) =>
+      call.args.includes("/usr/local/lib/nitely-mediator/command-mediator.py"),
+    );
+    expect(probe?.args).toContain("python3");
+    expect(workload?.stdin).toBe("Implement.");
+    expect(workload?.stdin).not.toContain("stated, not enforced");
+    expect(workload?.args).toContain(
+      "/usr/local/lib/nitely-mediator/command-mediator.py",
+    );
+    expect(workload?.args).toContain("/nitely/output/command-mediation.jsonl");
+    const separator = workload?.args.lastIndexOf("--") ?? -1;
+    expect(workload?.args.slice(separator + 1, separator + 2)).toEqual(["codex"]);
     expect(backend.describeExecution().commands).toEqual({
       mediation: "mechanism",
-      mechanism: "test-mediator",
+      mechanism: "oci-ptrace-seccomp",
     });
-    expect(backend.describeExecution().limitations).toContain(
-      "agent-spawned commands are mediated by test-mediator",
+  });
+
+  it("wraps Claude and Pi launches with the same command supervisor", async () => {
+    const fixture = await createFixture();
+    const commands = {
+      mode: "allow-list" as const,
+      allow: ["pnpm test*"],
+      deny: [],
+      advisory: false,
+    };
+    const workloadOf = (calls: SandboxProcessInput[]) =>
+      calls
+        .filter((call) => call.args[0] === "run")
+        .find((call) =>
+          call.args.includes("/usr/local/lib/nitely-mediator/command-mediator.py"),
+        );
+
+    const claudeCalls: SandboxProcessInput[] = [];
+    const claude = new OciExecutionBackend({
+      image: "nitely-runner:test",
+      processRunner: successfulRunner(claudeCalls),
+      runtimeRegistry: {
+        supportedIds: () => ["claude"],
+        resolve: () => ({
+          id: "claude",
+          networkAccess: "none",
+          build: () => ({
+            runtime: "claude",
+            command: "claude",
+            args: ["-p"],
+            promptDelivery: "stdin" as const,
+          }),
+        }),
+      },
+    });
+    await claude.runAgent(
+      { runId: "claude-mediated", path: fixture.worktree },
+      {
+        stage: {
+          ...agentStage(
+            sandboxCapabilities({ commands, allowedRuntimes: ["claude"] }),
+          ),
+          runtime: "claude",
+        },
+        prompt: "Implement.",
+        attemptDirectory: fixture.attempt,
+      },
     );
+    const claudeWorkload = workloadOf(claudeCalls);
+    expect(claudeWorkload?.stdin).toBe("Implement.");
+    expect(claudeWorkload?.stdin).not.toContain("stated, not enforced");
+    expect(claudeWorkload?.args).toContain("IS_SANDBOX=1");
+    const claudeSeparator = claudeWorkload?.args.lastIndexOf("--") ?? -1;
+    expect(claudeWorkload?.args.slice(claudeSeparator + 1, claudeSeparator + 3)).toEqual([
+      "claude",
+      "-p",
+    ]);
+
+    const piCalls: SandboxProcessInput[] = [];
+    const pi = new OciExecutionBackend({
+      image: "nitely-runner:test",
+      processRunner: successfulRunner(piCalls),
+      runtimeRegistry: {
+        supportedIds: () => ["pi"],
+        resolve: () => ({
+          id: "pi",
+          networkAccess: "none",
+          build: () => ({
+            runtime: "pi",
+            command: "pi",
+            args: ["-p", "--mode", "json"],
+            promptDelivery: "stdin" as const,
+          }),
+        }),
+      },
+    });
+    const piResult = await pi.runAgent(
+      { runId: "pi-mediated", path: fixture.worktree },
+      {
+        stage: {
+          ...agentStage(
+            sandboxCapabilities({ commands, allowedRuntimes: ["pi"] }),
+          ),
+          runtime: "pi",
+        },
+        prompt: "Implement.",
+        attemptDirectory: fixture.attempt,
+      },
+    );
+    const piWorkload = workloadOf(piCalls);
+    expect(piWorkload?.stdin).toBe("Implement.");
+    expect(piWorkload?.args).not.toContain("IS_SANDBOX=1");
+    const piSeparator = piWorkload?.args.lastIndexOf("--") ?? -1;
+    expect(piWorkload?.args.slice(piSeparator + 1, piSeparator + 5)).toEqual([
+      "pi",
+      "-p",
+      "--mode",
+      "json",
+    ]);
+    expect(piResult.stdout).toBe("ok\n");
+  });
+
+  it("refuses a mechanism that cannot supervise instead of launching unmediated", async () => {
+    const fixture = await createFixture();
+    const calls: SandboxProcessInput[] = [];
+    const backend = new OciExecutionBackend({
+      image: "nitely-runner:test",
+      processRunner: successfulRunner(calls),
+      runtimeRegistry: offlineRuntimeRegistry(),
+      commandMediation: { id: "test-mediator", supports: () => true },
+    });
+
+    await expect(
+      backend.runAgent(
+        { runId: "command-unsupervised", path: fixture.worktree },
+        {
+          stage: agentStage(
+            sandboxCapabilities({
+              commands: {
+                mode: "allow-list",
+                allow: ["pnpm test*"],
+                deny: [],
+                advisory: false,
+              },
+            }),
+          ),
+          prompt: "Implement.",
+          attemptDirectory: fixture.attempt,
+        },
+      ),
+    ).rejects.toThrow(/cannot supervise agent-spawned commands/);
+    expect(calls).toHaveLength(0);
   });
 
   it("reports a demanded command policy as unavailable during preflight", async () => {
@@ -1361,6 +1501,7 @@ describe("OciExecutionBackend", () => {
       image: "nitely-runner:test",
       processRunner: successfulRunner(calls),
       runtimeRegistry: offlineRuntimeRegistry(),
+      commandMediation: null,
     });
 
     const result = await backend.preflightAgentRuntime(
@@ -1393,6 +1534,7 @@ describe("OciExecutionBackend", () => {
     const backend = new OciExecutionBackend({
       image: "nitely-runner:test",
       processRunner: successfulRunner(calls),
+      commandMediation: null,
     });
 
     await expect(
@@ -2722,7 +2864,10 @@ describe("OciExecutionBackend", () => {
         secretNames: ["OPENAI_API_KEY"],
         valuesRecorded: false,
       },
-      commands: { mediation: "stated" },
+      commands: {
+        mediation: "mechanism",
+        mechanism: "oci-ptrace-seccomp",
+      },
       resources: expect.objectContaining({
         cpus: 2,
         memoryBytes: 268_435_456,
@@ -2746,7 +2891,7 @@ describe("OciExecutionBackend", () => {
       limitations: [
         "backing linked-worktree Git metadata is never mounted; host-side workspace create/commit is the only Git write path; Codex uses --skip-git-repo-check and in-container Git commands may be unavailable",
         "without NITELY_OCI_NETWORK_ALLOWLIST, agent runtimes must be offline or fail preflight; built-in Codex/Claude/GLM/Grok/OpenRouter/Pi/Together require the allowlist gateway",
-        "agent-spawned commands are not mediated inside the image; a stage that sets capabilities.commands.advisory false fails closed instead of running unmediated",
+        "agent-spawned execve and execveat calls are mediated by oci-ptrace-seccomp on Linux x86_64 when capabilities.commands.advisory is false; advisory policies stay stated; if the mediator cannot be installed the stage fails closed before launch. In-process interpreter effects and non-exec shell builtins are outside this boundary",
         "aggregate bind-mount disk quota (NITELY_OCI_DISK_BYTES) is not supported and will not be; setting it fails closed. Use per-file NITELY_OCI_MAX_FILE_BYTES and captured-output NITELY_OCI_MAX_CAPTURED_OUTPUT_BYTES",
       ],
     });
@@ -3081,6 +3226,86 @@ describe("OciExecutionBackend", () => {
         },
       ),
     ).resolves.toMatchObject({ stdout: "", stderr: "" });
+  });
+
+  it.runIf(
+    process.platform === "linux" &&
+      process.arch === "x64" &&
+      process.env.NITELY_TEST_ROOTLESS_DOCKER === "1" &&
+      Boolean(process.env.NITELY_OCI_TEST_IMAGE),
+  )("enforces command allow and deny inside a real rootless container", async () => {
+    const fixture = await createFixture();
+    await symlink("/usr/bin/touch", join(fixture.worktree, "fake-id"));
+    const script = [
+      "set +e",
+      '/usr/bin/id > "$NITELY_OUTPUT_DIR/id.txt"; echo id:$?',
+      '/usr/bin/touch "$NITELY_OUTPUT_DIR/touched"; echo touch:$?',
+      '/bin/sh -c \'/usr/bin/touch "$NITELY_OUTPUT_DIR/touched-sh"\'; echo sh:$?',
+      '/workspace/fake-id "$NITELY_OUTPUT_DIR/touched-link"; echo link:$?',
+      "printf '#!/usr/bin/touch\\n' > /workspace/shebang.sh",
+      '/workspace/shebang.sh "$NITELY_OUTPUT_DIR/touched-shebang"; echo shebang:$?',
+      'python3 -c \'import os; os.execv("/usr/bin/touch", ["touch", "/nitely/output/touched-py"])\'; echo py:$?',
+    ].join("\n");
+    const backend = new OciExecutionBackend({
+      image: process.env.NITELY_OCI_TEST_IMAGE!,
+      runtimeRegistry: {
+        supportedIds: () => ["codex"],
+        resolve: () => ({
+          id: "codex",
+          networkAccess: "none",
+          build: () => ({
+            runtime: "codex",
+            command: "/bin/sh",
+            args: ["-c", script],
+            promptDelivery: "argument" as const,
+          }),
+        }),
+      },
+    });
+
+    await expect(
+      backend.runAgent(
+        { runId: "command-mediator", path: fixture.worktree },
+        {
+          stage: agentStage(
+            sandboxCapabilities({
+              commands: {
+                mode: "allow-list",
+                allow: ["id", "dash", "python3.11", "shebang.sh"],
+                deny: ["touch"],
+                advisory: false,
+              },
+            }),
+          ),
+          prompt: "Implement.",
+          attemptDirectory: fixture.attempt,
+          timeoutMs: 60_000,
+        },
+      ),
+    ).resolves.toMatchObject({ stdout: expect.stringContaining("id:0") });
+
+    const output = async (name: string) =>
+      readFile(join(fixture.attempt, name), "utf8").catch(() => undefined);
+    expect(await output("id.txt")).toContain("uid=");
+    for (const name of [
+      "touched",
+      "touched-sh",
+      "touched-link",
+      "touched-shebang",
+      "touched-py",
+    ]) {
+      expect(await output(name)).toBeUndefined();
+    }
+    const evidence = await readFile(
+      join(fixture.attempt, "command-mediation.jsonl"),
+      "utf8",
+    );
+    expect(evidence).toContain('"program":"touch"');
+    expect(evidence).toContain('"decision":"deny"');
+    expect(evidence).toContain('"event":"launch"');
+    expect(evidence).toContain('"event":"supervisor-exit"');
+    expect(evidence).not.toContain("touched-py");
+    expect(evidence).not.toContain("Implement.");
   });
 });
 

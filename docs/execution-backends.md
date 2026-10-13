@@ -151,18 +151,23 @@ program name (`git`, matched by program or basename), an explicit path
 A `deny` match always wins. The runtime CLI Nitely launches is the agent itself,
 not one of its commands, and is never matched against the policy.
 
-Container isolation bounds the filesystem and the network; it does not mediate
-which binaries run inside the image. So the policy resolves one of three ways:
+On the OCI backend the policy resolves as follows. The threat model and the
+limits of that mechanism are in [OCI command mediation](oci-command-mediation.md).
 
 - `unrestricted`: no mediation, as before.
 - `advisory: true`: the allow and deny rules are stated to the agent in its
-  prompt and recorded in evidence, and the stage runs.
-- `advisory: false`: enforcement is demanded, no mechanism provides it, and the
-  stage **fails closed** at preflight rather than running unmediated.
+  prompt and recorded in evidence. The stage runs. OCI does not silently
+  upgrade a stated policy into a block.
+- `advisory: false`: OCI supervises every `execve` and `execveat` the agent
+  process tree makes, after the runtime command Nitely itself launched. The
+  decision uses the resolved executable, not `argv[0]`. If the supervisor
+  cannot be installed, the stage **fails closed** before the workload starts.
 
 The local and mise backends run the agent as an ordinary child process and
 mediate nothing it spawns, so they fail closed on `advisory: false` the same
-way. Evidence records the mode, the advisory flag, and the rule names only.
+way. Evidence records the mode, the mechanism, and the rule names. Denial
+lines add the program basename, the rule, and the argument count. They do not
+record the argument values.
 
 Aggregate bind-mount disk quota (`NITELY_OCI_DISK_BYTES`) is not supported and
 will not be; setting it fails closed. Use per-file `NITELY_OCI_MAX_FILE_BYTES`

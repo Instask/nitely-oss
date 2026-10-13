@@ -1,6 +1,6 @@
 import { resolveRuntimeEffort } from "./effort.js";
 import { randomUUID } from "node:crypto";
-import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -47,7 +47,18 @@ import {
   resolveCommandMediation,
   type CommandMediationMechanism,
   type CommandMediationOutcome,
+  type CommandMediationPolicy,
 } from "./command-mediation.js";
+import {
+  commandMediatorContainerArgs,
+  commandMediatorMountSpec,
+  commandMediatorScriptPath,
+  commandPolicyDocument,
+  createOciCommandMediationMechanism,
+  OCI_COMMAND_MEDIATION_LIMITATION,
+  OCI_COMMAND_MEDIATOR_ID,
+  ociCommandMediationSupported,
+} from "./command-mediator.js";
 import {
   ContainerNetworkAllowlistGateway,
   formatNetworkPolicyDescription,
@@ -170,10 +181,10 @@ export interface OciExecutionBackendOptions {
   engineSocketVerifier?: EngineSocketVerifier;
   /**
    * Mediates the commands an agent spawns for itself inside the sandbox.
-   * Absent by default: container isolation bounds the filesystem and the
-   * network, not which binaries run inside the image.
+   * Omitted: use oci-ptrace-seccomp when this host can run it. `null`: no
+   * mechanism, so a stage that demands enforcement fails closed.
    */
-  commandMediation?: CommandMediationMechanism;
+  commandMediation?: CommandMediationMechanism | null;
   /** Test seam for the HTTP CONNECT allowlist gateway. */
   networkGatewayFactory?: (
     domains: readonly string[],
@@ -212,6 +223,10 @@ const OCI_LIFECYCLE_LABELS = [
   "com.nitely.expires-at",
   "com.nitely.instance-id",
 ] as const;
+
+function unsupervisedCommandMediation(stageId: string, mechanism: string): string {
+  return `stage ${stageId}: command mediation mechanism ${mechanism} cannot supervise agent-spawned commands; refusing to launch an unmediated workload`;
+}
 
 function assertEnvironmentName(name: string): void {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
@@ -671,7 +686,13 @@ export class OciExecutionBackend implements ExecutionBackend {
       allowlistRaw: networkDomains.join(","),
     });
     this.networkGatewayFactory = options.networkGatewayFactory;
-    this.commandMediation = options.commandMediation;
+    this.commandMediation =
+      options.commandMediation === null
+        ? undefined
+        : options.commandMediation ??
+          (ociCommandMediationSupported()
+            ? createOciCommandMediationMechanism()
+            : undefined);
     this.image = image;
     if (options.imageIdentity) {
       this.resolvedImage = options.imageIdentity;
@@ -811,9 +832,11 @@ export class OciExecutionBackend implements ExecutionBackend {
         this.networkPolicy.mode === "allowlist"
           ? "agent egress uses an internal-only workload network and an HTTP CONNECT allowlist gateway; direct sockets have no external route and non-allowlisted CONNECT is denied"
           : "without NITELY_OCI_NETWORK_ALLOWLIST, agent runtimes must be offline or fail preflight; built-in Codex/Claude/GLM/Grok/OpenRouter/Pi/Together require the allowlist gateway",
-        this.commandMediation
-          ? `agent-spawned commands are mediated by ${this.commandMediation.id}`
-          : "agent-spawned commands are not mediated inside the image; a stage that sets capabilities.commands.advisory false fails closed instead of running unmediated",
+        this.commandMediation?.id === OCI_COMMAND_MEDIATOR_ID
+          ? OCI_COMMAND_MEDIATION_LIMITATION
+          : this.commandMediation
+            ? `agent-spawned commands are mediated by ${this.commandMediation.id}`
+            : "agent-spawned commands are not mediated inside the image; a stage that sets capabilities.commands.advisory false fails closed instead of running unmediated",
         "aggregate bind-mount disk quota (NITELY_OCI_DISK_BYTES) is not supported and will not be; setting it fails closed. Use per-file NITELY_OCI_MAX_FILE_BYTES and captured-output NITELY_OCI_MAX_CAPTURED_OUTPUT_BYTES",
       ],
     };
@@ -1265,6 +1288,9 @@ export class OciExecutionBackend implements ExecutionBackend {
     if (mediation.status === "unenforceable") {
       throw commandMediationError(input.stage.id, mediation);
     }
+    if (mediation.status === "enforced" && !this.commandSupervisorReady()) {
+      throw new Error(unsupervisedCommandMediation(input.stage.id, mediation.mechanism));
+    }
     const runtimeId = input.stage.runtime;
     if (!runtimeId) {
       throw new Error(`agent runtime for stage ${input.stage.id} is not configured`);
@@ -1278,6 +1304,7 @@ export class OciExecutionBackend implements ExecutionBackend {
     let internalNetwork: InternalNetwork | undefined;
     let boundedWorkspace: { path: string; cleanup: string } | undefined;
     let networkPlan: ContainerNetworkPlan | undefined;
+    let mediatorDir: string | undefined;
     try {
       if (networkDecision.mode === "allowlist") {
         if (!this.networkGatewayFactory) {
@@ -1431,6 +1458,11 @@ export class OciExecutionBackend implements ExecutionBackend {
       }
       const piJson = isPiJsonRuntime(launch.runtime);
       if (piJson) plan.launch.stdoutCapture = createPiJsonCapture();
+      if (mediation.status === "enforced") {
+        await this.assertCommandMediatorPython();
+        mediatorDir = await this.prepareCommandMediator(mediation.policy);
+        this.installCommandMediator(plan.launch.args, mediatorDir);
+      }
       let executed: SandboxProcessResult;
       try {
         executed = await this.executePlan(plan);
@@ -1504,14 +1536,111 @@ export class OciExecutionBackend implements ExecutionBackend {
           () => undefined,
         );
       }
+      if (mediatorDir) {
+        await rm(mediatorDir, { recursive: true, force: true }).catch(() => undefined);
+      }
     }
   }
 
   /**
    * The stage's command policy governs what the agent spawns for itself. The
-   * runtime CLI Nitely launches is the agent, not one of its commands, so it is
-   * never matched against the policy.
+   * runtime CLI Nitely launches is the agent, not one of its commands, so the
+   * mediator exempts that first exec and decides every later one.
    */
+  private commandSupervisorReady(): boolean {
+    return (
+      this.commandMediation?.id === OCI_COMMAND_MEDIATOR_ID &&
+      ociCommandMediationSupported()
+    );
+  }
+
+  private async assertCommandMediatorPython(): Promise<void> {
+    const probeName = this.containerName();
+    try {
+      const result = await this.processRunner({
+        command: this.engineCommand,
+        args: [
+          "run",
+          "--rm",
+          "--name",
+          probeName,
+          "--pull=never",
+          "--network=none",
+          "--read-only",
+          "--cap-drop=ALL",
+          "--security-opt=no-new-privileges:true",
+          "--entrypoint",
+          "python3",
+          this.resolvedImage ?? this.image,
+          "-c",
+          "import ctypes, os, sys; sys.exit(0 if os.uname().machine == 'x86_64' else 1)",
+        ],
+        env: this.engineEnv,
+        timeoutMs: 10_000,
+        maxOutputBytes: 4096,
+      });
+      if (result.exitCode !== 0) {
+        throw new Error(
+          "OCI command mediation requires python3 on Linux x86_64 inside the image; refusing to launch an unmediated workload",
+        );
+      }
+    } finally {
+      await this.processRunner({
+        command: this.engineCommand,
+        args: ["rm", "--force", probeName],
+        env: this.engineEnv,
+        timeoutMs: 3_000,
+        maxOutputBytes: 4096,
+      }).catch(() => undefined);
+    }
+  }
+
+  private async prepareCommandMediator(
+    policy: CommandMediationPolicy,
+  ): Promise<string> {
+    const script = commandMediatorScriptPath();
+    if (!script) {
+      throw new Error(
+        "OCI command mediator program is not installed; refusing to launch an unmediated workload",
+      );
+    }
+    const dir = await mkdtemp(join(tmpdir(), "nitely-command-mediator-"));
+    await cp(script, join(dir, "command-mediator.py"));
+    await writeFile(
+      join(dir, "command-policy.json"),
+      `${commandPolicyDocument(policy)}\n`,
+      { mode: 0o444 },
+    );
+    return dir;
+  }
+
+  private installCommandMediator(args: string[], hostDir: string): void {
+    const image = this.resolvedImage ?? this.image;
+    const imageIndex = args.lastIndexOf(image);
+    if (imageIndex < 0 || imageIndex >= args.length - 1) {
+      throw new Error("OCI command mediation could not find the workload command");
+    }
+    assertDockerMountPath(hostDir);
+    const runtime = args.slice(imageIndex + 1);
+    const command = runtime[0];
+    if (!command) {
+      throw new Error("OCI command mediation could not find the workload command");
+    }
+    args.splice(
+      imageIndex,
+      0,
+      "--mount",
+      commandMediatorMountSpec(hostDir),
+      "--env",
+      "PYTHONDONTWRITEBYTECODE=1",
+    );
+    args.splice(
+      imageIndex + 5,
+      runtime.length,
+      ...commandMediatorContainerArgs({ command, args: runtime.slice(1) }),
+    );
+  }
+
   private resolveCommandMediation(
     policy: ReturnType<typeof effectiveCapabilityPolicy>["policy"],
   ): CommandMediationOutcome {
@@ -1916,6 +2045,12 @@ export class OciExecutionBackend implements ExecutionBackend {
     if (mediation.status === "unenforceable") {
       return { available: false, reason: mediation.reason };
     }
+    if (mediation.status === "enforced" && !this.commandSupervisorReady()) {
+      return {
+        available: false,
+        reason: unsupervisedCommandMediation(input.stage.id, mediation.mechanism),
+      };
+    }
     let gateway: NetworkAllowlistGateway | undefined;
     let internalNetwork: InternalNetwork | undefined;
     try {
@@ -1933,6 +2068,9 @@ export class OciExecutionBackend implements ExecutionBackend {
       }
       await this.capabilityWorkspaceMounts(ws, policy);
       await this.verifyRootlessEngine();
+      if (mediation.status === "enforced") {
+        await this.assertCommandMediatorPython();
+      }
       const runtimeEnv = this.runtimeEnvironment(this.runtimeSecretNames(runtime));
       const missing = (runtime.requiredEnv ?? []).filter(
         (alternatives) =>

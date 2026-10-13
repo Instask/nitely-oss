@@ -30,6 +30,8 @@ ENV HOME=/tmp/nitely-home \
 
 ARG PNPM_VERSION=11.0.7
 
+# python3 is the in-container command mediator (docs/oci-command-mediation.md).
+# Removing it makes an enforcement-demanding stage fail closed.
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
