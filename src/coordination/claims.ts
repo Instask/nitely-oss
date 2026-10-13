@@ -51,6 +51,10 @@ export type GuardedMutation<T> =
 
 export type WakeRole = "lead" | "duplicate" | "stale" | "coalesced";
 
+export type WakeClaim = "process" | "skip" | "blocked" | "absent";
+
+export type WakeFinish = "done" | "released" | "ignored";
+
 interface WorldRow {
   domain: string;
   revision: number;
@@ -393,7 +397,7 @@ export class CoordinationStore {
     owner: string;
     now: string;
     leaseMs: number;
-  }): "process" | "skip" | "absent" {
+  }): WakeClaim {
     assertDomain(input.domain);
     return this.#transaction(() => {
       const wake = this.#wake(input.domain);
@@ -407,7 +411,9 @@ export class CoordinationStore {
         wake.lease_until !== null &&
         wake.lease_until > input.now
       ) {
-        return "skip";
+        // The new lead is only waiting for the previous owner's lease.
+        // That is not a stale event, and the caller must not complete it.
+        return "blocked";
       }
       const until = new Date(Date.parse(input.now) + input.leaseMs).toISOString();
       this.#writeWake({
@@ -416,31 +422,27 @@ export class CoordinationStore {
         lease_owner: input.owner,
         lease_until: until,
         attempts: wake.attempts + 1,
+        rerun: 0,
         updated_at: input.now,
       });
       return "process";
     });
   }
 
-  finishWake(input: { domain: string; deliveryId: string; now?: string }): void {
+  finishWake(input: {
+    domain: string;
+    deliveryId: string;
+    owner: string;
+    now?: string;
+  }): WakeFinish {
     const now = input.now ?? new Date().toISOString();
-    this.#transaction(() => {
+    return this.#transaction(() => {
       const wake = this.#wake(input.domain);
-      if (!wake) return;
+      if (!wake) return "ignored";
+      const ownsLease = wake.state === "leased" && wake.lease_owner === input.owner;
+      if (wake.state === "leased" && !ownsLease) return "ignored";
       if (wake.lead_delivery_id !== input.deliveryId) {
-        if (wake.state === "leased") {
-          this.#writeWake({
-            ...wake,
-            state: "pending",
-            lease_owner: null,
-            lease_until: null,
-            rerun: 0,
-            updated_at: now,
-          });
-        }
-        return;
-      }
-      if (wake.rerun) {
+        if (!ownsLease) return "ignored";
         this.#writeWake({
           ...wake,
           state: "pending",
@@ -449,7 +451,19 @@ export class CoordinationStore {
           rerun: 0,
           updated_at: now,
         });
-        return;
+        return "released";
+      }
+      if (wake.rerun) {
+        if (!ownsLease) return "ignored";
+        this.#writeWake({
+          ...wake,
+          state: "pending",
+          lease_owner: null,
+          lease_until: null,
+          rerun: 0,
+          updated_at: now,
+        });
+        return "released";
       }
       this.#writeWake({
         ...wake,
@@ -458,19 +472,26 @@ export class CoordinationStore {
         lease_until: null,
         updated_at: now,
       });
+      return "done";
     });
   }
 
-  releaseWake(input: { domain: string; deliveryId: string; now?: string }): void {
+  releaseWake(input: {
+    domain: string;
+    deliveryId: string;
+    owner: string;
+    now?: string;
+  }): void {
     const now = input.now ?? new Date().toISOString();
     this.#transaction(() => {
       const wake = this.#wake(input.domain);
-      if (!wake || wake.lead_delivery_id !== input.deliveryId || wake.state !== "leased") return;
+      if (!wake || wake.state !== "leased" || wake.lease_owner !== input.owner) return;
       this.#writeWake({
         ...wake,
         state: "pending",
         lease_owner: null,
         lease_until: null,
+        rerun: 0,
         updated_at: now,
       });
     });
@@ -559,7 +580,7 @@ export function recordWorkWake(
 export function claimWorkWake(
   repoPath: string,
   input: { domain: string; deliveryId: string; owner: string; now: string; leaseMs: number },
-): "process" | "skip" | "absent" {
+): WakeClaim {
   const store = openCoordinationStore(repoPath);
   try {
     return store.claimWake(input);
@@ -570,11 +591,11 @@ export function claimWorkWake(
 
 export function finishWorkWake(
   repoPath: string,
-  input: { domain: string; deliveryId: string; now?: string },
-): void {
+  input: { domain: string; deliveryId: string; owner: string; now?: string },
+): WakeFinish {
   const store = openCoordinationStore(repoPath);
   try {
-    store.finishWake(input);
+    return store.finishWake(input);
   } finally {
     store.close();
   }
@@ -582,7 +603,7 @@ export function finishWorkWake(
 
 export function releaseWorkWake(
   repoPath: string,
-  input: { domain: string; deliveryId: string; now?: string },
+  input: { domain: string; deliveryId: string; owner: string; now?: string },
 ): void {
   const store = openCoordinationStore(repoPath);
   try {

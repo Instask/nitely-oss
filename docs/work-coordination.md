@@ -58,11 +58,15 @@ conflicts. Aborting a claim that has not started releases it.
 
 Webhook intake records one wake per issue or pull request. A newer event
 becomes the lead. An older or duplicate delivery is stored and does not create
-a second task. The lead's task is created before the wake is finished, so a
-crash in between retries the same delivery instead of dropping it. A delivery
-with no wake row is still processed. If that delivery is queued again after
-the wake was finished, the lead is claimed again and the existing task is
-reused. A failed task creation releases the wake back to pending.
+a second task. A newer lead that arrives while the previous delivery still
+holds an unexpired lease stays queued. It is not marked completed. Only the
+lease owner can release that lease, and an older worker cannot clear a lease
+the newer lead already took. When the owner finishes or the task creation
+fails, intake drains the queue again and creates the new lead's task. The
+lead's task is created before the wake is finished, so a crash in between
+retries the same delivery instead of dropping it. A delivery with no wake row
+is still processed. If that delivery is queued again after the wake was
+finished, the lead is claimed again and the existing task is reused.
 
 Hold, conflict, and unknown decisions are written to the attempt's
 `coordination.jsonl`, copied into `evidence.md`, and appended to the run event

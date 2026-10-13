@@ -257,7 +257,11 @@ describe("work coordination claims", () => {
       now: "2026-07-16T04:00:00.000Z",
       leaseMs: 120_000,
     })).toBe("process");
-    releaseWorkWake(repoPath, { domain: wakeDomain, deliveryId: "newer" });
+    releaseWorkWake(repoPath, {
+      domain: wakeDomain,
+      deliveryId: "newer",
+      owner: "delivery:newer",
+    });
     expect(claimWorkWake(repoPath, {
       domain: wakeDomain,
       deliveryId: "newer",
@@ -265,7 +269,11 @@ describe("work coordination claims", () => {
       now: "2026-07-16T04:02:00.000Z",
       leaseMs: 120_000,
     })).toBe("process");
-    finishWorkWake(repoPath, { domain: wakeDomain, deliveryId: "newer" });
+    finishWorkWake(repoPath, {
+      domain: wakeDomain,
+      deliveryId: "newer",
+      owner: "delivery:newer",
+    });
     expect(claimWorkWake(repoPath, {
       domain: wakeDomain,
       deliveryId: "older",
@@ -287,6 +295,109 @@ describe("work coordination claims", () => {
       now: "2026-07-16T04:03:00.000Z",
       leaseMs: 120_000,
     })).toBe("absent");
+  });
+
+  it("keeps a newer lead claimable while an older lease is still held", () => {
+    const repoPath = join(tmpdir(), `nitely-coordination-wake-blocked-${Date.now()}`);
+    const wakeDomain = "github-issue:acme/widgets#7";
+    expect(recordWorkWake(repoPath, {
+      domain: wakeDomain,
+      cursor: "2026-07-16T03:59:10.000Z",
+      deliveryId: "older",
+    })).toBe("lead");
+    expect(claimWorkWake(repoPath, {
+      domain: wakeDomain,
+      deliveryId: "older",
+      owner: "delivery:older",
+      now: "2026-07-16T04:00:00.000Z",
+      leaseMs: 120_000,
+    })).toBe("process");
+    expect(recordWorkWake(repoPath, {
+      domain: wakeDomain,
+      cursor: "2026-07-16T03:59:50.000Z",
+      deliveryId: "newer",
+    })).toBe("lead");
+    expect(claimWorkWake(repoPath, {
+      domain: wakeDomain,
+      deliveryId: "newer",
+      owner: "delivery:newer",
+      now: "2026-07-16T04:00:01.000Z",
+      leaseMs: 120_000,
+    })).toBe("blocked");
+    expect(claimWorkWake(repoPath, {
+      domain: wakeDomain,
+      deliveryId: "older",
+      owner: "delivery:older",
+      now: "2026-07-16T04:00:01.000Z",
+      leaseMs: 120_000,
+    })).toBe("skip");
+    expect(finishWorkWake(repoPath, {
+      domain: wakeDomain,
+      deliveryId: "older",
+      owner: "delivery:older",
+      now: "2026-07-16T04:00:02.000Z",
+    })).toBe("released");
+    expect(claimWorkWake(repoPath, {
+      domain: wakeDomain,
+      deliveryId: "newer",
+      owner: "delivery:newer",
+      now: "2026-07-16T04:00:03.000Z",
+      leaseMs: 120_000,
+    })).toBe("process");
+  });
+
+  it("does not let an older worker release a newer wake lease", () => {
+    const repoPath = join(tmpdir(), `nitely-coordination-wake-owner-${Date.now()}`);
+    const wakeDomain = "github-issue:acme/widgets#7";
+    recordWorkWake(repoPath, {
+      domain: wakeDomain,
+      cursor: "2026-07-16T03:59:10.000Z",
+      deliveryId: "older",
+    });
+    claimWorkWake(repoPath, {
+      domain: wakeDomain,
+      deliveryId: "older",
+      owner: "delivery:older",
+      now: "2026-07-16T04:00:00.000Z",
+      leaseMs: 120_000,
+    });
+    recordWorkWake(repoPath, {
+      domain: wakeDomain,
+      cursor: "2026-07-16T03:59:50.000Z",
+      deliveryId: "newer",
+    });
+    expect(claimWorkWake(repoPath, {
+      domain: wakeDomain,
+      deliveryId: "newer",
+      owner: "delivery:newer",
+      now: "2026-07-16T04:03:00.000Z",
+      leaseMs: 120_000,
+    })).toBe("process");
+    expect(finishWorkWake(repoPath, {
+      domain: wakeDomain,
+      deliveryId: "older",
+      owner: "delivery:older",
+      now: "2026-07-16T04:03:01.000Z",
+    })).toBe("ignored");
+    expect(releaseWorkWake(repoPath, {
+      domain: wakeDomain,
+      deliveryId: "older",
+      owner: "delivery:older",
+      now: "2026-07-16T04:03:01.000Z",
+    })).toBeUndefined();
+    expect(claimWorkWake(repoPath, {
+      domain: wakeDomain,
+      deliveryId: "newer",
+      owner: "delivery:other",
+      now: "2026-07-16T04:03:02.000Z",
+      leaseMs: 120_000,
+    })).toBe("blocked");
+    expect(finishWorkWake(repoPath, {
+      domain: wakeDomain,
+      deliveryId: "newer",
+      owner: "delivery:newer",
+      now: "2026-07-16T04:03:03.000Z",
+    })).toBe("done");
   });
 
   it("drops coordination records that carry undeclared fields", async () => {

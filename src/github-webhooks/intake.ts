@@ -2530,59 +2530,72 @@ export class GitHubWebhookIntake {
   }
 
   async #drainOnce(): Promise<void> {
-    const deliveries = await listGitHubWebhookDeliveries(this.#stateRepoPath);
-    for (const delivery of deliveries) {
-      if (
-        this.#configuration.statusPublisher &&
-        delivery.request &&
-        delivery.callback &&
-        delivery.callback.state !== "succeeded" &&
-        ((delivery.state === "completed" &&
-          delivery.taskId &&
-          (delivery.request.kind === "ExecutionRequest" ||
-            delivery.reworkRequestId)) ||
-          delivery.state === "failed")
-      ) {
-        await this.#withDeliveryLease(delivery.deliveryId, async () => {
-          const current = await getGitHubWebhookDelivery(
-            this.#stateRepoPath,
-            delivery.deliveryId,
-          );
-          if (
-            !current.request ||
-            !current.callback ||
-            current.callback.state === "succeeded" ||
-            !(
-              (current.state === "completed" &&
-                current.taskId &&
-                (current.request.kind === "ExecutionRequest" ||
-                  current.reworkRequestId)) ||
-              current.state === "failed"
-            )
-          ) {
-            return;
-          }
-          const callback = await this.#publishStatus(
-            current.state === "completed"
-              ? this.#completedStatus(current)
-              : this.#failedStatus(current),
-            current.callback,
-          );
-          await updateDeliveryRecord(this.#stateRepoPath, {
-            ...current,
-            callback,
-            updatedAt: this.#configuration.now().toISOString(),
-          });
+    // A newer lead can arrive while this pass still holds the previous lease.
+    // Re-read the queue after that lease is released; otherwise the new
+    // delivery stays queued until some later, unrelated webhook.
+    for (let pass = 0; pass < 8; pass += 1) {
+      let releasedNewerLead = false;
+      const deliveries = await listGitHubWebhookDeliveries(this.#stateRepoPath);
+      for (const delivery of deliveries) {
+        const released = await this.#drainDelivery(delivery);
+        if (released) releasedNewerLead = true;
+      }
+      if (!releasedNewerLead) return;
+    }
+  }
+
+  async #drainDelivery(delivery: GitHubWebhookDeliveryRecord): Promise<boolean> {
+    if (
+      this.#configuration.statusPublisher &&
+      delivery.request &&
+      delivery.callback &&
+      delivery.callback.state !== "succeeded" &&
+      ((delivery.state === "completed" &&
+        delivery.taskId &&
+        (delivery.request.kind === "ExecutionRequest" ||
+          delivery.reworkRequestId)) ||
+        delivery.state === "failed")
+    ) {
+      await this.#withDeliveryLease(delivery.deliveryId, async () => {
+        const current = await getGitHubWebhookDelivery(
+          this.#stateRepoPath,
+          delivery.deliveryId,
+        );
+        if (
+          !current.request ||
+          !current.callback ||
+          current.callback.state === "succeeded" ||
+          !(
+            (current.state === "completed" &&
+              current.taskId &&
+              (current.request.kind === "ExecutionRequest" ||
+                current.reworkRequestId)) ||
+            current.state === "failed"
+          )
+        ) {
+          return;
+        }
+        const callback = await this.#publishStatus(
+          current.state === "completed"
+            ? this.#completedStatus(current)
+            : this.#failedStatus(current),
+          current.callback,
+        );
+        await updateDeliveryRecord(this.#stateRepoPath, {
+          ...current,
+          callback,
+          updatedAt: this.#configuration.now().toISOString(),
         });
-        continue;
-      }
-      if (
-        (delivery.state !== "queued" && delivery.state !== "processing") ||
-        !delivery.request
-      ) {
-        continue;
-      }
-      await this.#withDeliveryLease(delivery.deliveryId, async (lease) => {
+      });
+      return false;
+    }
+    if (
+      (delivery.state !== "queued" && delivery.state !== "processing") ||
+      !delivery.request
+    ) {
+      return false;
+    }
+    const released = await this.#withDeliveryLease(delivery.deliveryId, async (lease) => {
         const current = await getGitHubWebhookDelivery(
           this.#stateRepoPath,
           delivery.deliveryId,
@@ -2591,7 +2604,7 @@ export class GitHubWebhookIntake {
           (current.state !== "queued" && current.state !== "processing") ||
           !current.request
         ) {
-          return;
+          return false;
         }
         const processing: GitHubWebhookDeliveryRecord = {
           ...current,
@@ -2618,7 +2631,19 @@ export class GitHubWebhookIntake {
               lease: undefined,
               updatedAt: this.#configuration.now().toISOString(),
             });
-            return;
+            return false;
+          }
+          if (wakeClaim === "blocked") {
+            // Temporary lease conflict. The delivery stays queued and is not
+            // marked coalesced, so the lead is still processed after the
+            // current owner releases its own lease.
+            await updateDeliveryRecord(this.#stateRepoPath, {
+              ...current,
+              state: "queued",
+              lease: undefined,
+              updatedAt: this.#configuration.now().toISOString(),
+            });
+            return false;
           }
           wakeClaimed = true;
           const target = await this.#resolveRepository(
@@ -2659,20 +2684,24 @@ export class GitHubWebhookIntake {
           });
           wakeClaimed = false;
           try {
-            finishWorkWake(this.#stateRepoPath, {
+            const finished = finishWorkWake(this.#stateRepoPath, {
               domain: wakeDomain,
               deliveryId: current.deliveryId,
+              owner: `delivery:${current.deliveryId}`,
               now: this.#configuration.now().toISOString(),
             });
+            if (finished === "released") return true;
           } catch {
             // The delivery already names its task. A later wake can proceed
             // once this lease expires.
           }
+          return false;
         } catch {
           if (wakeClaimed) {
             releaseWorkWake(this.#stateRepoPath, {
               domain: wakeDomain,
               deliveryId: current.deliveryId,
+              owner: `delivery:${current.deliveryId}`,
               now: this.#configuration.now().toISOString(),
             });
           }
@@ -2707,24 +2736,25 @@ export class GitHubWebhookIntake {
               updatedAt: this.#configuration.now().toISOString(),
             });
           }
+          return false;
         }
-      });
-    }
+    });
+    return released === true;
   }
 
-  async #withDeliveryLease(
+  async #withDeliveryLease<T>(
     deliveryId: string,
-    action: (lease: GitHubWebhookDeliveryLease) => Promise<void>,
-  ): Promise<void> {
+    action: (lease: GitHubWebhookDeliveryLease) => Promise<T>,
+  ): Promise<T | undefined> {
     const lease = await acquireDeliveryLease(this.#stateRepoPath, {
       deliveryId,
       ownerId: this.#leaseOwnerId,
       now: this.#configuration.now(),
       durationMs: this.#leaseDurationMs,
     });
-    if (!lease) return;
+    if (!lease) return undefined;
     try {
-      await action(lease);
+      return await action(lease);
     } finally {
       await releaseDeliveryLease(this.#stateRepoPath, lease).catch(() => {});
     }

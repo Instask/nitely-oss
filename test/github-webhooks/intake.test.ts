@@ -14,6 +14,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  claimWorkWake,
+  finishWorkWake,
+} from "../../src/coordination/claims.js";
+import {
   GitHubWebhookIntake,
   getGitHubWebhookDelivery,
   githubWebhookConfigurationFromEnv,
@@ -1546,6 +1550,99 @@ describe("GitHub webhook intake", () => {
       reason: "coalesced",
     });
     await expect(listTasks(repoPath)).resolves.toHaveLength(1);
+  });
+
+  it("keeps a newer delivery queued while an older wake lease is held", async () => {
+    const repoPath = await createRepo();
+    const service = intake(repoPath);
+    const issue = issuePayload().issue as Record<string, unknown>;
+    const wakeDomain = "github-issue:acme/widgets#7";
+    await service.accept(signedDelivery({
+      deliveryId: "issue-old",
+      payload: issuePayload({
+        issue: { ...issue, updated_at: "2026-07-16T03:59:10.000Z" },
+      }),
+    }));
+    expect(claimWorkWake(repoPath, {
+      domain: wakeDomain,
+      deliveryId: "issue-old",
+      owner: "delivery:issue-old",
+      now: "2026-07-16T04:00:00.000Z",
+      leaseMs: 120_000,
+    })).toBe("process");
+    await service.accept(signedDelivery({
+      deliveryId: "issue-new",
+      payload: issuePayload({
+        issue: { ...issue, updated_at: "2026-07-16T03:59:50.000Z" },
+      }),
+    }));
+
+    await service.drain();
+
+    await expect(getGitHubWebhookDelivery(repoPath, "issue-new")).resolves.toMatchObject({
+      state: "queued",
+    });
+    const blocked = await getGitHubWebhookDelivery(repoPath, "issue-new");
+    expect(blocked.taskId).toBeUndefined();
+    expect(blocked.reason).toBeUndefined();
+    await expect(listTasks(repoPath)).resolves.toHaveLength(0);
+    expect(finishWorkWake(repoPath, {
+      domain: wakeDomain,
+      deliveryId: "issue-old",
+      owner: "delivery:issue-old",
+      now: "2026-07-16T04:00:01.000Z",
+    })).toBe("released");
+
+    await service.drain();
+
+    await expect(getGitHubWebhookDelivery(repoPath, "issue-new")).resolves.toMatchObject({
+      state: "completed",
+      taskId: expect.stringMatching(/^github-delivery-/),
+    });
+    await expect(listTasks(repoPath)).resolves.toHaveLength(1);
+  });
+
+  it("processes a newer delivery that arrives while the older one is creating a task", async () => {
+    const repoPath = await createRepo();
+    const issue = issuePayload().issue as Record<string, unknown>;
+    let service: GitHubWebhookIntake;
+    let injected = false;
+    service = new GitHubWebhookIntake({
+      stateRepoPath: repoPath,
+      configuration: configuration(),
+      resolveRepository: async () => {
+        if (!injected) {
+          injected = true;
+          await service.accept(signedDelivery({
+            deliveryId: "issue-during",
+            payload: issuePayload({
+              issue: { ...issue, updated_at: "2026-07-16T03:59:50.000Z" },
+            }),
+          }));
+        }
+        return { id: "default", path: repoPath };
+      },
+    });
+    await service.accept(signedDelivery({
+      deliveryId: "issue-in-progress",
+      payload: issuePayload({
+        issue: { ...issue, updated_at: "2026-07-16T03:59:10.000Z" },
+      }),
+    }));
+
+    await service.drain();
+
+    await expect(getGitHubWebhookDelivery(repoPath, "issue-in-progress")).resolves.toMatchObject({
+      state: "completed",
+      taskId: expect.stringMatching(/^github-delivery-/),
+    });
+    const arrived = await getGitHubWebhookDelivery(repoPath, "issue-during");
+    expect(arrived.reason).not.toBe("coalesced");
+    expect(arrived).toMatchObject({
+      state: "completed",
+      taskId: expect.stringMatching(/^github-delivery-/),
+    });
+    await expect(listTasks(repoPath)).resolves.toHaveLength(2);
   });
 
   it("parses complete environment configuration and fails closed when partial", () => {
