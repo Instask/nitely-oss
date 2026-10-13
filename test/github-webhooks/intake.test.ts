@@ -31,7 +31,10 @@ import {
   taskSourceInputUri,
   updateTaskRunState,
 } from "../../src/web/tasks.js";
-import { listTaskReworkRequests } from "../../src/web/task-rework-requests.js";
+import {
+  cancelTaskReworkRequest,
+  listTaskReworkRequests,
+} from "../../src/web/task-rework-requests.js";
 
 const secret = "webhook-secret-for-tests";
 const now = new Date("2026-07-16T04:00:00.000Z");
@@ -128,6 +131,51 @@ function pullRequestReviewCommentPayload(
     },
     ...overrides,
   };
+}
+
+function reviewCommentDelivery(input: {
+  id: number;
+  body: string;
+  createdAt: string;
+}): Record<string, unknown> {
+  const payload = pullRequestReviewCommentPayload();
+  const comment = payload.comment as Record<string, unknown>;
+  return pullRequestReviewCommentPayload({
+    comment: {
+      ...comment,
+      id: input.id,
+      html_url: `https://github.com/acme/widgets/pull/9#discussion_r${input.id}`,
+      body: input.body,
+      created_at: input.createdAt,
+      updated_at: input.createdAt,
+    },
+  });
+}
+
+async function completedPullRequestTask(repoPath: string) {
+  const task = await createTask(
+    repoPath,
+    {
+      title: "Completed PR task",
+      spec: "# Spec\n\nApproved.",
+      techDesign: "# Design\n\nApproved.",
+      repoId: "default",
+      flowPath: "flows/implement-spec-bootstrap.json",
+    },
+    {
+      createId: () => "task-pr-9",
+      repoId: "default",
+      initialStatus: "ready",
+      specStatus: "approved",
+      techDesignStatus: "approved",
+    },
+  );
+  await updateTaskRunState(repoPath, task.id, {
+    status: "completed",
+    latestRunId: "run-pr-9",
+    changeRequestUrl: "https://github.com/acme/widgets/pull/9",
+  });
+  return task;
 }
 
 function signedDelivery(input: {
@@ -1643,6 +1691,128 @@ describe("GitHub webhook intake", () => {
       taskId: expect.stringMatching(/^github-delivery-/),
     });
     await expect(listTasks(repoPath)).resolves.toHaveLength(2);
+  });
+
+  it("keeps two review comments on one pull request as separate records", async () => {
+    const repoPath = await createRepo();
+    const task = await completedPullRequestTask(repoPath);
+    const service = intake(repoPath, repoPath, { triggerMentions: ["nitely"] });
+    const olderInstruction = "add a regression test for this branch";
+    const newerInstruction = "rename the helper and keep its tests";
+    await service.accept(signedDelivery({
+      deliveryId: "review-older",
+      event: "pull_request_review_comment",
+      payload: reviewCommentDelivery({
+        id: 100,
+        body: `@nitely rework ${olderInstruction}`,
+        createdAt: "2026-07-16T03:59:10.000Z",
+      }),
+    }));
+    await service.accept(signedDelivery({
+      deliveryId: "review-newer",
+      event: "pull_request_review_comment",
+      payload: reviewCommentDelivery({
+        id: 200,
+        body: `@nitely rework ${newerInstruction}`,
+        createdAt: "2026-07-16T03:59:40.000Z",
+      }),
+    }));
+
+    await service.drain();
+
+    const older = await getGitHubWebhookDelivery(repoPath, "review-older");
+    const newer = await getGitHubWebhookDelivery(repoPath, "review-newer");
+    expect(older.reason).not.toBe("coalesced");
+    expect(newer.reason).not.toBe("coalesced");
+    expect(older.request).toMatchObject({
+      comment: { id: "100" },
+      feedback: { instruction: olderInstruction },
+    });
+    expect(newer.request).toMatchObject({
+      comment: { id: "200" },
+      feedback: { instruction: newerInstruction },
+    });
+    const done = [older, newer].filter((record) => record.state === "completed");
+    const waiting = [older, newer].filter((record) => record.state === "queued");
+    expect(done).toHaveLength(1);
+    expect(waiting).toHaveLength(1);
+    expect(done[0]?.reworkRequestId).toEqual(expect.stringMatching(/^tcr_/));
+    expect(waiting[0]?.taskId).toBeUndefined();
+    const firstRequests = await listTaskReworkRequests(repoPath, task.id);
+    expect(firstRequests).toHaveLength(1);
+    expect(firstRequests[0]?.instruction).toBe(
+      done[0]?.request?.kind === "ReworkRequest"
+        ? done[0].request.feedback.instruction
+        : undefined,
+    );
+    expect(waiting[0]?.request?.kind === "ReworkRequest"
+      ? waiting[0].request.feedback.instruction
+      : undefined).not.toBe(firstRequests[0]?.instruction);
+
+    await cancelTaskReworkRequest({
+      repoPath,
+      taskId: task.id,
+      requestId: firstRequests[0]!.id,
+    });
+    await service.drain();
+
+    const resumedId = waiting[0]!.deliveryId;
+    const resumed = await getGitHubWebhookDelivery(repoPath, resumedId);
+    expect(resumed).toMatchObject({
+      state: "completed",
+      taskId: task.id,
+      reworkRequestId: expect.stringMatching(/^tcr_/),
+    });
+    expect(resumed.reason).toBeUndefined();
+    const requests = await listTaskReworkRequests(repoPath, task.id);
+    expect(requests.map((request) => request.instruction).sort()).toEqual([
+      newerInstruction,
+      olderInstruction,
+    ].sort());
+    expect(requests.map((request) => request.idempotencyKey)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("comment:100"),
+        expect.stringContaining("comment:200"),
+      ]),
+    );
+  });
+
+  it("coalesces a second delivery of the same review comment", async () => {
+    const repoPath = await createRepo();
+    const task = await completedPullRequestTask(repoPath);
+    const service = intake(repoPath, repoPath, { triggerMentions: ["nitely"] });
+    const payload = reviewCommentDelivery({
+      id: 100,
+      body: "@nitely rework add a regression test for this branch",
+      createdAt: "2026-07-16T03:59:50.000Z",
+    });
+    await service.accept(signedDelivery({
+      deliveryId: "review-same-a",
+      event: "pull_request_review_comment",
+      payload,
+    }));
+    await service.accept(signedDelivery({
+      deliveryId: "review-same-b",
+      event: "pull_request_review_comment",
+      payload,
+    }));
+
+    await service.drain();
+
+    const first = await getGitHubWebhookDelivery(repoPath, "review-same-a");
+    const second = await getGitHubWebhookDelivery(repoPath, "review-same-b");
+    const records = [first, second];
+    expect(records.filter((record) => record.reason === "coalesced")).toHaveLength(1);
+    expect(records.filter((record) => record.reworkRequestId)).toHaveLength(1);
+    for (const record of records) {
+      expect(record.request).toMatchObject({
+        comment: { id: "100" },
+        feedback: { instruction: "add a regression test for this branch" },
+      });
+    }
+    const requests = await listTaskReworkRequests(repoPath, task.id);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.idempotencyKey).toContain("comment:100");
   });
 
   it("parses complete environment configuration and fails closed when partial", () => {

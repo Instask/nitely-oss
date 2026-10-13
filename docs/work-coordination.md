@@ -7,7 +7,7 @@ rule is not a claim.
 
 Scheduler leases and run admission stay separate. This gate covers the side
 effect itself: the GitHub publish or update, the same-pull-request CI repair,
-and webhook wakes for one issue or pull request.
+and webhook wakes for one issue or one review comment.
 
 ## Conflict domains
 
@@ -56,16 +56,23 @@ GitHub again. An unknown key means the effect already started; Nitely does not
 guess that it failed and does not replay it. A claim held by another key
 conflicts. Aborting a claim that has not started releases it.
 
-Webhook intake records one wake per issue or pull request. A newer event
-becomes the lead. An older or duplicate delivery is stored and does not create
-a second task. A newer lead that arrives while the previous delivery still
-holds an unexpired lease stays queued. It is not marked completed. Only the
-lease owner can release that lease, and an older worker cannot clear a lease
-the newer lead already took. When the owner finishes or the task creation
-fails, intake drains the queue again and creates the new lead's task. The
-lead's task is created before the wake is finished, so a crash in between
-retries the same delivery instead of dropping it. A delivery with no wake row
-is still processed. If that delivery is queued again after the wake was
+Webhook intake records one wake per issue for issue activations. A newer
+activation becomes the lead. An older or duplicate delivery of that issue is
+stored and does not create a second task. A pull request review comment does
+not share a wake with the pull request or with any other comment. Its wake
+includes the comment id. Intake coalesces a review comment only with another
+delivery of that same comment. A different comment keeps its own comment id,
+instruction, and delivery record. When the task already has an active rework
+request, that comment stays queued until the active request is no longer
+active. It is not marked coalesced, and it is not recorded as a processing
+failure. A newer lead that arrives while the previous delivery still holds an
+unexpired lease stays queued. It is not marked completed. Only the lease
+owner can release that lease, and an older worker cannot clear a lease the
+newer lead already took. When the owner finishes or the task creation fails,
+intake drains the queue again and creates the new lead's task. The lead's
+task is created before the wake is finished, so a crash in between retries
+the same delivery instead of dropping it. A delivery with no wake row is
+still processed. If that delivery is queued again after the wake was
 finished, the lead is claimed again and the existing task is reused.
 
 Hold, conflict, and unknown decisions are written to the attempt's

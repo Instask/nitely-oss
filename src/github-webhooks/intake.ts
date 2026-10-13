@@ -33,6 +33,7 @@ import {
   type TaskSourceRecord,
   type TaskSourceSnapshot,
 } from "../web/tasks.js";
+import { WebInputError } from "../web/errors.js";
 import {
   createTaskReworkRequest,
   defaultTaskReworkFlowPath,
@@ -2696,7 +2697,30 @@ export class GitHubWebhookIntake {
             // once this lease expires.
           }
           return false;
-        } catch {
+        } catch (error) {
+          if (
+            wakeClaimed &&
+            current.request.kind === "ReworkRequest" &&
+            error instanceof WebInputError &&
+            error.message.includes("already has an active rework request")
+          ) {
+            // A different review comment is not a duplicate of the one that
+            // already holds the task's rework slot. Keep this delivery queued,
+            // with its own comment id and instruction, until that slot is free.
+            releaseWorkWake(this.#stateRepoPath, {
+              domain: wakeDomain,
+              deliveryId: current.deliveryId,
+              owner: `delivery:${current.deliveryId}`,
+              now: this.#configuration.now().toISOString(),
+            });
+            await updateDeliveryRecord(this.#stateRepoPath, {
+              ...current,
+              state: "queued",
+              lease: undefined,
+              updatedAt: this.#configuration.now().toISOString(),
+            });
+            return false;
+          }
           if (wakeClaimed) {
             releaseWorkWake(this.#stateRepoPath, {
               domain: wakeDomain,
@@ -2761,11 +2785,27 @@ export class GitHubWebhookIntake {
   }
 }
 
+const WORK_WAKE_DOMAIN = /^[A-Za-z0-9][A-Za-z0-9:._#/@+-]{0,200}$/;
+
 function workWakeDomain(request: GitHubWebhookRequest): string {
   if (request.kind === "ExecutionRequest") {
     return `github-issue:${request.repository.fullName}#${request.source.number}`;
   }
-  return `github-pr:${request.repository.fullName}#${request.pullRequest.number}`;
+  // Same pull request is not enough. Two review comments are different
+  // instructions, and the newer payload does not contain the older one.
+  // Coalesce only another delivery of this comment id.
+  return commentWakeDomain(
+    `github-pr:${request.repository.fullName}#${request.pullRequest.number}`,
+    request.comment.id,
+  );
+}
+
+function commentWakeDomain(base: string, commentId: string): string {
+  const named = `${base}:comment:${commentId}`;
+  if (WORK_WAKE_DOMAIN.test(named)) return named;
+  const hashed = `${base}:comment:${sha256(commentId).slice(0, 16)}`;
+  if (WORK_WAKE_DOMAIN.test(hashed)) return hashed;
+  return `gh-comment:${sha256(`${base}\0${commentId}`).slice(0, 32)}`;
 }
 
 function mergeStatusPublication(
