@@ -76,10 +76,11 @@ and `write.scope: "worktree"` for implementation:
 The local backend maps explicit write bounds to native runtime controls where
 available: Codex uses `read-only` or `workspace-write`, and Claude uses its
 permission mode. A local runtime that cannot enforce a required read-only
-stage fails before launch. Path allowlists, network policy, and command
-mediation without a native mechanism remain recorded as advisory until the
-OCI capability enforcement path is selected. Do not treat an advisory entry
-as a security boundary.
+stage fails before launch. Path allowlists and network policy stay advisory
+until the backend can enforce them. Command mediation is enforced on the OCI
+backend when `commands.advisory` is false; see
+[OCI command mediation](oci-command-mediation.md). The local backend fails
+closed on that demand. Do not treat an advisory entry as a security boundary.
 
 ## Artifact Contracts
 

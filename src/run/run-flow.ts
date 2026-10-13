@@ -317,7 +317,10 @@ import {
   createExecutionBackend,
   normalizeExecutionBackendName,
 } from "./execution/backend.js";
-import { formatExecutionBackendEvidence } from "./execution/evidence.js";
+import {
+  collectCommandMediationEvidence,
+  formatExecutionBackendEvidence,
+} from "./execution/evidence.js";
 import {
   requireCodexSandboxMode,
   type RunSandboxPolicy,
@@ -11329,6 +11332,12 @@ async function writeEvidence(input: {
   const executionBackendLines = input.executionBackend
     ? formatExecutionBackendEvidence(input.executionBackend)
     : "not available";
+  const commandMediationLines = await collectCommandMediationEvidence(
+    input.runDirectory,
+  );
+  const executionSandboxLines = commandMediationLines
+    ? `${executionBackendLines}\n${commandMediationLines}`
+    : executionBackendLines;
   const riskLines = input.riskClassification
     ? redactRuntimeText(
         renderRiskClassificationMarkdown({
@@ -11822,7 +11831,7 @@ async function writeEvidence(input: {
     "",
     "## Execution Sandbox",
     "",
-    executionBackendLines,
+    executionSandboxLines,
     "",
     "## Risk Classification",
     "",

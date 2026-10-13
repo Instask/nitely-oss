@@ -44,6 +44,7 @@ export const REQUIRED_PACKED_FILES = [
   "LICENSE",
   "NOTICE",
   "dist/index.js",
+  "dist/run/execution/command-mediator.py",
   "dist/api.js",
   "dist/api.d.ts",
   "dist/runner-control-plane/protocol.js",

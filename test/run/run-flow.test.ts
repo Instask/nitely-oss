@@ -302,6 +302,41 @@ describe("runFlow", () => {
             "implemented\n",
             "utf8",
           );
+          await writeFile(
+            join(attemptDirectory, "command-mediation.jsonl"),
+            [
+              JSON.stringify({
+                event: "effective",
+                mechanism: "oci-ptrace-seccomp",
+                mode: "allow-list",
+                policyId: "commands/v1:allow-list:enforced:allow(git):deny(none)",
+                advisory: false,
+              }),
+              JSON.stringify({
+                event: "decision",
+                decision: "deny",
+                program: "curl",
+                argc: 2,
+                rule: "curl",
+                reason: "denied by deny rule curl",
+              }),
+              JSON.stringify({
+                event: "decision",
+                decision: "deny",
+                program: "curl",
+                argc: 2,
+                rule: "curl",
+                reason: "denied by deny rule curl",
+                argv: ["curl", "https://user:super-secret-value@example.test"],
+              }),
+              JSON.stringify({
+                event: "supervisor-exit",
+                decisions: 1,
+                denials: 1,
+              }),
+            ].join("\n"),
+            "utf8",
+          );
           return { stdout: "done\n" };
         }),
         describeExecution: () => ({
@@ -355,6 +390,8 @@ describe("runFlow", () => {
       expect(evidence).toContain(
         "Secret names: OPENAI_API_KEY (values omitted)",
       );
+      expect(evidence).toContain("denied curl rule curl argc 2");
+      expect(evidence).toContain("supervisor exit recorded");
       expect(evidence).not.toContain("super-secret-value");
     },
   );
