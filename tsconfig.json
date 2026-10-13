@@ -9,5 +9,11 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts"]
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "vitest.config.ts",
+    "scripts/packed-package-inspect.ts",
+    "scripts/package-install-smoke.mts"
+  ]
 }

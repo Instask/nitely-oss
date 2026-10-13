@@ -141,7 +141,11 @@ CI runs these on Linux for every pull request; see [AGENTS.md](AGENTS.md) and
 pnpm run check
 pnpm run test:run
 pnpm run build
+pnpm run package:smoke
 ```
+
+`package:smoke` installs the packed tarball in a clean project and runs the
+mocked golden path from that install.
 
 ## License
 
