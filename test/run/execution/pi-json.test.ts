@@ -115,7 +115,8 @@ describe("createPiJsonCapture", () => {
     const lines = stream.split("\n");
     const cut = lines.findIndex((line) => line.includes('"delta":"Done"'));
     const truncated = `${lines.slice(0, cut + 1).join("\n")}\n{"type":"message_up`;
-    expect(readPiJsonStream(captureOf(truncated, 5))).toEqual(readPiJsonStream(truncated));
+    const options = { observedAt: new Date("2026-10-08T09:00:00.000Z") };
+    expect(readPiJsonStream(captureOf(truncated, 5), options)).toEqual(readPiJsonStream(truncated, options));
   });
 
   it("skips a huge agent_end without buffering it and still sees willRetry", () => {
