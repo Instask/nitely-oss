@@ -104,13 +104,25 @@ jobs:
       # Stop the rootful daemon first: with it running, a test could pass
       # against the wrong engine. The backend also refuses a non-rootless
       # engine, and the suite asserts `rootless` in SecurityOptions.
+      # The hosted image ships moby without the rootless extras, so the daemon
+      # comes from Docker's pinned static bundle. The preinstalled CLI and its
+      # buildx plugin talk to it through DOCKER_HOST.
       - name: Start rootless Docker
+        env:
+          DOCKER_STATIC_VERSION: 27.3.1
         run: |
           set -euxo pipefail
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            uidmap slirp4netns docker-ce-rootless-extras
+            uidmap slirp4netns
+          bundle="$RUNNER_TEMP/docker-static"
+          mkdir -p "$bundle"
+          for archive in docker docker-rootless-extras; do
+            curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/${archive}-${DOCKER_STATIC_VERSION}.tgz" \
+              | tar -xz -C "$bundle"
+          done
+          daemon_path="$bundle/docker:$bundle/docker-rootless-extras:$PATH"
           sudo systemctl disable --now docker.service docker.socket
           sudo rm -f /var/run/docker.sock
           grep -q "^$(id -un):" /etc/subuid || echo "$(id -un):100000:65536" | sudo tee -a /etc/subuid
@@ -119,7 +131,7 @@ jobs:
           sudo mkdir -p "$runtime_dir"
           sudo chown "$(id -u):$(id -g)" "$runtime_dir"
           chmod 700 "$runtime_dir"
-          XDG_RUNTIME_DIR="$runtime_dir" nohup dockerd-rootless.sh \
+          PATH="$daemon_path" XDG_RUNTIME_DIR="$runtime_dir" nohup dockerd-rootless.sh \
             > "$RUNNER_TEMP/dockerd-rootless.log" 2>&1 &
           echo "XDG_RUNTIME_DIR=$runtime_dir" >> "$GITHUB_ENV"
           echo "DOCKER_HOST=unix://$runtime_dir/docker.sock" >> "$GITHUB_ENV"
