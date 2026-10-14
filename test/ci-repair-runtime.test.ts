@@ -103,7 +103,8 @@ describe("CI repair runtime", () => {
         action: "repair",
         pull: { owner: "acme", repository: "nitely", number: 42 },
       }),
-      observedHead: "bbbbbbb",
+      // Completes now, after the failure was observed on 2026-09-18.
+      observedAt: "2026-09-17T00:00:00.000Z",
       runId: "earlier-repair",
       idempotencyKey: "earlier-repair",
       effect: async () => ({ head: "bbbbbbb" }),
@@ -139,7 +140,7 @@ describe("CI repair runtime", () => {
         action: "repair",
         pull: { owner: "acme", repository: "nitely", number: 42 },
       }),
-      observedHead: observation.headSha,
+      observedAt: observation.observedAt,
       runId: `ci-repair:${idempotencyKey}`,
       idempotencyKey,
       effect: async () => ({ head: "bbbbbbb" }),

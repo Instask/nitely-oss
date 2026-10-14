@@ -169,6 +169,13 @@ export async function submitCiRepair(input: {
       });
     }
     const admissionCurrentHeadSha = claimed.samePullRequestUpdate?.updatedHeadSha ?? input.currentHeadSha;
+    // The failure was observed on its head at observation.observedAt. Another
+    // owner's mutation of this pull request after that holds the repair. An
+    // unreadable or future time falls back to admission, which is now.
+    const failureObservedAt = Date.parse(input.observation.observedAt);
+    const admissionObservedAt = new Date(
+      Number.isFinite(failureObservedAt) ? Math.min(failureObservedAt, Date.now()) : Date.now(),
+    ).toISOString();
     const admission = evaluateCiRepairAdmission({
       observation: input.observation,
       currentHeadSha: admissionCurrentHeadSha,
@@ -219,7 +226,7 @@ export async function submitCiRepair(input: {
               number: input.observation.pullRequest,
             },
           }),
-          observedHead: admissionCurrentHeadSha,
+          observedAt: admissionObservedAt,
           runId: `ci-repair:${idempotencyKey}`,
           idempotencyKey,
           effect: () => input.dependencies.applySamePullRequestRepair(repairInput),
