@@ -17,8 +17,8 @@ against the default branch, and deployments build from this repository.
 
 ## Verification Boundary
 
-`.github/workflows/ci.yml` runs two Linux jobs for every PR and every push
-to the default branch. Both are the merge gate.
+`.github/workflows/ci.yml` runs three Linux jobs for every PR and every push
+to the default branch. All three are the merge gate.
 
 - `Typecheck and tests` runs `pnpm run check` and `pnpm run test:run`.
 - `Built package smoke` runs `pnpm run build`, packs the tarball users
@@ -27,6 +27,11 @@ to the default branch. Both are the merge gate.
   Web assets, and `nitely smoke golden-path` with mocked providers. A broken
   `bin` or `exports` path fails this job. On failure it uploads command logs
   and golden-path proof flags, not the fixture repository or run evidence.
+- `Rootless OCI integration` starts a real rootless dockerd on a GitHub-hosted
+  x86_64 VM, builds the runner image, and runs the OCI tests that need a real
+  daemon: bind mounts, the egress boundary, command mediation for Claude and
+  Pi workflows, supervisor-crash cleanup, and fail-closed admission. The job
+  fails if any of those tests is skipped rather than passed.
 
 - **Never describe a failure as a pre-existing baseline and merge past it.** If
   `pnpm run check` is red, either the fix belongs in your PR or your PR waits.
