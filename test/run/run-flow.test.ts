@@ -6127,7 +6127,7 @@ describe("runFlow", () => {
                 "const { writeFileSync } = require('node:fs');",
                 "const { join } = require('node:path');",
                 "writeFileSync(join(process.env.NITELY_ATTEMPT_DIR, 'command-started'), 'started');",
-                "setTimeout(() => {}, 5000);",
+                "setTimeout(() => {}, 30000);",
               ].join(" "),
             ),
             maxAttempts: 1,
@@ -6165,7 +6165,39 @@ describe("runFlow", () => {
       "command-started",
     );
 
-    await waitForFile(startedPath);
+    // Creating the worktree and spawning the command can take longer than a
+    // couple of seconds when the suite is contending for CPU. The marker file
+    // is written before the command sleeps, so this wait is only for startup.
+    let runEnded:
+      | { status: "completed" }
+      | { status: "failed"; error: unknown }
+      | undefined;
+    const watchRun = execution.then(
+      () => {
+        runEnded = { status: "completed" };
+      },
+      (error: unknown) => {
+        runEnded = { status: "failed", error };
+      },
+    );
+    try {
+      await Promise.race([waitForFile(startedPath, 20_000), watchRun]);
+    } catch (error) {
+      controller.abort(request);
+      throw error;
+    }
+    if (runEnded?.status === "failed") {
+      const message =
+        runEnded.error instanceof Error ? runEnded.error.message : String(runEnded.error);
+      throw new Error(
+        `run failed before the command wrote command-started: ${message}`,
+        { cause: runEnded.error },
+      );
+    }
+    if (runEnded?.status === "completed") {
+      throw new Error("run completed before the command wrote command-started");
+    }
+
     controller.abort(request);
 
     await expect(execution).rejects.toThrow(/operator requested stop|run cancelled/);
@@ -6209,6 +6241,7 @@ describe("runFlow", () => {
       ]),
     );
     },
+    45_000,
   );
 
   it("records command environment repairs in events, preflight, and evidence", async () => {
