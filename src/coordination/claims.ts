@@ -46,7 +46,8 @@ export type GuardedMutation<T> =
       nextCursor: string;
       delta: string[];
     }
-  | { decision: "conflict"; ownerRunId: string }
+  /** `ownerKey` is set when the owner's effect started and never finished. */
+  | { decision: "conflict"; ownerRunId: string; ownerKey?: string }
   | { decision: "unknown"; reason: "effect-started" };
 
 export type WakeRole = "lead" | "duplicate" | "stale" | "coalesced";
@@ -60,6 +61,8 @@ interface WorldRow {
   revision: number;
   head: string;
   summary: string;
+  updated_at: string;
+  run_id: string;
 }
 
 interface ClaimRow {
@@ -163,26 +166,29 @@ export class CoordinationStore {
         updated_at TEXT NOT NULL
       ) STRICT;
     `);
+    // Stores created before the mutating run was recorded get the column.
+    // An empty owner is never this run, so those rows stay conservative.
+    const worldColumns = this.#database.prepare("PRAGMA table_info(world)").all() as { name: string }[];
+    if (!worldColumns.some((column) => column.name === "run_id")) {
+      this.#database.exec("ALTER TABLE world ADD COLUMN run_id TEXT NOT NULL DEFAULT '';");
+    }
   }
 
   close(): void {
     this.#database.close();
   }
 
-  snapshot(domains: readonly string[], observedHead: string): Record<string, string> {
-    const head = normalizeHead(observedHead);
-    const cursors: Record<string, string> = {};
-    for (const domain of domains) {
-      assertDomain(domain);
-      const world = this.#world(domain);
-      cursors[domain] = world ? `${world.revision}:${head}` : `0:${head}`;
-    }
-    return cursors;
-  }
-
+  /**
+   * `observedAt` is when the caller read the world it is about to act on:
+   * the run's creation, or the CI-repair admission. A domain is stale when
+   * another owner completed a mutation of it at or after that instant. A
+   * head the caller observed that Nitely did not record (a human push) is
+   * part of what it observed, not a newer state; non-forced pushes and the
+   * provider reject a mutation built on a head that moved after that.
+   */
   propose(input: {
     domains: readonly string[];
-    seen: Record<string, string>;
+    observedAt: string;
     runId: string;
     idempotencyKey: string;
     now?: string;
@@ -190,6 +196,7 @@ export class CoordinationStore {
     const domains = [...input.domains];
     if (domains.length === 0) throw new Error("work claim requires a conflict domain");
     for (const domain of domains) assertDomain(domain);
+    const observedAt = observationInstant(input.observedAt);
     const actionDomain = domains.find((domain) => domain.startsWith("action:")) ?? domains[0]!;
     const now = input.now ?? new Date().toISOString();
     return this.#transaction(() => {
@@ -207,20 +214,18 @@ export class CoordinationStore {
       const stale: string[] = [];
       for (const domain of domains) {
         const world = this.#world(domain);
-        const seen = input.seen[domain];
-        const current = world ? `${world.revision}:${world.head}` : `0:${headOf(seen)}`;
-        if (seen !== current) {
+        if (world && world.run_id !== input.runId && world.updated_at >= observedAt) {
           stale.push(deltaLine(domain, world));
         }
       }
       if (stale.length > 0) {
-        const seenCursor = input.seen[actionDomain] ?? "";
+        const seenCursor = `at:${observedAt}`;
         const prior = this.#database.prepare(
           "SELECT 1 AS present FROM holds WHERE domain = ? AND run_id = ? AND seen_cursor = ?",
         ).get(actionDomain, input.runId, seenCursor) as { present: number } | undefined;
         const nextCursor = (() => {
           const world = this.#world(actionDomain);
-          return world ? `${world.revision}:${world.head}` : `0:${headOf(seenCursor)}`;
+          return world ? `${world.revision}:${world.head}` : "0:none";
         })();
         const delta = stale.slice(0, DELTA_LIMIT);
         if (prior) {
@@ -239,15 +244,17 @@ export class CoordinationStore {
 
       for (const domain of domains) {
         const active = this.#database.prepare(
-          `SELECT run_id, idempotency_key FROM claims
+          `SELECT run_id, idempotency_key, status FROM claims
            WHERE domain = ? AND status IN ('claimed', 'unknown')`,
-        ).get(domain) as { run_id: string; idempotency_key: string } | undefined;
+        ).get(domain) as { run_id: string; idempotency_key: string; status: "claimed" | "unknown" } | undefined;
         if (active && active.idempotency_key !== input.idempotencyKey) {
-          return { decision: "conflict", ownerRunId: active.run_id };
+          return active.status === "unknown"
+            ? { decision: "conflict", ownerRunId: active.run_id, ownerKey: active.idempotency_key }
+            : { decision: "conflict", ownerRunId: active.run_id };
         }
       }
       for (const domain of domains) {
-        const seen = input.seen[domain] ?? "";
+        const seen = `at:${observedAt}`;
         this.#database.prepare(`
           INSERT INTO claims (
             domain, idempotency_key, run_id, seen_cursor, status, result_json, updated_at
@@ -306,20 +313,84 @@ export class CoordinationStore {
         if (Number(updated.changes) !== 1) {
           throw new Error(`work claim for ${domain} cannot be completed`);
         }
-        const world = this.#world(domain);
-        const revision = (world?.revision ?? 0) + 1;
-        const summary = `head ${head}`;
-        this.#database.prepare(`
-          INSERT INTO world (domain, revision, head, summary, updated_at)
-          VALUES (?, ?, ?, ?, ?)
-          ON CONFLICT(domain) DO UPDATE SET
-            revision = excluded.revision,
-            head = excluded.head,
-            summary = excluded.summary,
-            updated_at = excluded.updated_at
-        `).run(domain, revision, head, summary, now);
+        this.#advanceWorld(domain, head, input.runId, now);
       }
     });
+  }
+
+  /**
+   * An operator's answer for a claim whose effect started and never
+   * reported back. Nitely cannot tell whether a GitHub push or pull request
+   * happened, so it never decides this itself. `applied` records the effect
+   * as completed, so other runs that observed the world before now are held.
+   * `not-applied` drops the claim, so its domains are free again; that same
+   * key may then run its effect once more.
+   */
+  resolveUnknown(input: {
+    idempotencyKey: string;
+    outcome: "applied" | "not-applied";
+    head?: string;
+    url?: string;
+    now?: string;
+  }): { runId: string; domains: string[] } {
+    const now = input.now ?? new Date().toISOString();
+    return this.#transaction(() => {
+      const rows = this.#database.prepare(
+        `SELECT domain, run_id FROM claims WHERE idempotency_key = ? AND status = 'unknown'`,
+      ).all(input.idempotencyKey) as { domain: string; run_id: string }[];
+      if (rows.length === 0) {
+        throw new Error(`no unknown work claim has idempotency key ${input.idempotencyKey}`);
+      }
+      const runId = rows[0]!.run_id;
+      const domains = rows.map((row) => row.domain);
+      if (input.outcome === "not-applied") {
+        this.#database.prepare(
+          `DELETE FROM claims WHERE idempotency_key = ? AND status = 'unknown'`,
+        ).run(input.idempotencyKey);
+        return { runId, domains };
+      }
+      const head = normalizeHead(input.head ?? "none");
+      const record = JSON.stringify({ url: input.url, head });
+      if (record.length > 500) throw new Error("work claim result is too large");
+      for (const domain of domains) {
+        this.#database.prepare(`
+          UPDATE claims SET status = 'completed', result_json = ?, updated_at = ?
+          WHERE domain = ? AND idempotency_key = ? AND status = 'unknown'
+        `).run(record, now, domain, input.idempotencyKey);
+        this.#advanceWorld(domain, head, runId, now);
+      }
+      return { runId, domains };
+    });
+  }
+
+  unknownClaims(): { idempotencyKey: string; runId: string; domains: string[]; updatedAt: string }[] {
+    const rows = this.#database.prepare(
+      `SELECT idempotency_key, run_id, domain, updated_at FROM claims
+       WHERE status = 'unknown' ORDER BY updated_at, idempotency_key, domain`,
+    ).all() as { idempotency_key: string; run_id: string; domain: string; updated_at: string }[];
+    const byKey = new Map<string, { idempotencyKey: string; runId: string; domains: string[]; updatedAt: string }>();
+    for (const row of rows) {
+      const entry = byKey.get(row.idempotency_key) ??
+        { idempotencyKey: row.idempotency_key, runId: row.run_id, domains: [], updatedAt: row.updated_at };
+      entry.domains.push(row.domain);
+      byKey.set(row.idempotency_key, entry);
+    }
+    return [...byKey.values()];
+  }
+
+  #advanceWorld(domain: string, head: string, runId: string, now: string): void {
+    const world = this.#world(domain);
+    const revision = (world?.revision ?? 0) + 1;
+    this.#database.prepare(`
+      INSERT INTO world (domain, revision, head, summary, updated_at, run_id)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(domain) DO UPDATE SET
+        revision = excluded.revision,
+        head = excluded.head,
+        summary = excluded.summary,
+        updated_at = excluded.updated_at,
+        run_id = excluded.run_id
+    `).run(domain, revision, head, `head ${head}`, now, runId);
   }
 
   abort(input: { domains: readonly string[]; idempotencyKey: string; runId: string }): void {
@@ -503,7 +574,7 @@ export class CoordinationStore {
 
   #world(domain: string): WorldRow | undefined {
     return this.#database.prepare(
-      "SELECT domain, revision, head, summary FROM world WHERE domain = ?",
+      "SELECT domain, revision, head, summary, updated_at, run_id FROM world WHERE domain = ?",
     ).get(domain) as WorldRow | undefined;
   }
 
@@ -613,10 +684,33 @@ export function releaseWorkWake(
   }
 }
 
+export function listUnknownWorkClaims(
+  repoPath: string,
+): ReturnType<CoordinationStore["unknownClaims"]> {
+  const store = openCoordinationStore(repoPath);
+  try {
+    return store.unknownClaims();
+  } finally {
+    store.close();
+  }
+}
+
+export function resolveUnknownWorkClaim(
+  repoPath: string,
+  input: Parameters<CoordinationStore["resolveUnknown"]>[0],
+): ReturnType<CoordinationStore["resolveUnknown"]> {
+  const store = openCoordinationStore(repoPath);
+  try {
+    return store.resolveUnknown(input);
+  } finally {
+    store.close();
+  }
+}
+
 export async function runGuardedMutation<T>(input: {
   repoPath: string;
   domains: readonly string[];
-  observedHead: string;
+  observedAt: string;
   runId: string;
   idempotencyKey: string;
   attemptDirectory?: string;
@@ -625,10 +719,9 @@ export async function runGuardedMutation<T>(input: {
 }): Promise<GuardedMutation<T>> {
   const store = openCoordinationStore(input.repoPath);
   try {
-    const seen = store.snapshot(input.domains, input.observedHead);
     const decision = store.propose({
       domains: input.domains,
-      seen,
+      observedAt: input.observedAt,
       runId: input.runId,
       idempotencyKey: input.idempotencyKey,
     });
@@ -778,9 +871,10 @@ function normalizeHead(head: string): string {
   return token;
 }
 
-function headOf(seen: string | undefined): string {
-  const head = seen?.split(":").slice(1).join(":") ?? "none";
-  return normalizeHead(head);
+function observationInstant(value: string): string {
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) throw new Error("work claim observation time is invalid");
+  return new Date(time).toISOString();
 }
 
 function deltaLine(domain: string, world: WorldRow | undefined): string {
