@@ -160,6 +160,7 @@ jobs:
           pnpm exec vitest run
           test/run/execution/oci.test.ts
           test/run/execution/oci-rootless.test.ts
+          --no-file-parallelism
           --reporter=default --reporter=json
           --outputFile.json=rootless-oci-report.json
 

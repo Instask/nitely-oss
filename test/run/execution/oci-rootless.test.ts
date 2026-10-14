@@ -91,7 +91,12 @@ describe.runIf(realRootless)("OCI backend on a real rootless Docker daemon", () 
   afterEach(async () => {
     // Every workload, egress gateway, and internal network a run creates is
     // gone once runAgent settles, whether the stage passed or crashed.
-    expect(await docker(["ps", "-aq", "--filter", "label=com.nitely.managed=true"])).toBe("");
+    // Containers carry their run id. Egress networks carry no run label, so
+    // that check needs the other OCI test files not to run at the same time
+    // (the CI job passes --no-file-parallelism).
+    for (const runId of ["rootless-claude", "rootless-pi", "rootless-crash", "rootless-no-python"]) {
+      expect(await docker(["ps", "-aq", "--filter", `label=com.nitely.run-id=${runId}`])).toBe("");
+    }
     expect(
       await docker(["network", "ls", "-q", "--filter", "label=com.nitely.network-purpose=oci-egress"]),
     ).toBe("");
