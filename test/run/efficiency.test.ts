@@ -242,4 +242,40 @@ describe("diagnoseRun", () => {
     );
     expect(serialized).not.toContain("runtime-private-credential-123");
   });
+
+  it("flags a Codex turn whose input was mostly uncached", () => {
+    const events = [
+      event(1, "run.created", {}),
+      event(2, "stage.started", {}, { stageId: "implement", attempt: 1 }),
+      event(3, "stage.runtime.calls", {
+        calls: [
+          {
+            kind: "llm",
+            granularity: "turn",
+            accounting: "delta",
+            inputTokens: 80_000,
+            outputTokens: 400,
+            totalTokens: 80_400,
+            cacheReadInputTokens: 8_000,
+            cacheWriteInputTokens: 0,
+            reasoningOutputTokens: 50,
+          },
+          ...Array.from({ length: 25 }, (_, index) => ({
+            kind: "tool",
+            toolName: "command_execution",
+            toolCallId: `cmd-${index}`,
+          })),
+        ],
+      }, { stageId: "implement", attempt: 1 }),
+      event(4, "run.completed", {}),
+    ];
+    const finding = diagnoseRun({
+      projection: projectRun(events),
+      events,
+    }).findings.find((entry) => entry.ruleId === "runtime-activity-shape");
+    expect(finding?.severity).toBe("high");
+    expect(finding?.summary).toContain("72000 uncached");
+    expect(finding?.summary).toContain("25 command_execution");
+    expect(finding?.summary).toContain("cumulative total per turn");
+  });
 });

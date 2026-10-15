@@ -33,6 +33,7 @@ import type {
   RunCommandOptions,
   WorkspaceHandle,
 } from "./types.js";
+import { readCodexExecActivity } from "./codex-activity.js";
 import {
   captureCallContent,
   createPiJsonCapture,
@@ -895,62 +896,7 @@ function providerProvenance(
 }
 
 function parseCodexUsage(stdout: string): AgentRuntimeUsage | undefined {
-  const lines = stdout.split(/\r?\n/).filter((line) => line.trim().length > 0);
-  const events: Record<string, unknown>[] = [];
-  try {
-    for (const line of lines) {
-      const event = usageRecord(JSON.parse(line));
-      if (!event) return undefined;
-      events.push(event);
-    }
-  } catch {
-    return undefined;
-  }
-  if (events.length < 3) return undefined;
-  const first = events[0];
-  const last = events.at(-1);
-  if (
-    first?.type !== "thread.started" ||
-    typeof first.thread_id !== "string" ||
-    !UUID_PATTERN.test(first.thread_id) ||
-    last?.type !== "turn.completed" ||
-    events.filter((event) => event.type === "thread.started").length !== 1 ||
-    events.filter((event) => event.type === "turn.started").length !== 1 ||
-    events.filter((event) => event.type === "turn.completed").length !== 1 ||
-    events.some((event) => event.type === "turn.failed" || event.type === "error")
-  ) {
-    return undefined;
-  }
-  const turnStartedIndex = events.findIndex((event) => event.type === "turn.started");
-  if (turnStartedIndex <= 0 || turnStartedIndex >= events.length - 1) {
-    return undefined;
-  }
-  const usage = usageRecord(last.usage);
-  if (!usage) return undefined;
-  const inputTokens = requiredUsageCount(usage, "input_tokens");
-  const cachedInputTokens = requiredUsageCount(usage, "cached_input_tokens");
-  const outputTokens = requiredUsageCount(usage, "output_tokens");
-  if (
-    inputTokens === undefined ||
-    cachedInputTokens === undefined ||
-    outputTokens === undefined ||
-    cachedInputTokens > inputTokens
-  ) {
-    return undefined;
-  }
-  const totalTokens = safeUsageCountSum([inputTokens, outputTokens]);
-  if (totalTokens === undefined) return undefined;
-  return {
-    inputTokens,
-    outputTokens,
-    totalTokens,
-    cachedInputTokens,
-    provenance: providerProvenance(
-      "openai",
-      "codex.exec.turn.completed.usage",
-    ),
-    raw: { cachedInputTokens },
-  };
+  return readCodexExecActivity(stdout);
 }
 
 interface ClaudeTokenCounts {
@@ -1177,6 +1123,21 @@ function parseClaudeUsage(stdout: string): AgentRuntimeUsage | undefined {
   if (permissionDenials.value !== undefined) {
     raw.permissionDenialCount = permissionDenials.value;
   }
+  const callLog = inputTokens !== undefined &&
+      outputTokens !== undefined &&
+      totalTokens !== undefined
+    ? [{
+      kind: "llm" as const,
+      granularity: "attempt" as const,
+      accounting: "delta" as const,
+      provider: "anthropic",
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      cacheReadInputTokens: counts.cacheRead ?? 0,
+      cacheWriteInputTokens: counts.cacheCreation ?? 0,
+    }]
+    : undefined;
   return {
     ...(inputTokens !== undefined ? { inputTokens } : {}),
     ...(outputTokens !== undefined ? { outputTokens } : {}),
@@ -1189,6 +1150,7 @@ function parseClaudeUsage(stdout: string): AgentRuntimeUsage | undefined {
       : {}),
     provenance: providerProvenance("anthropic", "claude.print.result"),
     ...(Object.keys(raw).length > 0 ? { raw } : {}),
+    ...(callLog ? { callLog } : {}),
   };
 }
 

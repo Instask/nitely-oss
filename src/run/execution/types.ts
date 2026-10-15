@@ -83,10 +83,22 @@ export interface AgentRuntimeUsage {
  * into spans. Token counts follow the attempt
  * totals: `inputTokens` includes cache reads and writes. `output`,
  * `toolCalls[].arguments` are present only when content capture is on.
+ *
+ * `granularity` says what the runtime actually emitted. Pi omits it and means
+ * one model call. Codex exec reports a cumulative total per turn, so each
+ * record is a turn and its tokens are the increase since the previous
+ * snapshot (`accounting: "delta"`). Claude's JSON result is the whole attempt.
  */
 export type AgentRuntimeCall =
   | {
       kind: "llm";
+      /** What this record measures. Omitted means one model call. */
+      granularity?: "call" | "turn" | "attempt";
+      /**
+       * `delta` tokens add up across the attempt. `cumulative` is a session
+       * snapshot that must not be added to sibling records.
+       */
+      accounting?: "delta" | "cumulative";
       operation?: "compaction";
       startedAt?: string;
       endedAt?: string;
@@ -98,6 +110,7 @@ export type AgentRuntimeCall =
       totalTokens: number;
       cacheReadInputTokens: number;
       cacheWriteInputTokens: number;
+      reasoningOutputTokens?: number;
       costUsd?: number;
       stopReason?: string;
       error?: string;

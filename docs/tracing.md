@@ -48,6 +48,10 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=https://api.smith.langchain.com/otel
 export OTEL_EXPORTER_OTLP_HEADERS="x-api-key=$LANGSMITH_API_KEY,Langsmith-Project=nitely"
 ```
 
+A local OTLP/HTTP collector accepts these traces. A live Langfuse or LangSmith
+project has not been checked yet, so whether either product recognizes
+`gen_ai.*` is still unverified. LangSmith should receive traces only.
+
 ## What a trace contains
 
 One trace per run. Its trace id is derived from the run id, so a resumed run
@@ -60,8 +64,9 @@ run <flow>                      nitely.run.id, nitely.work_item.id, nitely.repo.
 └─ stage <stage-id>             nitely.stage.id, nitely.outcome
    └─ attempt <stage-id>#<n>    nitely.runtime, gen_ai.request.model, nitely.effort.*,
       │                         nitely.outcome, nitely.blocked.reason, attempt usage totals
-      ├─ chat <model>           one per model call: gen_ai.usage.* tokens, gen_ai.usage.cost,
-      │                         gen_ai.response.finish_reasons, error status
+      ├─ chat <model>           Pi: one per model call
+      ├─ turn <model>           Codex: one per turn, tokens are the increase since the previous snapshot
+      ├─ attempt-usage <model>  Claude: one span for the JSON result
       └─ execute_tool <name>    one per tool execution: gen_ai.tool.name, error status
 ```
 
@@ -71,13 +76,30 @@ Model-call spans use the OpenTelemetry GenAI names (`gen_ai.usage.input_tokens`,
 (`gen_ai.usage.prompt_tokens`, `gen_ai.usage.completion_tokens`,
 `llm.usage.total_tokens`) for backends that read those. Spans also carry
 `langsmith.span.kind`. `input_tokens` includes cached tokens, the same way the
-attempt's `stage.runtime.usage` counts them, so the model-call spans of an
-attempt add up to the attempt's usage totals.
+attempt's `stage.runtime.usage` counts them. Delta records on an attempt add up
+to that attempt's usage totals. A record with `nitely.usage.accounting=cumulative`
+is a snapshot and must not be added to its siblings.
 
-Model-call and tool spans come from the per-call log that Pi-based runtimes
-(`pi`, `openrouter`, `together`) record in each attempt's `stage.runtime.calls`
-event. Other runtimes report only attempt totals, so their attempts have no
-child spans yet. An attempt keeps at most 1,000 call log entries; the count of
+Where the child spans come from:
+
+- **Pi** (`pi`, `openrouter`, `together`) records one model call per
+  `message_end`, plus tool executions. `nitely.usage.granularity` is omitted,
+  which means `call`.
+- **Codex** `exec --json` reports `turn.completed.usage` as a cumulative session
+  total. Nitely stores one turn record per snapshot. Its token attributes are
+  the increase since the previous snapshot (`nitely.usage.accounting=delta`),
+  so the turns add up to the last snapshot, which is the attempt total. If a
+  later snapshot is smaller, Nitely keeps that last snapshot as one cumulative
+  record and does not invent a per-turn split. Tool spans are the item type
+  (`command_execution`, `file_change`, `mcp_tool_call`, `web_search`) and an
+  error flag. Command lines, paths, and arguments are not recorded. Codex does
+  not emit per-model-call usage on this stream.
+- **Claude** `--output-format json` is one result for the attempt, so there is
+  one `attempt-usage` span. The CLI invocation does not stream per-message usage.
+
+`stage.runtime.calls` holds these records. `nitely diagnose` reads them for
+uncached input, reasoning share, and tool volume. An attempt keeps at most
+1,000 call log entries; the count of
 any it left out is on the attempt span as `nitely.usage.call_log_dropped`.
 Tool start and end times are the times Nitely observed the events in the
 runtime's output stream.

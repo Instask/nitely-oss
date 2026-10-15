@@ -413,10 +413,17 @@ export function buildRunTraceSpans(
             content[`gen_ai.completion.0.tool_calls.${toolIndex}.arguments`] = asString(toolCall.arguments);
           });
         }
+        const spanName = call.operation === "compaction"
+          ? `compaction ${model ?? ""}`.trim()
+          : call.granularity === "turn"
+            ? `turn ${model ?? ""}`.trim()
+            : call.granularity === "attempt"
+              ? `attempt-usage ${model ?? ""}`.trim()
+              : `chat ${model ?? ""}`.trim();
         callSpans.push({
           key: `${attemptKey}:call:${index}`,
           parentKey: attemptKey,
-          name: call.operation === "compaction" ? `compaction ${model ?? ""}`.trim() : `chat ${model ?? ""}`.trim(),
+          name: spanName,
           kind: "llm",
           startTime: times.start,
           endTime: times.end,
@@ -444,6 +451,9 @@ export function buildRunTraceSpans(
             "nitely.usage.cost_usd": call.costUsd,
             "nitely.call.incomplete": call.incomplete,
             "nitely.call.operation": call.operation,
+            "nitely.usage.granularity": call.granularity,
+            "nitely.usage.accounting": call.accounting,
+            "nitely.usage.reasoning_output_tokens": call.reasoningOutputTokens,
             "nitely.call.tool_call_names": toolCalls.length > 0
               ? toolCalls.map((toolCall) => toolCall.name ?? "unknown")
               : undefined,
