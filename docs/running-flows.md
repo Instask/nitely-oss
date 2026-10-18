@@ -345,6 +345,11 @@ and sum every model call. A failed, timed-out, or cancelled attempt records the
 usage reported up to that point. The run detail, Console, and evidence show
 per-stage and per-run totals. `glm` and `grok` report nothing.
 
+The Pi-based runtimes also record every model call and tool execution of an
+attempt in `stage.runtime.calls`. With an OTLP endpoint configured, each run is
+exported as an OpenTelemetry trace built from these events; see
+[Run Traces](tracing.md).
+
 A runtime's reported input is not the prompt Nitely packed. It covers the
 runtime's own session prefix and every reread inside its tool loop, and most of
 it is served from the provider's cache. Codex reports one cumulative

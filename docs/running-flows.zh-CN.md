@@ -181,6 +181,10 @@ run-total context usage；旧 run 没有这些字段时会自然省略。
 失败、超时或被取消的 attempt 会记录截至当时已上报的用量。Run detail、Console 和
 evidence 展示 per-stage 与 per-run 汇总。`glm` 和 `grok` 不上报用量。
 
+基于 Pi 的 runtime 还会把 attempt 内每次模型调用和工具执行记录到
+`stage.runtime.calls`。配置了 OTLP endpoint 时，每个 run 会根据这些 event 导出为一条
+OpenTelemetry trace，见 [Run Traces](tracing.md)（英文）。
+
 Runtime 上报的 input 不等于 Nitely 打包的 prompt。它包含 runtime 自己的 session
 前缀和工具循环里的每一次重读，其中绝大部分由 provider 的缓存提供。Codex 每个 turn
 只上报一次累计的 `turn.completed` usage，所以一个执行了很多命令的 implement turn
