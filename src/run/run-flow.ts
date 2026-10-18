@@ -343,6 +343,8 @@ import {
 import type {
   AgentGlobalSkillsOutcome,
   AgentGlobalSkillsRequest,
+  AgentMcpServersOutcome,
+  AgentMcpServersRequest,
   AgentSessionOutcome,
   AgentRunnableStage,
   AgentRuntimePreflightResult,
@@ -949,6 +951,19 @@ export interface ExternalKnowledgeAdmissionControls {
  */
 type GlobalSkillsMode = "isolate-if-supported" | "required-isolated" | "inherited";
 
+/**
+ * Which of the operator's configured MCP servers an attempt loads. Each enabled
+ * server's tool definitions are resent on every model call of the turn.
+ *
+ * - `declared-if-supported`: the default. Load exactly the stage's
+ *   `required_mcp_servers` on runtimes that can restrict them, and run
+ *   unchanged on runtimes that cannot.
+ * - `declared-required`: the flow demands the restriction; a runtime that
+ *   cannot provide it fails the stage.
+ * - `inherited`: the flow opted back into every configured server.
+ */
+type McpServersMode = "declared-if-supported" | "declared-required" | "inherited";
+
 interface ResolvedStageContextControls {
   isolated: boolean;
   instructionFiles: boolean;
@@ -958,6 +973,7 @@ interface ResolvedStageContextControls {
   previousFailures: boolean;
   fullReadInputs: string[];
   globalSkills: GlobalSkillsMode;
+  mcpServers: McpServersMode;
   /** Undefined means "decide from the stage kind". */
   sessionReuse: boolean | undefined;
 }
@@ -973,6 +989,7 @@ interface StageContextEvidence {
   previousFailures: boolean;
   fullReadInputs: string[];
   globalSkills: GlobalSkillsMode;
+  mcpServers: McpServersMode;
   /** Undefined means "decide from the stage kind". */
   sessionReuse: boolean | undefined;
 }
@@ -2277,6 +2294,19 @@ function agentGlobalSkillsRequest(input: {
   };
 }
 
+function agentMcpServersRequest(input: {
+  mode: McpServersMode;
+  stage: AgentRunnableStage;
+}): AgentMcpServersRequest {
+  if (input.mode === "inherited") return { mode: "inherited" };
+  return {
+    mode: input.mode,
+    declared: "required_mcp_servers" in input.stage
+      ? [...(input.stage.required_mcp_servers ?? [])]
+      : [],
+  };
+}
+
 function requireWorkspacePath(ws: WorkspaceHandle): string {
   if (!ws.path) {
     throw new Error("workspace has no host-accessible path");
@@ -2318,6 +2348,7 @@ async function runAgentInWorkspace(input: {
   stderrPath: string;
   usage?: AgentRuntimeUsage;
   globalSkills?: AgentGlobalSkillsOutcome;
+  mcpServers?: AgentMcpServersOutcome;
   session?: AgentSessionOutcome;
 }> {
   const attemptDirectory = await requireContainedAttemptDirectory({
@@ -2401,6 +2432,10 @@ async function runAgentInWorkspace(input: {
               runId: input.context.runId,
               runtime: input.stage.runtime,
             }),
+            mcpServers: agentMcpServersRequest({
+              mode: input.contextControls.mcpServers,
+              stage: input.stage,
+            }),
             visibleInputPaths: input.visibleInputPaths,
             readPolicy: input.readPolicy,
             ...(input.resumeSessionId
@@ -2411,6 +2446,7 @@ async function runAgentInWorkspace(input: {
             ...(await writeLogs(result)),
             ...(result.usage ? { usage: result.usage } : {}),
             ...(result.globalSkills ? { globalSkills: result.globalSkills } : {}),
+            ...(result.mcpServers ? { mcpServers: result.mcpServers } : {}),
             ...(result.session ? { session: result.session } : {}),
           };
         } catch (error) {
@@ -3410,6 +3446,14 @@ async function executeGateStage(input: {
           stageId: input.stage.id,
           attempt: selectedAttempt,
           ...(result.globalSkills ? { outcome: result.globalSkills } : {}),
+          context: input.context,
+        });
+        appendMcpServersEvent({
+          eventStore: input.eventStore,
+          runId: input.runId,
+          stageId: input.stage.id,
+          attempt: selectedAttempt,
+          ...(result.mcpServers ? { outcome: result.mcpServers } : {}),
           context: input.context,
         });
         recordAgentSession({
@@ -4541,6 +4585,14 @@ async function executeAgentStage(input: {
         stageId: input.stage.id,
         attempt: selectedAttempt,
         ...(result.globalSkills ? { outcome: result.globalSkills } : {}),
+        context: input.context,
+      });
+      appendMcpServersEvent({
+        eventStore: input.eventStore,
+        runId: input.runId,
+        stageId: input.stage.id,
+        attempt: selectedAttempt,
+        ...(result.mcpServers ? { outcome: result.mcpServers } : {}),
         context: input.context,
       });
       recordAgentSession({
@@ -6250,6 +6302,9 @@ function resolveStageContextControlsFrom(
     globalSkills: resolveGlobalSkillsMode(
       contextControlValue("globalSkills", flowContext, stageContext),
     ),
+    mcpServers: resolveMcpServersMode(
+      contextControlValue("globalMcpServers", flowContext, stageContext),
+    ),
     sessionReuse: contextControlValue("sessionReuse", flowContext, stageContext),
   };
 }
@@ -6270,6 +6325,11 @@ function sessionReuseEnabled(
 function resolveGlobalSkillsMode(value: boolean | undefined): GlobalSkillsMode {
   if (value === undefined) return "isolate-if-supported";
   return value ? "inherited" : "required-isolated";
+}
+
+function resolveMcpServersMode(value: boolean | undefined): McpServersMode {
+  if (value === undefined) return "declared-if-supported";
+  return value ? "inherited" : "declared-required";
 }
 
 type ExternalKnowledgeControl = NonNullable<ContextControls["externalKnowledge"]>;
@@ -6433,6 +6493,17 @@ function globalSkillsEvidenceLabel(mode: GlobalSkillsMode): string {
       return "isolated (required)";
     default:
       return "isolated where the runtime supports it";
+  }
+}
+
+function mcpServersEvidenceLabel(mode: McpServersMode): string {
+  switch (mode) {
+    case "inherited":
+      return "every configured server";
+    case "declared-required":
+      return "declared only (required)";
+    default:
+      return "declared only where the runtime supports it";
   }
 }
 
@@ -6906,6 +6977,7 @@ function renderPrompt(
     previousFailures: true,
     fullReadInputs: [],
     globalSkills: "isolate-if-supported",
+    mcpServers: "declared-if-supported",
     sessionReuse: undefined,
   },
   contextKnowledge: ContextKnowledgeEntry[] = [],
@@ -7643,6 +7715,33 @@ function appendGlobalSkillsEvent(input: {
     payload: redactRuntimeUnknown(
       {
         isolated: input.outcome.isolated,
+        ...(input.outcome.reason ? { reason: input.outcome.reason } : {}),
+      },
+      input.context,
+    ),
+  });
+}
+
+function appendMcpServersEvent(input: {
+  eventStore: EventStore;
+  runId: string;
+  stageId: string;
+  attempt: number;
+  outcome?: AgentMcpServersOutcome;
+  context: RuntimeContext;
+}): void {
+  if (!input.outcome) return;
+  input.eventStore.append({
+    runId: input.runId,
+    stageId: input.stageId,
+    attempt: input.attempt,
+    type: "stage.runtime.mcp-servers",
+    payload: redactRuntimeUnknown(
+      {
+        restricted: input.outcome.restricted,
+        ...(input.outcome.enabled ? { enabled: input.outcome.enabled } : {}),
+        ...(input.outcome.disabled ? { disabled: input.outcome.disabled } : {}),
+        ...(input.outcome.unconfigured ? { unconfigured: input.outcome.unconfigured } : {}),
         ...(input.outcome.reason ? { reason: input.outcome.reason } : {}),
       },
       input.context,
@@ -11449,6 +11548,7 @@ async function writeEvidence(input: {
               `  External knowledge: ${controls.externalKnowledge.enabled ? `enabled (top ${controls.externalKnowledge.topK}, ${controls.externalKnowledge.maxPromptTokens} prompt tokens, ${controls.externalKnowledge.availability})` : "disabled"}`,
               `  Previous failures: ${controls.previousFailures ? "enabled" : "disabled"}`,
               `  Global runtime skills: ${globalSkillsEvidenceLabel(controls.globalSkills)}`,
+              `  MCP servers: ${mcpServersEvidenceLabel(controls.mcpServers)}`,
               `  Full-read inputs: ${
                 controls.fullReadInputs.length > 0
                   ? controls.fullReadInputs

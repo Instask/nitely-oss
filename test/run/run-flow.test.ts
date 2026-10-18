@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { Writable } from "node:stream";
 
 import { describe, expect, it } from "vitest";
 
@@ -17759,6 +17761,139 @@ describe("global runtime skills", () => {
 
     const evidence = await readFile(join(runDirectory, "evidence.md"), "utf8");
     expect(evidence).toContain("Global runtime skills: inherited from the operator");
+  });
+});
+
+describe("stage MCP servers", () => {
+  async function runCodexStages(context?: Record<string, unknown>): Promise<{
+    launches: Map<string, string[]>;
+    repo: string;
+    runId: string;
+    runDirectory: string;
+  }> {
+    const repo = await createRepo();
+    const codexHome = await mkdtemp(join(tmpdir(), "nitely-codex-home-"));
+    await writeFile(join(codexHome, "auth.json"), "{}\n", "utf8");
+    await writeFile(
+      join(codexHome, "config.toml"),
+      [
+        'model_provider = "openai"',
+        "[mcp_servers.context7]",
+        'command = "npx"',
+        "[mcp_servers.playwright]",
+        'command = "npx"',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const flowPath = join(repo, "flows", "mcp-servers.json");
+    await writeJson(flowPath, {
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "mcp-servers" },
+      spec: {
+        ...(context ? { context } : {}),
+        stages: [
+          {
+            id: "reflect",
+            type: "agent",
+            runtime: "codex",
+            prompt: "reflect",
+            inputs: [],
+            outputs: ["notes"],
+          },
+          {
+            id: "implement",
+            type: "agent",
+            runtime: "codex",
+            prompt: "implement",
+            inputs: [],
+            required_mcp_servers: ["context7"],
+            outputs: ["implementation"],
+          },
+        ],
+      },
+    });
+
+    const runId = "run-mcp-" + Math.random().toString(36).slice(2, 8);
+    const launches = new Map<string, string[]>();
+    const backend = new LocalExecutionBackend({
+      env: { PATH: process.env.PATH, CODEX_HOME: codexHome },
+      spawn: (_command, args, options) => {
+        const stageId = options.env.NITELY_OUTPUT_DIR?.split("/").at(-2) ?? "unknown";
+        launches.set(stageId, [...args]);
+        const child = new EventEmitter() as EventEmitter & { stdin: Writable };
+        child.stdin = new Writable({
+          write(_chunk, _encoding, callback) {
+            callback();
+          },
+          final(callback) {
+            const output = stageId === "reflect" ? "notes.md" : "implementation.md";
+            writeFile(join(options.env.NITELY_OUTPUT_DIR!, output), "done\n", "utf8")
+              .then(() => child.emit("close", 0), (error) => child.emit("error", error));
+            callback();
+          },
+        });
+        return child;
+      },
+    });
+
+    await runFlow(
+      { flowPath, repoPath: repo, inputs: {} },
+      { createRunId: () => runId, backend },
+    );
+    return {
+      launches,
+      repo,
+      runId,
+      runDirectory: join(repo, ".nitely", "runs", runId),
+    };
+  }
+
+  function disabledServers(args: readonly string[] | undefined): string[] {
+    return (args ?? []).flatMap((arg) => {
+      const match = /^mcp_servers\.([^.]+)\.enabled=false$/.exec(arg);
+      return match ? [match[1]!] : [];
+    });
+  }
+
+  it("launches Codex with only the MCP servers each stage declares", async () => {
+    const { launches, repo, runId, runDirectory } = await runCodexStages();
+
+    // reflect declares none, so every configured server is off.
+    expect(disabledServers(launches.get("reflect"))).toEqual(["context7", "playwright"]);
+    // implement declares context7, so only playwright is off.
+    expect(disabledServers(launches.get("implement"))).toEqual(["playwright"]);
+
+    const store = new EventStore(join(repo, ".nitely", "events.db"));
+    const events = store.list(runId);
+    store.close();
+    const payloadFor = (stageId: string) =>
+      events.find(
+        (event) => event.type === "stage.runtime.mcp-servers" && event.stageId === stageId,
+      )?.payload;
+    expect(payloadFor("reflect")).toEqual({
+      restricted: true,
+      enabled: [],
+      disabled: ["context7", "playwright"],
+    });
+    expect(payloadFor("implement")).toEqual({
+      restricted: true,
+      enabled: ["context7"],
+      disabled: ["playwright"],
+    });
+
+    const evidence = await readFile(join(runDirectory, "evidence.md"), "utf8");
+    expect(evidence).toContain("MCP servers: declared only where the runtime supports it");
+  });
+
+  it("loads every configured MCP server when the flow sets globalMcpServers to true", async () => {
+    const { launches, runDirectory } = await runCodexStages({ globalMcpServers: true });
+
+    expect(disabledServers(launches.get("reflect"))).toEqual([]);
+    expect(disabledServers(launches.get("implement"))).toEqual([]);
+    const evidence = await readFile(join(runDirectory, "evidence.md"), "utf8");
+    expect(evidence).toContain("MCP servers: every configured server");
   });
 });
 

@@ -16,6 +16,7 @@ export type RunEventType =
   | "stage.runtime.usage"
   | "stage.runtime.calls"
   | "stage.runtime.global-skills"
+  | "stage.runtime.mcp-servers"
   | "stage.runtime.session"
   | "knowledge.generated"
   | "knowledge.retrieved"

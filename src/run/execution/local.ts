@@ -7,6 +7,7 @@ import {
   mkdir,
   mkdtemp,
   readdir,
+  readFile,
   rm,
   symlink,
   writeFile,
@@ -19,6 +20,8 @@ import { promisify } from "node:util";
 import type {
   AgentGlobalSkillsOutcome,
   AgentGlobalSkillsRequest,
+  AgentMcpServersOutcome,
+  AgentMcpServersRequest,
   AgentSessionOutcome,
   AgentSessionRequest,
   AgentRunnableStage,
@@ -34,6 +37,11 @@ import type {
   WorkspaceHandle,
 } from "./types.js";
 import { createCodexExecCapture, readCodexExecActivity } from "./codex-activity.js";
+import {
+  codexConfiguredMcpServers,
+  planMcpServerRestriction,
+  withCodexMcpServersDisabled,
+} from "./mcp-servers.js";
 import {
   captureCallContent,
   createPiJsonCapture,
@@ -127,6 +135,22 @@ export interface RuntimeHomeIsolation {
 }
 
 /**
+ * How a runtime limits which of the operator's configured MCP servers load
+ * into one launch.
+ */
+export interface RuntimeMcpServerRestriction {
+  /** The servers the runtime would load from this environment's configuration. */
+  configuredServers(env: RuntimeEnv): Promise<string[]>;
+  /**
+   * Servers the configuration scan cannot see when the runtime home is not
+   * isolated, such as ones a plugin provides. Absent when there are none.
+   */
+  unisolatedHomeGap?: string;
+  /** Launch args with the named servers turned off. */
+  disable(args: readonly string[], names: readonly string[]): string[];
+}
+
+/**
  * How a runtime continues a session it already ran, so a repeated execution of
  * the same stage does not pay for a cold start.
  */
@@ -150,6 +174,8 @@ export interface AgentRuntimeLauncher {
   globalSkillIsolation?: RuntimeHomeIsolation;
   /** Absent when this runtime cannot continue a previous session. */
   sessionReuse?: RuntimeSessionReuse;
+  /** Absent when this runtime offers no way to leave configured MCP servers out. */
+  mcpServerRestriction?: RuntimeMcpServerRestriction;
   /**
    * Returns an actionable reason when the stage's model cannot run on this
    * runtime. Checked by preflight and again before spawning.
@@ -571,6 +597,11 @@ export function createPiAgentArgs(model?: string, nativeEffort?: string): string
   ];
 }
 
+function codexHome(env: RuntimeEnv): string | undefined {
+  return env.CODEX_HOME?.trim() ||
+    (env.HOME?.trim() ? join(env.HOME.trim(), ".codex") : undefined);
+}
+
 class DefaultAgentRuntimeRegistry implements AgentRuntimeRegistry {
   private readonly runtimes: Map<string, AgentRuntimeLauncher>;
 
@@ -605,10 +636,28 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
       // login and model configuration while leaving every pack behind.
       globalSkillIsolation: {
         envVar: "CODEX_HOME",
-        resolveDefaultHome: (env) =>
-          env.CODEX_HOME?.trim() ||
-          (env.HOME?.trim() ? join(env.HOME.trim(), ".codex") : undefined),
+        resolveDefaultHome: codexHome,
         preserve: ["auth.json", "config.toml"],
+      },
+      // Every enabled MCP server's tool definitions are resent on each model
+      // call. config.toml stays linked verbatim for auth and provider settings;
+      // the servers a stage did not declare are turned off with -c overrides.
+      mcpServerRestriction: {
+        configuredServers: async (env) => {
+          const home = codexHome(env);
+          if (!home) return [];
+          try {
+            return codexConfiguredMcpServers(
+              await readFile(join(home, "config.toml"), "utf8"),
+            );
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+            throw error;
+          }
+        },
+        unisolatedHomeGap:
+          "the operator's Codex home is not isolated, so MCP servers its plugins provide still load",
+        disable: withCodexMcpServersDisabled,
       },
       sessionReuse: {
         parseSessionId: parseCodexSessionId,
@@ -811,6 +860,44 @@ async function resolveGlobalSkillsIsolation(input: {
     env: input.env,
   });
   return { envOverrides, outcome: { isolated: true } };
+}
+
+async function resolveMcpServerRestriction(input: {
+  runtime: AgentRuntimeLauncher;
+  request: AgentMcpServersRequest | undefined;
+  /** The environment the runtime launches with, isolated home included. */
+  env: RuntimeEnv;
+  homeIsolated: boolean;
+  stageId: string;
+}): Promise<{ disable: string[]; outcome?: AgentMcpServersOutcome }> {
+  const request = input.request;
+  // A caller that says nothing about MCP servers gets the previous behavior
+  // and no claim in the result.
+  if (!request) return { disable: [] };
+  if (request.mode === "inherited") {
+    return {
+      disable: [],
+      outcome: { restricted: false, reason: "flow opted into every configured MCP server" },
+    };
+  }
+  const restriction = input.runtime.mcpServerRestriction;
+  if (!restriction) {
+    const reason = `agent runtime ${input.runtime.id} has no MCP server restriction mechanism`;
+    if (request.mode === "declared-required") {
+      throw new Error(
+        `stage ${input.stageId} requires only its declared MCP servers but ${reason}`,
+      );
+    }
+    return { disable: [], outcome: { restricted: false, reason } };
+  }
+  return planMcpServerRestriction({
+    request,
+    configured: await restriction.configuredServers(input.env),
+    stageId: input.stageId,
+    ...(!input.homeIsolated && restriction.unisolatedHomeGap
+      ? { incompleteReason: restriction.unisolatedHomeGap }
+      : {}),
+  });
 }
 
 function missingRuntimeEnv(
@@ -1366,6 +1453,7 @@ export class LocalExecutionBackend implements ExecutionBackend {
       signal?: AbortSignal;
       cancellationGraceMs?: number;
       globalSkills?: AgentGlobalSkillsRequest;
+      mcpServers?: AgentMcpServersRequest;
       session?: AgentSessionRequest;
       readPolicy?: AgentReadPolicy;
     },
@@ -1431,6 +1519,13 @@ export class LocalExecutionBackend implements ExecutionBackend {
       };
     }
     await assertRuntimeConfigured(runtime, runtimeEnv);
+    const mcpServers = await resolveMcpServerRestriction({
+      runtime,
+      request: input.mcpServers,
+      env: runtimeEnv,
+      homeIsolated: globalSkills.outcome?.isolated === true,
+      stageId: input.stage.id,
+    });
     const effortDecision = resolveRuntimeEffort({
       runtime: runtime.id,
       model: input.stage.model,
@@ -1469,9 +1564,15 @@ export class LocalExecutionBackend implements ExecutionBackend {
     };
     const resumeSessionId = input.session?.resumeSessionId;
     const canResume = resumeSessionId !== undefined && runtime.sessionReuse !== undefined;
-    const launch = canResume
+    const builtLaunch = canResume
       ? runtime.sessionReuse!.buildResume({ ...launchInput, sessionId: resumeSessionId! })
       : runtime.build(launchInput);
+    const launch = mcpServers.disable.length > 0 && runtime.mcpServerRestriction
+      ? {
+        ...builtLaunch,
+        args: runtime.mcpServerRestriction.disable(builtLaunch.args, mcpServers.disable),
+      }
+      : builtLaunch;
     const sessionOutcome: AgentSessionOutcome = canResume
       ? { mode: "resumed", sessionId: resumeSessionId }
       : {
@@ -1603,6 +1704,7 @@ export class LocalExecutionBackend implements ExecutionBackend {
           stderr: pi?.stderr ?? Buffer.concat(stderr).toString("utf8"),
           ...(usage ? { usage } : {}),
           ...(globalSkills.outcome ? { globalSkills: globalSkills.outcome } : {}),
+          ...(mcpServers.outcome ? { mcpServers: mcpServers.outcome } : {}),
           ...(input.session !== undefined || sessionId !== undefined
             ? {
               session: {

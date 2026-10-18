@@ -2109,6 +2109,7 @@ describe("OciExecutionBackend", () => {
           prompt: `Write implementation.md to ${fixture.attempt}.`,
           attemptDirectory: fixture.attempt,
           timeoutMs: 30_000,
+          mcpServers: { mode: "declared-if-supported", declared: ["github"] },
         },
       ),
     ).resolves.toEqual({
@@ -2117,6 +2118,14 @@ describe("OciExecutionBackend", () => {
       // The container never mounts an operator home, so no global skill pack
       // can reach the attempt.
       globalSkills: { isolated: true },
+      // Nor any MCP server configuration: nothing loads, declared or not.
+      mcpServers: {
+        restricted: true,
+        enabled: [],
+        disabled: [],
+        unconfigured: ["github"],
+        reason: "the container's runtime home configures no MCP servers",
+      },
     });
 
     expect(calls.map((call) => call.args[0])).toEqual(["info", "run", "rm"]);

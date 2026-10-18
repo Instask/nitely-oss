@@ -7,6 +7,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 
 import type {
   AgentResult,
+  AgentMcpServersOutcome,
+  AgentMcpServersRequest,
   AgentReadPolicy,
   AgentRuntimePreflightResult,
   CommandResult,
@@ -226,6 +228,27 @@ const OCI_LIFECYCLE_LABELS = [
   "com.nitely.expires-at",
   "com.nitely.instance-id",
 ] as const;
+
+/**
+ * HOME inside the container is a throwaway path the image leaves empty, so a
+ * runtime there finds no MCP server configuration at all: a restriction holds
+ * trivially, and a declared server is not available.
+ */
+function containerMcpServersOutcome(
+  request: AgentMcpServersRequest,
+): AgentMcpServersOutcome {
+  const reason = "the container's runtime home configures no MCP servers";
+  if (request.mode === "inherited") {
+    return { restricted: false, enabled: [], reason: `flow opted into every configured MCP server; ${reason}` };
+  }
+  return {
+    restricted: true,
+    enabled: [],
+    disabled: [],
+    ...(request.declared.length > 0 ? { unconfigured: [...request.declared] } : {}),
+    reason,
+  };
+}
 
 function unsupervisedCommandMediation(stageId: string, mechanism: string): string {
   return `stage ${stageId}: command mediation mechanism ${mechanism} cannot supervise agent-spawned commands; refusing to launch an unmediated workload`;
@@ -1274,6 +1297,7 @@ export class OciExecutionBackend implements ExecutionBackend {
       attemptDirectory: string;
       timeoutMs?: number;
       signal?: AbortSignal;
+      mcpServers?: AgentMcpServersRequest;
       visibleInputPaths?: string[];
       readPolicy?: AgentReadPolicy;
     },
@@ -1531,6 +1555,7 @@ export class OciExecutionBackend implements ExecutionBackend {
         // The container never mounts the operator's home; HOME is a throwaway
         // path inside the sandbox, so no user-global skill pack can load.
         globalSkills: { isolated: true },
+        ...(input.mcpServers ? { mcpServers: containerMcpServersOutcome(input.mcpServers) } : {}),
       };
     } finally {
       await gateway?.dispose().catch(() => undefined);

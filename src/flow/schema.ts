@@ -68,6 +68,11 @@ export const contextControlsSchema = z.object({
   // stage. Unset means isolate wherever the runtime supports it; false demands
   // isolation and fails closed when it is not available; true opts back in.
   globalSkills: z.boolean().optional(),
+  // Whether every MCP server the operator configured may load into this stage.
+  // Unset means load only the stage's required_mcp_servers wherever the
+  // runtime can restrict them; false demands that restriction and fails closed
+  // when it is not available; true opts back into every configured server.
+  globalMcpServers: z.boolean().optional(),
   // Whether a repeated execution of this stage in the same worktree continues
   // the runtime's previous session. Defaults to on for task-plan loop stages.
   sessionReuse: z.boolean().optional(),

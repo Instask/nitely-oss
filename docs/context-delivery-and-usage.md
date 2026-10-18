@@ -97,6 +97,56 @@ into every customer run.
 Nitely's own `stage.skills` are unaffected: those are declared by the flow,
 content-hash checked, and rendered into the prompt.
 
+## Stage MCP Servers
+
+Every MCP server a runtime loads adds its tool definitions to the fixed prefix
+the runtime resends on each model call inside a turn. Isolating global skills
+keeps Codex's `config.toml`, so before this policy every `[mcp_servers.*]` the
+operator configured globally loaded into every stage: a short Codex stage
+measured about 24k cached prefix tokens against a 3k-token Nitely prompt, and a
+reflect stage called MCP servers it never declared.
+
+A stage now loads exactly the MCP servers it lists in `required_mcp_servers`.
+An empty list means no MCP servers at all. `context.globalMcpServers` selects
+the behavior, flow-wide or per stage:
+
+| Value | Behavior |
+| --- | --- |
+| unset (default) | Load only the declared servers on runtimes that can restrict them; run unchanged on runtimes that cannot, and record why. |
+| `false` | The restriction is required. A runtime with no mechanism, or a restriction Nitely cannot complete, fails the stage. |
+| `true` | Opt back into every server the operator configured. |
+
+Runtime support today:
+
+- `codex` on the local backend: Nitely reads the server names from the
+  `config.toml` in the `CODEX_HOME` the attempt runs with and turns off each
+  undeclared one with `-c mcp_servers.<name>.enabled=false`. The config file is
+  never rewritten, so auth, model provider, and model settings reach Codex
+  unchanged. Codex 0.162.0 fails its launch when an override names a server it
+  has no configuration for, which is why only names found in `config.toml` are
+  ever disabled; a name with a dot cannot be addressed by an override and stays
+  enabled, with the reason recorded. Codex plugins can also provide MCP
+  servers; they are left behind with the plugin cache when global skills are
+  isolated, but with `globalSkills: true` they still load, and the outcome says
+  so (`globalMcpServers: false` fails the stage in that case). A project-level
+  `.codex/config.toml` in the target repository is not read.
+- OCI backend: the container's `HOME` is an empty throwaway path, so no runtime
+  finds any MCP server configuration. The restriction holds trivially, and a
+  declared server is reported as unconfigured.
+- `claude`, `glm`, `grok`, and the Pi-based runtimes have no restriction
+  mechanism on the local backend; they run unchanged under the default and fail
+  closed under `globalMcpServers: false`.
+
+Each agent attempt emits a `stage.runtime.mcp-servers` event with
+`restricted`, the `enabled` and `disabled` server names, any declared server
+the runtime had no configuration for (`unconfigured`), and a `reason` when the
+restriction was skipped or incomplete. Run evidence lists the resolved mode
+under `Stage Context Controls` as `MCP servers`.
+
+`required_mcp_servers` keeps its admission role too: a declared server that
+maps to a provider still requires that provider to be configured before the
+stage starts.
+
 ## Agent Session Reuse
 
 A task-plan loop re-runs one stage in one worktree over and over. Every

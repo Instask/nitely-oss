@@ -108,6 +108,14 @@ independent of `instructionFiles`, which covers repository files. See
 [Context Delivery And Usage](context-delivery-and-usage.md) for the mechanism
 per runtime.
 
+`globalMcpServers` controls which of the operator's configured MCP servers
+load. Leave it unset and a stage loads only its `required_mcp_servers` wherever
+the runtime can restrict them; an empty list loads none. Set it to `false` to
+demand the restriction, which fails the stage on a runtime that cannot provide
+it. Set it to `true` to load every configured server. See
+[Context Delivery And Usage](context-delivery-and-usage.md#stage-mcp-servers)
+for the mechanism per runtime.
+
 `sessionReuse` decides whether a repeated execution of this stage in the same
 worktree continues the runtime's previous session instead of starting cold. It
 defaults to on for stages that declare `taskPlan`. See
@@ -123,7 +131,9 @@ silently overwriting either file.
 Run evidence includes a `Stage Context Controls` section with the resolved
 settings for each agent and review-gate stage. Each agent attempt also emits a
 `stage.runtime.global-skills` event recording whether the operator's global
-packs were actually isolated, and why not when they were not.
+packs were actually isolated, and why not when they were not, and a
+`stage.runtime.mcp-servers` event naming the MCP servers it enabled and
+disabled.
 
 ## Errors
 

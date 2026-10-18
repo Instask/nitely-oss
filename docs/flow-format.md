@@ -184,7 +184,11 @@ Skill ids use the same identifier shape as stages and artifacts: they start with
 a letter or number and contain only letters, numbers, dots, underscores, and
 hyphens. `skills` is valid only on `agent` stages, while
 `required_mcp_servers` and `required_connectors` are valid on `agent` stages and
-review gates. Duplicates on the same stage are rejected. Missing skills,
+review gates. On Codex, `required_mcp_servers` is also the list of MCP servers
+the stage loads: an undeclared server stays off unless
+`context.globalMcpServers` is `true` (see
+[Context Delivery And Usage](context-delivery-and-usage.md#stage-mcp-servers)).
+Duplicates on the same stage are rejected. Missing skills,
 malformed frontmatter, empty bodies, name mismatches, invalid ids, and unsafe
 bundled resource paths fail before the agent command starts with an error naming
 the stage and skill.

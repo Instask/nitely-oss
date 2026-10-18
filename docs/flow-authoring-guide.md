@@ -82,6 +82,15 @@ backend when `commands.advisory` is false; see
 [OCI command mediation](oci-command-mediation.md). The local backend fails
 closed on that demand. Do not treat an advisory entry as a security boundary.
 
+Declare the MCP servers a stage actually uses in `required_mcp_servers`, and
+leave the list empty for stages that need none. That list is what a Codex stage
+loads: each enabled server's tool definitions are resent on every model call,
+so a reflection or review stage that inherits every globally configured server
+pays for them on each call and may call tools it was never meant to use. Set
+`context.globalMcpServers: true` only for a stage that genuinely needs the
+operator's whole MCP setup. See
+[Context Delivery And Usage](context-delivery-and-usage.md#stage-mcp-servers).
+
 ## Artifact Contracts
 
 Artifacts are the dependency contract between stages. Nitely derives the flow

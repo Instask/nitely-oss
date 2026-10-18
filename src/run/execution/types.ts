@@ -135,6 +135,7 @@ export interface AgentResult {
   stderrPath?: string;
   usage?: AgentRuntimeUsage;
   globalSkills?: AgentGlobalSkillsOutcome;
+  mcpServers?: AgentMcpServersOutcome;
   session?: AgentSessionOutcome;
 }
 
@@ -167,6 +168,30 @@ export type AgentGlobalSkillsRequest =
 export interface AgentGlobalSkillsOutcome {
   isolated: boolean;
   /** Present when isolation was skipped, explaining why. */
+  reason?: string;
+}
+
+/**
+ * Which of the operator's configured MCP servers an attempt may load. Every
+ * enabled server's tool definitions are resent on each model call, so a stage
+ * loads only the servers it declares unless the flow opts back in.
+ */
+export type AgentMcpServersRequest =
+  | { mode: "inherited" }
+  | {
+      mode: "declared-if-supported" | "declared-required";
+      declared: string[];
+    };
+
+export interface AgentMcpServersOutcome {
+  restricted: boolean;
+  /** Configured servers the attempt left enabled. */
+  enabled?: string[];
+  /** Configured servers the attempt disabled. */
+  disabled?: string[];
+  /** Declared servers the runtime has no configuration for. */
+  unconfigured?: string[];
+  /** Present when the restriction was skipped or is incomplete. */
   reason?: string;
 }
 
@@ -280,6 +305,7 @@ export interface ExecutionBackend {
       signal?: AbortSignal;
       cancellationGraceMs?: number;
       globalSkills?: AgentGlobalSkillsRequest;
+      mcpServers?: AgentMcpServersRequest;
       session?: AgentSessionRequest;
       visibleInputPaths?: string[];
       readPolicy?: AgentReadPolicy;
