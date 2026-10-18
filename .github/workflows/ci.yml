@@ -39,6 +39,11 @@ jobs:
       - name: Typecheck
         run: pnpm run check
 
+      # The command-mediator race tests compile small binaries. A runner
+      # without gcc fails those three tests at spawn; name the gap here.
+      - name: Command-mediator compiler
+        run: gcc --version
+
       - name: Tests
         run: pnpm run test:run
 
