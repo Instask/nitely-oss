@@ -196,6 +196,7 @@ import type {
 } from "./cli/remote.js";
 import { buildCliHelp, selectCliCommand, type CliCommand } from "./cli/registry.js";
 import { runEvalCli } from "./eval/cli.js";
+import { runBenchmark } from "./hybrid-retrieval.js";
 import {
   clearCurrentInstance,
   normalizeRemoteServerUrl,
@@ -3720,6 +3721,41 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
         return 1;
       }
 
+    },
+  },
+  {
+    name: "benchmark",
+    usage: [
+      "  benchmark hybrid-retrieval [--fixture <path>] [--output <path>] [--budget <tokens>]",
+    ],
+    run: async ({ argv, io }) => {
+      if (argv[1] !== "hybrid-retrieval") {
+        io.stderr("Usage: nitely benchmark hybrid-retrieval [--fixture <path>] [--output <path>] [--budget <tokens>]");
+        return 1;
+      }
+      let fixturePath: string | undefined;
+      let outputPath: string | undefined;
+      let budget = 1800;
+      try {
+        for (let index = 2; index < argv.length; index += 1) {
+          const arg = argv[index];
+          if (arg === "--fixture") fixturePath = argv[++index] ?? "";
+          else if (arg === "--output") outputPath = argv[++index] ?? "";
+          else if (arg === "--budget") budget = parsePositiveIntegerOption("--budget", argv[++index] ?? "");
+          else throw new Error(`Unknown benchmark option: ${arg}`);
+        }
+        if (fixturePath === "" || outputPath === "") throw new Error("Missing value for benchmark option");
+        const result = await runBenchmark({ ...(fixturePath ? { fixturePath } : {}), tokenBudget: budget });
+        if (outputPath) {
+          await mkdir(dirname(resolve(outputPath)), { recursive: true });
+          await writeFile(resolve(outputPath), result.report + "\n", "utf8");
+        }
+        io.stdout(result.report);
+        return result.decision === "no-go" ? 1 : 0;
+      } catch (error) {
+        io.stderr(error instanceof Error ? error.message : String(error));
+        return 1;
+      }
     },
   },
   {

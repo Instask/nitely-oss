@@ -14,6 +14,7 @@
     "test/**/*.ts",
     "vitest.config.ts",
     "scripts/packed-package-inspect.ts",
-    "scripts/package-install-smoke.mts"
+    "scripts/package-install-smoke.mts",
+    "scripts/freeze-hybrid-embeddings.mts"
   ]
 }
