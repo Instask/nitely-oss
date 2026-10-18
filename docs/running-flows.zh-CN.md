@@ -185,6 +185,15 @@ evidence 展示 per-stage 与 per-run 汇总。`glm` 和 `grok` 不上报用量�
 `stage.runtime.calls`。配置了 OTLP endpoint 时，每个 run 会根据这些 event 导出为一条
 OpenTelemetry trace，见 [Run Traces](tracing.md)（英文）。
 
+Runtime 上报的 input 不等于 Nitely 打包的 prompt。它包含 runtime 自己的 session
+前缀和工具循环里的每一次重读，其中绝大部分由 provider 的缓存提供。Codex 每个 turn
+只上报一次累计的 `turn.completed` usage，所以一个执行了很多命令的 implement turn
+可能对着几千 token 的 prompt 上报几百万 input token。因此 Console 的 stage 详情（`Input by attempt`）和
+evidence 的 `## Runtime Usage` 段会把每个 attempt 的 input 并排拆成三项：harness
+prompt（`stage.context.usage`）、fresh input 和 cached input，累计 input 仍然保留在
+旁边。Runtime 数字取自该 attempt 最后一次 usage 快照，Nitely 不会把它拆成每次调用的
+数字；没有产生快照的 attempt 标为未上报，不按零计。
+
 ## 操作员提问策略
 
 Agent stage 可以写 `question.json` 向人请求决定。提问策略决定之后的行为，可以设在 Flow 上

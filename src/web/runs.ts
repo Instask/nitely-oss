@@ -59,6 +59,8 @@ import {
   type ProjectedStage,
   type ProjectedTaskPlanLoop,
   type ProjectedWorkflowStage,
+  attemptInputBreakdowns,
+  formatAttemptInputBreakdown,
   staleRunningRunMs,
   sumContextUsage,
   sumRuntimeUsage,
@@ -2296,6 +2298,8 @@ function runtimeUsageDetail(usage: ProjectedRuntimeUsageTotal | undefined): stri
   const parts = [
     usage.totalTokens !== undefined ? `${usage.totalTokens} total tokens` : undefined,
     usage.inputTokens !== undefined ? `${usage.inputTokens} input` : undefined,
+    usage.freshInputTokens !== undefined ? `${usage.freshInputTokens} fresh input` : undefined,
+    usage.cachedInputTokens !== undefined ? `${usage.cachedInputTokens} cached input` : undefined,
     usage.outputTokens !== undefined ? `${usage.outputTokens} output` : undefined,
     usage.estimatedCostUsd !== undefined ? `$${usage.estimatedCostUsd.toFixed(4)}` : undefined,
     `${usage.knownAttempts} known attempt${usage.knownAttempts === 1 ? "" : "s"}`,
@@ -2580,6 +2584,11 @@ async function projectedStageDetails(input: {
   addDetailField(fields, "Stderr path", redactForWeb(attempt?.stderrPath), { mono: true });
   addDetailField(fields, "Context usage", contextUsageDetail(input.stageUsage));
   addDetailField(fields, "Runtime usage", runtimeUsageDetail(input.stageRuntimeUsage));
+  addDetailField(
+    fields,
+    "Input by attempt",
+    attemptInputBreakdowns([stage]).map(formatAttemptInputBreakdown).join("; ") || undefined,
+  );
   addDetailField(fields, "Budget", budgetDetail(attempt?.budget));
   addDetailField(fields, "Task plan input", input.taskPlan?.inputId, { mono: true });
   addDetailField(fields, "Current task", input.taskPlan?.currentTaskId, { mono: true });
