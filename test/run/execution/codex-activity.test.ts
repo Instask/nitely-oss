@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { readCodexExecActivity } from "../../../src/run/execution/codex-activity.js";
+import { createCodexExecCapture, readCodexExecActivity } from "../../../src/run/execution/codex-activity.js";
 import type { AgentRuntimeCall } from "../../../src/run/execution/types.js";
 import { buildRunTraceSpans } from "../../../src/telemetry/run-trace-otel.js";
 import type { StoredRunEvent } from "../../../src/events/types.js";
@@ -320,5 +320,158 @@ describe("readCodexExecActivity", () => {
     expect(turn?.attributes["nitely.usage.granularity"]).toBe("turn");
     expect(turn?.attributes["nitely.usage.accounting"]).toBe("delta");
     expect(JSON.stringify(trace)).not.toContain(SECRET);
+    const toolSpan = trace?.spans.find((span) => span.name === "execute_tool command_execution");
+    expect(toolSpan?.startTime).toBe(toolSpan?.endTime);
+  });
+
+  it("records tool and turn durations from observation times", () => {
+    const started = Date.parse("2026-10-15T01:00:02.100Z");
+    const ended = Date.parse("2026-10-15T01:00:02.800Z");
+    const turnStarted = Date.parse("2026-10-15T01:00:02.000Z");
+    const turnEnded = Date.parse("2026-10-15T01:00:02.900Z");
+    const usage = readCodexExecActivity(execStream([
+      { type: "thread.started", thread_id: THREAD, observedAt: turnStarted },
+      { type: "turn.started", observedAt: turnStarted },
+      {
+        type: "item.started",
+        observedAt: started,
+        item: { id: "cmd-1", type: "command_execution", status: "in_progress" },
+      },
+      {
+        type: "item.completed",
+        observedAt: ended,
+        item: {
+          id: "cmd-1",
+          type: "command_execution",
+          command: `echo ${SECRET}`,
+          status: "completed",
+        },
+      },
+      {
+        type: "turn.completed",
+        observedAt: turnEnded,
+        usage: { input_tokens: 90, cached_input_tokens: 30, output_tokens: 12 },
+      },
+    ]));
+    expect(usage?.callLog).toEqual([
+      {
+        kind: "tool",
+        toolName: "command_execution",
+        toolCallId: "cmd-1",
+        startedAt: new Date(started).toISOString(),
+        endedAt: new Date(ended).toISOString(),
+      },
+      expect.objectContaining({
+        kind: "llm",
+        startedAt: new Date(turnStarted).toISOString(),
+        endedAt: new Date(turnEnded).toISOString(),
+      }),
+    ]);
+    const events: StoredRunEvent[] = [
+      {
+        sequence: 1,
+        runId: "2026-10-15T010000000Z-codex",
+        type: "stage.started",
+        stageId: "implement",
+        attempt: 1,
+        payload: {},
+        createdAt: "2026-10-15T01:00:01.000Z",
+      },
+      {
+        sequence: 2,
+        runId: "2026-10-15T010000000Z-codex",
+        type: "stage.runtime.selected",
+        stageId: "implement",
+        attempt: 1,
+        payload: { runtime: "codex", model: "gpt-5.6-luna" },
+        createdAt: "2026-10-15T01:00:02.000Z",
+      },
+      {
+        sequence: 3,
+        runId: "2026-10-15T010000000Z-codex",
+        type: "stage.runtime.calls",
+        stageId: "implement",
+        attempt: 1,
+        payload: { calls: usage?.callLog },
+        createdAt: "2026-10-15T01:00:03.000Z",
+      },
+    ];
+    const trace = buildRunTraceSpans(events);
+    const toolSpan = trace?.spans.find((span) => span.name === "execute_tool command_execution");
+    expect(toolSpan?.startTime).toBe(new Date(started).toISOString());
+    expect(toolSpan?.endTime).toBe(new Date(ended).toISOString());
+    expect(toolSpan?.startTime).not.toBe(toolSpan?.endTime);
+  });
+});
+
+describe("createCodexExecCapture", () => {
+  it("keeps a finished turn when a later command line is cut off", () => {
+    let clock = 1_700_000_000_000;
+    const capture = createCodexExecCapture({ now: () => (clock += 1_000) });
+    const prelude = [
+      { type: "thread.started", thread_id: THREAD },
+      { type: "turn.started" },
+      {
+        type: "item.started",
+        item: { id: "cmd-1", type: "command_execution", status: "in_progress" },
+      },
+    ].map(line).join("\n") + "\n";
+    capture.write(prelude);
+    const bulky = `${JSON.stringify({
+      type: "item.completed",
+      item: {
+        id: "cmd-1",
+        type: "command_execution",
+        command: `/bin/bash -lc ${SECRET}`,
+        aggregated_output: `${"x".repeat(20_000)}${SECRET}`,
+        status: "completed",
+      },
+    })}\n`;
+    capture.write(bulky.slice(0, 9_000));
+    expect(capture.size()).toBeLessThan(12_000);
+    capture.write(bulky.slice(9_000));
+    capture.write(`${line({
+      type: "turn.completed",
+      usage: {
+        input_tokens: 90,
+        cached_input_tokens: 10,
+        output_tokens: 8,
+        reasoning_output_tokens: 3,
+        cache_write_input_tokens: 1,
+      },
+    })}\n`);
+    capture.write(`{"type":"item.completed","item":{"id":"cmd-2","type":"command_execution","command":"${SECRET}`);
+    const text = capture.text();
+    expect(text).not.toContain(SECRET);
+    expect(text).not.toContain("/bin/bash");
+    const usage = readCodexExecActivity(text);
+    expect(usage).toMatchObject({
+      inputTokens: 90,
+      outputTokens: 8,
+      raw: { reasoningOutputTokens: 3, cacheWriteInputTokens: 1 },
+    });
+    const tool = usage?.callLog?.find((call) => call.kind === "tool");
+    expect(tool).toMatchObject({
+      toolName: "command_execution",
+      toolCallId: "cmd-1",
+    });
+    expect(tool && "startedAt" in tool && tool.startedAt && tool.endedAt
+      ? Date.parse(tool.endedAt) - Date.parse(tool.startedAt)
+      : 0).toBe(1_000);
+    expect(usage?.callLog?.some((call) => call.kind === "tool" && call.toolCallId === "cmd-2")).toBe(false);
+  });
+
+  it("does not invent tokens when the turn never completes", () => {
+    const capture = createCodexExecCapture();
+    capture.write(`${line({ type: "thread.started", thread_id: THREAD })}\n`);
+    capture.write(`${line({ type: "turn.started" })}\n`);
+    capture.write(`${line({
+      type: "item.started",
+      item: { id: "cmd-1", type: "command_execution", status: "in_progress" },
+    })}\n`);
+    capture.write(`{"type":"item.completed","item":{"id":"cmd-1","command":"${SECRET}`);
+    const text = capture.text();
+    expect(text).not.toContain(SECRET);
+    expect(readCodexExecActivity(text)).toBeUndefined();
   });
 });

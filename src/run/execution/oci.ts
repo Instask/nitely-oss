@@ -26,6 +26,7 @@ import {
   type ClaudePermissionMode,
   type RuntimeEnv,
 } from "./local.js";
+import { createCodexExecCapture } from "./codex-activity.js";
 import {
   captureCallContent,
   createPiJsonCapture,
@@ -81,7 +82,8 @@ export interface SandboxProcessInput {
   signal?: AbortSignal;
   /**
    * Receives stdout instead of a raw buffer; `maxOutputBytes` then counts
-   * what it holds. Used to keep Pi's JSON event stream in bounded memory.
+   * what it holds. Used to keep Pi and Codex JSON event streams in bounded
+   * memory.
    */
   stdoutCapture?: PiJsonCapture;
 }
@@ -1460,6 +1462,7 @@ export class OciExecutionBackend implements ExecutionBackend {
       }
       const piJson = isPiJsonRuntime(launch.runtime);
       if (piJson) plan.launch.stdoutCapture = createPiJsonCapture({ captureContent: captureCallContent() });
+      else if (launch.runtime === "codex") plan.launch.stdoutCapture = createCodexExecCapture();
       if (mediation.status === "enforced") {
         await this.assertCommandMediatorPython();
         mediatorDir = await this.prepareCommandMediator(mediation.policy);

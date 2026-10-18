@@ -11,8 +11,10 @@ import { MAX_CALL_LOG_ENTRIES } from "./pi-json.js";
  * is smaller than an earlier one is not split; the attempt keeps the last
  * snapshot as one cumulative record.
  *
- * Tool records are identity and error flag only. Command lines, paths,
- * arguments, and message text stay out of the log.
+ * Tool records keep identity, the error flag, and the times the start and
+ * end lines were observed. Command lines, paths, arguments, and message text
+ * stay out of the log. A line with no observation time does not get a
+ * duration filled in.
  */
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -157,6 +159,27 @@ function toolRecord(item: Record<string, unknown>): AgentRuntimeCall | undefined
   };
 }
 
+function observedAtOf(event: Record<string, unknown>): string | undefined {
+  const value = event.observedAt;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+  const date = new Date(value);
+  return Number.isFinite(date.valueOf()) ? date.toISOString() : undefined;
+}
+
+function withTimes(
+  call: AgentRuntimeCall,
+  startedAt: string | undefined,
+  endedAt: string | undefined,
+): AgentRuntimeCall {
+  if (!startedAt || !endedAt) return call;
+  const start = Date.parse(startedAt);
+  const end = Date.parse(endedAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return call;
+  return { ...call, startedAt, endedAt };
+}
+
 function pushCall(
   calls: AgentRuntimeCall[],
   call: AgentRuntimeCall,
@@ -195,11 +218,17 @@ export function readCodexExecActivity(stdout: string): AgentRuntimeUsage | undef
   }
 
   const turns: UsageSnapshot[] = [];
-  const timeline: Array<{ kind: "tool"; call: AgentRuntimeCall } | { kind: "turn" }> = [];
+  const timeline: Array<
+    | { kind: "tool"; call: AgentRuntimeCall }
+    | { kind: "turn"; startedAt?: string; endedAt?: string }
+  > = [];
+  const toolStarts = new Map<string, string>();
   let started = 0;
+  let turnStartedAt: string | undefined;
   for (const event of events) {
     if (event.type === "turn.started") {
       started += 1;
+      turnStartedAt = observedAtOf(event);
       continue;
     }
     if (event.type === "turn.failed" || event.type === "error") {
@@ -209,13 +238,43 @@ export function readCodexExecActivity(stdout: string): AgentRuntimeUsage | undef
       const snapshot = parseSnapshot(event.usage);
       if (!snapshot || started <= turns.length) return undefined;
       turns.push(snapshot);
-      timeline.push({ kind: "turn" });
+      timeline.push({
+        kind: "turn",
+        startedAt: turnStartedAt,
+        endedAt: observedAtOf(event),
+      });
+      turnStartedAt = undefined;
+      continue;
+    }
+    if (event.type === "item.started") {
+      const item = record(event.item);
+      const id = item ? identifier(item.id) : undefined;
+      const at = observedAtOf(event);
+      if (
+        item &&
+        id &&
+        at &&
+        typeof item.type === "string" &&
+        TOOL_ITEM_TYPES.has(item.type) &&
+        !toolStarts.has(id)
+      ) {
+        toolStarts.set(id, at);
+      }
       continue;
     }
     if (event.type === "item.completed") {
       const item = record(event.item);
       const tool = item ? toolRecord(item) : undefined;
-      if (tool) timeline.push({ kind: "tool", call: tool });
+      if (tool?.kind === "tool") {
+        timeline.push({
+          kind: "tool",
+          call: withTimes(
+            tool,
+            tool.toolCallId ? toolStarts.get(tool.toolCallId) : undefined,
+            observedAtOf(event),
+          ),
+        });
+      }
     }
   }
   if (turns.length === 0 || started < turns.length) return undefined;
@@ -259,7 +318,7 @@ export function readCodexExecActivity(stdout: string): AgentRuntimeUsage | undef
       if (entry.kind === "turn") {
         const llm = llmRecords[turnIndex];
         turnIndex += 1;
-        if (llm) ordered.push(llm);
+        if (llm) ordered.push(withTimes(llm, entry.startedAt, entry.endedAt));
       } else {
         ordered.push(entry.call);
       }
@@ -309,5 +368,261 @@ export function readCodexExecActivity(stdout: string): AgentRuntimeUsage | undef
     raw,
     callLog: kept,
     ...(dropped > 0 ? { callLogDropped: dropped } : {}),
+  };
+}
+
+const USAGE_FIELDS = [
+  "input_tokens",
+  "cached_input_tokens",
+  "output_tokens",
+  "cache_write_input_tokens",
+  "reasoning_output_tokens",
+] as const;
+const ITEM_EVENT_TYPES = new Set(["item.started", "item.completed"]);
+const SMALL_LINE_CHARS = 8_192;
+const HEAD_CHARS = 512;
+const TAIL_CHARS = 256;
+
+function pickUsage(value: unknown): Record<string, number> {
+  const usage = record(value);
+  if (!usage) return {};
+  const kept: Record<string, number> = {};
+  for (const key of USAGE_FIELDS) {
+    const parsed = count(usage[key]);
+    if (parsed !== undefined) kept[key] = parsed;
+  }
+  return kept;
+}
+
+function itemStatus(value: unknown): "completed" | "failed" | "in_progress" | undefined {
+  return value === "completed" || value === "failed" || value === "in_progress"
+    ? value
+    : undefined;
+}
+
+function compactItem(type: string, item: unknown): Record<string, unknown> {
+  const source = record(item);
+  const id = source ? identifier(source.id) : undefined;
+  const itemType = source ? identifier(source.type) : undefined;
+  const server = source ? identifier(source.server) : undefined;
+  const tool = source ? identifier(source.tool) : undefined;
+  const status = source ? itemStatus(source.status) : undefined;
+  return {
+    type,
+    item: {
+      ...(id ? { id } : {}),
+      ...(itemType ? { type: itemType } : {}),
+      ...(server ? { server } : {}),
+      ...(tool ? { tool } : {}),
+      ...(status ? { status } : {}),
+    },
+  };
+}
+
+function compactKeptEvent(event: Record<string, unknown>): Record<string, unknown> | undefined {
+  const type = event.type;
+  if (type === "thread.started") {
+    const threadId = typeof event.thread_id === "string" && UUID_PATTERN.test(event.thread_id)
+      ? event.thread_id
+      : undefined;
+    return { type, ...(threadId ? { thread_id: threadId } : {}) };
+  }
+  if (type === "turn.started" || type === "turn.failed" || type === "error") {
+    return { type };
+  }
+  if (type === "turn.completed") {
+    return { type, usage: pickUsage(event.usage) };
+  }
+  if (type === "item.started" || type === "item.completed") {
+    return compactItem(type, event.item);
+  }
+  if (type === "item.updated") return undefined;
+  if (typeof type === "string") return { type };
+  return undefined;
+}
+
+function eventTypeOf(prefix: string): string | undefined {
+  const match = /^\{"type"\s*:\s*"([^"]{1,80})"/.exec(prefix);
+  return match?.[1];
+}
+
+function quotedField(window: string, name: string): string | undefined {
+  const match = new RegExp(`"${name}"\\s*:\\s*"([^"\\\\]{1,80})"`).exec(window);
+  return match?.[1] ? identifier(match[1]) : undefined;
+}
+
+function itemField(head: string, name: string): string | undefined {
+  const itemAt = head.indexOf('"item"');
+  return quotedField(itemAt === -1 ? head : head.slice(itemAt), name);
+}
+
+function terminalStatus(tail: string): "completed" | "failed" | "in_progress" | undefined {
+  const match = /"status"\s*:\s*"(completed|failed|in_progress)"\s*}+\s*$/.exec(tail);
+  return itemStatus(match?.[1]);
+}
+
+function compactItemWindows(type: string, head: string, tail: string): Record<string, unknown> {
+  const id = itemField(head, "id");
+  const itemType = itemField(head, "type");
+  const server = itemField(head, "server");
+  const tool = itemField(head, "tool");
+  const status = terminalStatus(tail);
+  return {
+    type,
+    item: {
+      ...(id ? { id } : {}),
+      ...(itemType ? { type: itemType } : {}),
+      ...(server ? { server } : {}),
+      ...(tool ? { tool } : {}),
+      ...(status ? { status } : {}),
+    },
+  };
+}
+
+/**
+ * Capture `codex exec --json` stdout in bounded memory.
+ *
+ * A command result is one JSON line that can carry the whole command and its
+ * output. This keeps the thread, turn, and tool identity, plus turn usage,
+ * and stamps `observedAt` (epoch milliseconds) when each kept line finishes.
+ * A line cut off at the end is dropped, so a later `turn.completed` is not
+ * lost behind it, and a turn that never completed contributes no token counts.
+ */
+export function createCodexExecCapture(
+  options: { now?: () => number; onLine?: (line: string) => void } = {},
+): { write(chunk: Buffer | string): void; size(): number; text(): string } {
+  const now = options.now ?? Date.now;
+  const decoder = new TextDecoder("utf-8");
+  const out: string[] = [];
+  let outBytes = 0;
+  let mode: "buffer" | "item" | "drop" = "buffer";
+  let line = "";
+  let head = "";
+  let tail = "";
+  let itemType = "";
+  let finished = false;
+
+  const emitLine = (text: string) => {
+    out.push(`${text}\n`);
+    outBytes += Buffer.byteLength(text) + 1;
+    options.onLine?.(text);
+  };
+  const emitEvent = (value: Record<string, unknown>) => {
+    emitLine(JSON.stringify({ ...value, observedAt: now() }));
+  };
+  const reset = () => {
+    mode = "buffer";
+    line = "";
+    head = "";
+    tail = "";
+    itemType = "";
+  };
+  const promote = () => {
+    if (mode !== "buffer" || line.length <= SMALL_LINE_CHARS) return;
+    const type = eventTypeOf(line);
+    if (type && ITEM_EVENT_TYPES.has(type)) {
+      mode = "item";
+      itemType = type;
+      head = line.slice(0, HEAD_CHARS);
+      tail = line.slice(-TAIL_CHARS);
+      line = "";
+      return;
+    }
+    mode = "drop";
+    line = "";
+  };
+  const keepOverflow = (extra: string) => {
+    if (mode !== "item" || extra.length === 0) return;
+    if (head.length < HEAD_CHARS) head += extra.slice(0, HEAD_CHARS - head.length);
+    tail = (tail + extra).slice(-TAIL_CHARS);
+  };
+  const finishBuffered = (text: string) => {
+    if (!text.startsWith("{")) {
+      emitLine(text);
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      emitLine(text);
+      return;
+    }
+    const event = record(parsed);
+    const compact = event && typeof event.type === "string"
+      ? compactKeptEvent(event)
+      : undefined;
+    if (compact) emitEvent(compact);
+    else if (!event || typeof event.type !== "string") emitLine(text);
+  };
+  const finish = () => {
+    if (mode === "item") {
+      emitEvent(compactItemWindows(itemType, head, tail));
+    } else if (mode === "buffer") {
+      const text = line.endsWith("\r") ? line.slice(0, -1) : line;
+      if (text.trim()) finishBuffered(text);
+    }
+    reset();
+  };
+  const appendPiece = (piece: string) => {
+    if (mode === "drop" || piece.length === 0) return;
+    if (mode === "item") {
+      if (head.length < HEAD_CHARS) head += piece.slice(0, HEAD_CHARS - head.length);
+      tail = (tail + piece).slice(-TAIL_CHARS);
+      return;
+    }
+    const room = SMALL_LINE_CHARS + 1 - line.length;
+    if (piece.length <= room) {
+      line += piece;
+      promote();
+      return;
+    }
+    line += piece.slice(0, Math.max(0, room));
+    const extra = piece.slice(Math.max(0, room));
+    promote();
+    keepOverflow(extra);
+  };
+  const append = (text: string) => {
+    let rest = text;
+    while (rest.length > 0) {
+      const newline = rest.indexOf("\n");
+      const piece = newline === -1 ? rest : rest.slice(0, newline);
+      appendPiece(piece);
+      if (newline === -1) break;
+      finish();
+      rest = rest.slice(newline + 1);
+    }
+  };
+  return {
+    write(chunk) {
+      if (finished) return;
+      append(typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true }));
+    },
+    size() {
+      return outBytes + Buffer.byteLength(line) + Buffer.byteLength(head) + Buffer.byteLength(tail);
+    },
+    text() {
+      if (!finished) {
+        finished = true;
+        append(decoder.decode());
+        if (mode === "buffer" && line.trim()) {
+          const text = line.endsWith("\r") ? line.slice(0, -1) : line;
+          if (!text.startsWith("{")) {
+            emitLine(text);
+            reset();
+          } else {
+            try {
+              JSON.parse(text);
+              finish();
+            } catch {
+              reset();
+            }
+          }
+        } else {
+          reset();
+        }
+      }
+      return out.join("");
+    },
   };
 }

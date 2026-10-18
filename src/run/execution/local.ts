@@ -33,7 +33,7 @@ import type {
   RunCommandOptions,
   WorkspaceHandle,
 } from "./types.js";
-import { readCodexExecActivity } from "./codex-activity.js";
+import { createCodexExecCapture, readCodexExecActivity } from "./codex-activity.js";
 import {
   captureCallContent,
   createPiJsonCapture,
@@ -1525,6 +1525,17 @@ export class LocalExecutionBackend implements ExecutionBackend {
       const piJson = isPiJsonRuntime(launch.runtime);
       // Bounded: Pi streams per-token and per-tool-snapshot records.
       const piCapture = piJson ? createPiJsonCapture({ captureContent: captureCallContent() }) : undefined;
+      // Codex command results are one JSON line each. Keep turn usage and tool
+      // identity while the line arrives, instead of buffering the command output.
+      const codexCapture = launch.runtime === "codex"
+        ? createCodexExecCapture({
+          onLine: (line) => {
+            const text = `${line}\n`;
+            process.stdout.write(text);
+            logWriters.writeStdout(text);
+          },
+        })
+        : undefined;
       let piTextWritten = false;
       const clearTimers = () => {
         if (timeout) clearTimeout(timeout);
@@ -1545,6 +1556,10 @@ export class LocalExecutionBackend implements ExecutionBackend {
       child.stdout?.on("data", (chunk: Buffer) => {
         if (piCapture) {
           piCapture.write(chunk);
+          return;
+        }
+        if (codexCapture) {
+          codexCapture.write(chunk);
           return;
         }
         stdout.push(chunk);
@@ -1569,7 +1584,7 @@ export class LocalExecutionBackend implements ExecutionBackend {
           : undefined;
       const capturedResult = (): AgentResult => {
         const pi = piResult();
-        const capturedStdout = pi?.stdout ?? Buffer.concat(stdout).toString("utf8");
+        const capturedStdout = pi?.stdout ?? codexCapture?.text() ?? Buffer.concat(stdout).toString("utf8");
         if (pi && !piTextWritten) {
           piTextWritten = true;
           if (pi.stdout) {
