@@ -126,6 +126,25 @@ async function decideWithPython(fixture: Fixture): Promise<Record<string, string
   return JSON.parse(Buffer.concat(stdout).toString()) as Record<string, string>;
 }
 
+function compilerSpawnError(error: unknown): Error {
+  const code = error && typeof error === "object" && "code" in error
+    ? (error as { code?: unknown }).code
+    : undefined;
+  if (code === "ENOENT") {
+    return new Error(
+      "command-mediator race tests require gcc on PATH (spawn gcc ENOENT). The runner image installs gcc in docker/runner/Dockerfile; install gcc before running this suite.",
+    );
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+describe("command mediator compiler", () => {
+  it("reports a missing gcc as a toolchain gap", () => {
+    const error = Object.assign(new Error("spawn gcc ENOENT"), { code: "ENOENT" });
+    expect(compilerSpawnError(error).message).toContain("require gcc on PATH");
+  });
+});
+
 describe.skipIf(!linuxX64)("command mediator", () => {
   it("matches the TypeScript decision for every shared fixture", async () => {
     for (const fixture of fixtures) {
@@ -474,7 +493,7 @@ function compile(output: string, source: string): Promise<void> {
   const stderr: Buffer[] = [];
   child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
   const exited = new Promise<number>((resolve, reject) => {
-    child.once("error", reject);
+    child.once("error", (error) => reject(compilerSpawnError(error)));
     child.once("exit", (code) => resolve(code ?? 1));
   });
   child.stdin.end(source);
