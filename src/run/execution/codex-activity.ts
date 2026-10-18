@@ -13,8 +13,8 @@ import { MAX_CALL_LOG_ENTRIES } from "./pi-json.js";
  * The last snapshot is the attempt total only when the attempt started the
  * thread. `codex exec resume` keeps the thread's total, so a resumed attempt's
  * snapshots also include every earlier attempt on that thread, and its first
- * record carries them. This capture cannot see those attempts; subtracting
- * them needs the session's previous snapshot (jerryleooo/nitely#726).
+ * record carries them. This capture cannot see those attempts, so it records
+ * the thread id and leaves the subtraction to codex-session-usage.ts.
  *
  * Tool records keep identity, the error flag, and the times the start and
  * end lines were observed. Command lines, paths, arguments, and message text
@@ -349,6 +349,9 @@ export function readCodexExecActivity(stdout: string): AgentRuntimeUsage | undef
   }
 
   const raw: Record<string, number | string> = {
+    // A resumed attempt keeps this thread id, and its snapshots include every
+    // earlier attempt on it; projection subtracts them by this id.
+    threadId: first.thread_id,
     cachedInputTokens: last.cached,
     calls: turns.length,
     usageGranularity: "turn",
