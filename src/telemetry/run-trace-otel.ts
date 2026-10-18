@@ -7,6 +7,12 @@ import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace";
 import { redactUnknown } from "../context/redaction.js";
 import type { StoredRunEvent } from "../events/types.js";
 import type { AgentRuntimeCall } from "../run/execution/types.js";
+import {
+  attemptShareOfCodexCalls,
+  attemptShareOfCodexUsage,
+  codexSessionBaselineKey,
+  codexSessionBaselines,
+} from "../run/codex-session-usage.js";
 
 /**
  * OpenTelemetry trace export for runs.
@@ -351,8 +357,13 @@ export function buildRunTraceSpans(
   }
 
   const callSpans: TraceSpanSpec[] = [];
+  const codexBaselines = codexSessionBaselines(sorted);
   for (const state of attempts.values()) {
     const attemptKey = `attempt:${state.stageId}:${state.attempt}`;
+    // A resumed Codex attempt reports its session's total; export its own share.
+    const baseline = codexBaselines.get(codexSessionBaselineKey(state.stageId, state.attempt));
+    if (baseline && state.usage) state.usage = attemptShareOfCodexUsage(state.usage, baseline);
+    if (baseline && state.calls) state.calls = attemptShareOfCodexCalls(state.calls, baseline);
     const usage = state.usage ?? {};
     const raw = asRecord(usage.raw);
     const cost = asRecord(usage.cost);
