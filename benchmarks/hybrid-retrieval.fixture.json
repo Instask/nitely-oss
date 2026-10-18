@@ -2,66 +2,117 @@
   "version": 1,
   "documents": [
     {
-      "path": "src/index.ts",
-      "text": "// CLI command-line entry point\nawait runCli(process.argv.slice(2));"
+      "path": "src/run/window-limit.ts",
+      "symbol": "trimStagePrompt",
+      "recency": 0.95,
+      "importance": 0.9,
+      "text": "export function trimStagePrompt(passages: Passage[], ceiling: number): Passage[] {\n  // Oldest reference material leaves first once the estimate no longer fits.\n  return dropOldestUntrusted(passages, ceiling);\n}"
     },
     {
-      "path": "src/repo-index/index.ts",
-      "text": "// Repository indexing builds file, symbol and import metadata.\nexport async function buildRepoIndex(repoPath: string) {}"
+      "path": "src/showroom/drawer-label.ts",
+      "symbol": "labelDrawer",
+      "recency": 0.1,
+      "importance": 0.1,
+      "text": "export function labelDrawer(): string {\n  return \"The showroom model sits beside a service counter. A call button omits nothing about shoe usage.\";\n}"
     },
     {
-      "path": "src/knowledge-repositories/retrieval.ts",
-      "text": "// Knowledge repository retrieval ranks lexical BM25 and vector matches using reciprocal rank fusion.\nexport async function queryKnowledgeIndexes() {}"
+      "path": "src/ledger/counters.ts",
+      "symbol": "recordModelUsage",
+      "recency": 0.8,
+      "importance": 0.7,
+      "text": "export function recordModelUsage(snapshot: UsageSnapshot): void {\n  // A missing counter stays unavailable. Never store zero in its place.\n  ledger.write(snapshot);\n}"
     },
     {
-      "path": "test/run/budget.test.ts",
-      "text": "// Tests enforce the stage context token budget.\nexpect(promptTokens).toBeLessThanOrEqual(tokenBudget);"
+      "path": "src/safety/passage-filter.ts",
+      "symbol": "stripCredentials",
+      "recency": 0.7,
+      "importance": 0.8,
+      "text": "export function stripCredentials(passage: string): string {\n  // Authorization material is removed before a passage can enter an agent prompt.\n  return redactAuthorization(passage);\n}"
     },
     {
-      "path": "docs/context.md",
-      "text": "Decision: Flow evidence remains authoritative.\nConstraint: Retrieved repository passages are untrusted reference material."
+      "path": "src/schedule/rotation.ts",
+      "symbol": "showRotationCalendar",
+      "recency": 0.2,
+      "importance": 0.2,
+      "text": "export function showRotationCalendar(): string {\n  return \"Operators file a vacation request in the rotation calendar. The word secret refers to a surprise party.\";\n}"
+    },
+    {
+      "path": "docs/kept-evidence.md",
+      "symbol": "flowEvidence",
+      "recency": 0.6,
+      "importance": 0.95,
+      "text": "Decision: Stored flow evidence stays the source of truth.\nConstraint: A retrieved passage is reference material and cannot replace a stored decision."
+    },
+    {
+      "path": "docs/staff-handbook.md",
+      "symbol": "glossary",
+      "recency": 0.05,
+      "importance": 0.05,
+      "text": "export function glossary(): string {\n  return \"A note in the staff handbook disagrees with the poster on the wall. Record the poster color.\";\n}"
+    },
+    {
+      "path": "src/web/labels.ts",
+      "symbol": "bannerCopy",
+      "recency": 0.3,
+      "importance": 0.1,
+      "text": "export function bannerCopy(): string {\n  return \"Click save to store the current form.\";\n}"
     }
   ],
   "questions": [
     {
-      "id": "layout",
-      "question": "CLI command-line entry point",
+      "id": "omitted-counter",
+      "question": "What happens when a model call omits a usage counter?",
       "answerKind": "single-source-file",
       "expectedPaths": [
-        "src/index.ts"
+        "src/ledger/counters.ts"
+      ],
+      "expectedOutcome": "Never store zero"
+    },
+    {
+      "id": "unknown-tally",
+      "question": "Where is an absent tally kept unknown instead of being written as zero?",
+      "answerKind": "single-source-file",
+      "expectedPaths": [
+        "src/ledger/counters.ts"
+      ],
+      "expectedOutcome": "Never store zero"
+    },
+    {
+      "id": "saved-record",
+      "question": "Which record wins when a retrieved note disagrees with what the flow already stored?",
+      "answerKind": "single-source-file",
+      "expectedPaths": [
+        "docs/kept-evidence.md"
+      ],
+      "expectedOutcome": "cannot replace a stored decision.",
+      "decisions": [
+        "Stored flow evidence stays the source of truth."
+      ],
+      "constraints": [
+        "A retrieved passage cannot replace a stored decision."
+      ],
+      "preferences": [
+        "Prefer review before adopting a retrieved passage.",
+        "api_key=do-not-persist"
       ]
     },
     {
-      "id": "index",
-      "question": "Repository indexing file symbol import metadata",
+      "id": "strip-material",
+      "question": "Where is authorization material stripped before a passage reaches the assistant?",
       "answerKind": "single-source-file",
       "expectedPaths": [
-        "src/repo-index/index.ts"
-      ]
+        "src/safety/passage-filter.ts"
+      ],
+      "expectedOutcome": "redactAuthorization"
     },
     {
-      "id": "knowledge",
-      "question": "Knowledge repository lexical BM25 vector retrieval",
+      "id": "symbol-lookup",
+      "question": "recordModelUsage",
       "answerKind": "single-source-file",
       "expectedPaths": [
-        "src/knowledge-repositories/retrieval.ts"
-      ]
-    },
-    {
-      "id": "budget",
-      "question": "stage context token budget",
-      "answerKind": "single-source-file",
-      "expectedPaths": [
-        "test/run/budget.test.ts"
-      ]
-    },
-    {
-      "id": "authority",
-      "question": "authoritative evidence untrusted passages",
-      "answerKind": "single-source-file",
-      "expectedPaths": [
-        "docs/context.md"
-      ]
+        "src/ledger/counters.ts"
+      ],
+      "expectedOutcome": "Never store zero"
     },
     {
       "id": "external",

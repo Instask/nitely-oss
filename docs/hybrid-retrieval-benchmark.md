@@ -1,70 +1,72 @@
 # Hybrid retrieval benchmark
 
-Run the self-contained smoke comparison with:
+Run the committed comparison with:
 
 ```sh
 nitely benchmark hybrid-retrieval --fixture benchmarks/hybrid-retrieval.fixture.json --budget 1800 --output /tmp/hybrid-report.md
 ```
 
-The default fixture is bundled in the CLI, so installed packages do not need the
-repository fixture file. `--output` is written even for a no-go; exit status 1
-means no-go or an invalid invocation. The result also exposes a structured
-`decision` field. Fixtures require a nonempty document corpus, unique question
-IDs, existing expected source paths, and explicit out-of-repository questions.
+The same fixture is bundled in the CLI, so an installed package can run
+`nitely benchmark hybrid-retrieval` without the repository file. Exit status 0
+means the report's decision is `go`. Exit status 1 means `no-go` or an invalid
+invocation. The report is written for both decisions and contains exactly one
+line that starts with `Decision:`.
 
-The comparison executes the existing knowledge engine's BM25 lexical retrieval
-and its BM25 + local-hash vector ranking fused with RRF against the same corpus
-and per-query budget. It measures expected-path recall (including abstention),
-source text/range/revision/hash validity, retrieval latency and the token estimate
-of the full escaped prompt payload. Index construction is outside query latency;
-timings vary by machine. The fixture digest identifies the evaluated inputs.
-Local-hash vectors are lexical features, **not semantic embeddings**.
+The fixture has a nonempty document corpus, unique question IDs, expected paths
+that exist in the corpus, and one explicit out-of-repository question. Repository
+questions carry an expected outcome sentence. Optional document fields are an
+exported symbol name plus recency and importance in the range 0 to 1.
 
-The committed fixture contains public-code-shaped smoke examples, not observed
-spec-to-PR outcome evaluations. These measurements cannot establish value over
-repo-index or file grep. Semantic retrieval, realistic failure/overfetch cases,
-recency/importance weighting, cold indexing cost and downstream code/eval outcomes
-still need evaluation. Consequently this benchmark always reports **no-go**;
-passing unit tests or a smaller context cannot authorize rollout or close the
-associated evaluation work.
+## Arms and scoring
 
-## Experimental Run integration
+Each question is scored four ways, at a per-query budget of 1,800 estimated tokens:
 
-`NITELY_HYBRID_RETRIEVAL=1` adds task-repository retrieval to actual agent and
-review-gate prompt preparation. It reuses the existing knowledge chunker, BM25,
-local-hash embedding, RRF and untrusted passage renderer. Default behavior is
-unchanged. This is an experiment, not a claim that semantic retrieval is ready.
+- File grep ranks documents by the number of distinct query tokens that occur in the text. The hit count is the overfetch measure. Downstream uses the top document.
+- Repo index matches the full query as a case-insensitive substring of the path or the exported symbol name, using the same path and symbol reasons as `nitely repo-index query`.
+- BM25 is the existing knowledge-engine lexical index.
+- Hybrid retrieval fuses that BM25 ranking with cosine similarity over frozen `nomic-embed-text` vectors using reciprocal rank fusion. A passage with semantic score below 0.55 is kept only when it also has a lexical score. Recency and importance then adjust the fused score by at most one percent each.
 
-The corpus is limited to committed regular Git blobs in the task repository at
-the execution worktree HEAD (using the original repository context policy). It ignores worktree changes, symlinks and submodules, honors
-`nitely.context.json` and the stage's read-deny/file-size limits, and omits
-sensitive source material using the existing context redaction boundary. No
-network request, sidecar, disk index, knowledge proposal write or authoritative
-memory mutation is performed. Disabled/isolated contexts and explicit knowledge
-attachment selections are not widened by the flag. Retrieval errors emit degraded evidence and preserve attached context in
-`degraded-ok` mode; `required` mode fails the attempt.
+A repository question passes downstream when the top passage's path is expected and the passage contains the expected outcome sentence. The out-of-repository question passes when the arm returns no passage. Provenance checks the chunk text, path, line range, commit, and content digest. File-grep and repo-index citations use the whole fixture document and lines `L1` through the last line. Latency is recorded per arm and is excluded from the decision because it depends on the machine.
 
-Retrieved passages supplement existing evidence, pass through its existing
-prompt-budget trimming, and are recorded as `knowledge.retrieved` evidence with
-reason code `task-repository-lexical-hash`. Flow inputs and context storage remain
-authoritative. The standalone packer exposes `context`, the exact escaped string
-whose estimate is constrained by the budget; rejected records expose locators
-only. This is an approximate tokenizer budget, not a model-specific token count.
+Token estimates use `nitely.knowledge-tokenizer.v1` (UTF-8 bytes divided by 4, plus one token per CJK character), applied to the packed escaped context. Sanitized and invalid counts come from that packer. Proposal strings are redacted and listed for review. One fixture preference matches the existing sensitive-key rule and is counted as withheld. The benchmark accepts a `writeAuthoritativeContext` callback and does not call it.
 
-## Smoke result (2026-10-18)
+The go gate requires all of the following: the semantic provider identity has `semantic=true`, every citation's provenance is valid, every arm stays inside the per-query budget, the out-of-repository question abstains, and hybrid downstream passes strictly more questions than file grep, repo index, and BM25. Anything short of that gate is `no-go`, including a run whose texts are absent from the frozen vector table.
 
-Fixture digest: `sha256:4fab0b747f21baec842019a3253a1dba575d25554419be26a3c27fab941e65ce`.
-Per-query budget: 1,800 estimated tokens; six questions, five documents.
+## Frozen semantic vectors
 
-| Measurement | BM25 baseline | BM25 + local-hash RRF |
-| --- | ---: | ---: |
-| Expected-path recall, five repository questions | 1.0 | 1.0 |
-| Out-of-repository abstention, one question | Passed | Passed |
-| Source range/revision/hash verification | Passed | Passed |
-| Total rendered context tokens | 1,186 | 1,258 |
+`scripts/freeze-hybrid-embeddings.mts` embeds the normalized chunk text and the normalized question text with a loopback Ollama server and writes `src/knowledge-repositories/frozen-semantic-table.ts`. The recorded model is `nomic-embed-text`, blob `sha256:970aa74c0a90ef7482477cf803618e776e173c007bf957f635f1015bfcfef0e6`, 768 dimensions. The benchmark replays those vectors. A missing string throws, and the comparison then stays on the lexical/hash path and reports `no-go`. The benchmark command itself makes no network call.
 
-There is no quality improvement on these smoke questions and context consumption
-increases by 72 estimated tokens. Query latency is emitted per question by the
-command and must be measured on the intended machine; the smoke latency excludes
-index construction. **Decision: no-go**. This result supports keeping the
-experiment opt-in and leaving the broader evaluation work open.
+Regenerate the table only on a machine that already has that Ollama model:
+
+```sh
+pnpm exec tsx scripts/freeze-hybrid-embeddings.mts
+```
+
+## Runtime flag
+
+`NITELY_HYBRID_RETRIEVAL=1` still adds BM25 plus local-hash task-repository passages to agent and review-gate prompts. The default Run path is unchanged. The flag reads committed regular Git blobs at the execution worktree HEAD, honors `nitely.context.json` and the stage read-deny and file-size limits, and skips `.nitely/`, `node_modules/`, `dist/`, lock files, symlinks, submodules, and sensitive text. It does not consult the frozen vector table and does not call an embedding server. Retrieved passages remain untrusted evidence with reason code `task-repository-lexical-hash`. Flow evidence stays authoritative.
+
+The go decision below is the benchmark result for this fixture. It leaves the default Run path unchanged.
+
+## Published result
+
+Artifact: [benchmarks/hybrid-retrieval-result.md](../benchmarks/hybrid-retrieval-result.md).
+
+Fixture digest: `sha256:c79a1932fc0be8ee9fe1328105df1afee71b495c3435d47807d679834bbdcce0`.
+
+Per-query budget: 1,800 estimated tokens. Six questions, eight documents. Semantic provider: `frozen-semantic` / `nomic-embed-text` / `semantic=true` / 768 dimensions. Sanitized: 0. Invalid: 0. Proposals withheld: 1.
+
+| Question | File grep | Repo index | BM25 | Hybrid |
+| --- | --- | --- | --- | --- |
+| omitted-counter | `src/showroom/drawer-label.ts`, fail, 6 hits | none | `src/showroom/drawer-label.ts`, fail | `src/ledger/counters.ts` L1-L4, pass |
+| unknown-tally | `docs/kept-evidence.md`, fail, 3 hits | none | `src/safety/passage-filter.ts`, fail | `src/ledger/counters.ts` L1-L4, pass |
+| saved-record | `docs/staff-handbook.md`, fail, 8 hits | none | `docs/staff-handbook.md`, fail | `docs/kept-evidence.md` L1-L2, pass |
+| strip-material | `src/safety/passage-filter.ts`, pass, 8 hits | none | `src/safety/passage-filter.ts`, pass | `src/safety/passage-filter.ts` L1-L4, pass |
+| symbol-lookup | `src/ledger/counters.ts`, pass, 1 hit | `src/ledger/counters.ts`, pass | `src/ledger/counters.ts`, pass | `src/ledger/counters.ts` L1-L4, pass |
+| external | abstain | abstain | abstain | abstain |
+
+Downstream passes, counting abstention: file grep 3, repo index 2, BM25 3, hybrid 6. The three paraphrase questions pass only on the hybrid arm. `symbol-lookup` passes on every arm. `strip-material` passes on file grep, BM25, and hybrid. Packed context tokens, summed across the six questions: file grep 2,656, repo index 132, BM25 2,693, hybrid 3,010. Each question stays within 1,800. On `omitted-counter`, reciprocal-rank fusion tied the showroom distractor with the ledger passage, and the one-percent recency/importance adjustment moved the top from `src/showroom/drawer-label.ts` to `src/ledger/counters.ts` L1-L4.
+
+Two consecutive runs of this command produced the same decision, paths, line ranges, digests, token counts, pass flags, sanitized count, invalid count, and proposal list. The latency fields differed. With the flag unset, prompt preparation returns the existing flow evidence and does not call retrieval.
+
+**Decision: go**.

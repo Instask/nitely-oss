@@ -1,10 +1,10 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildComparisonReport, packCandidates, prepareContext, runBenchmark, retrieveHybridRepositoryContext } from "../src/hybrid-retrieval.js";
+import { benchmarkFixture, buildComparisonReport, packCandidates, prepareContext, runBenchmark, retrieveHybridRepositoryContext, type BenchmarkResult } from "../src/hybrid-retrieval.js";
 import { runCli } from "../src/cli.js";
 import { estimateKnowledgeTokens } from "../src/knowledge-repositories/tokenize.js";
 
@@ -58,6 +58,11 @@ describe("context pack boundary", () => {
 describe("benchmark evidence", () => {
   it("does not approve on token savings without evaluation evidence", () => {
     expect(buildComparisonReport({ baselineTokenCount: 42, hybridTokenCount: 0, proposals: [] })).toMatch(/Decision: no-go$/);
+    expect(buildComparisonReport({
+      baselineTokenCount: 1, hybridTokenCount: 0, proposals: [], budgetHeld: true, externalAbstained: true,
+      fileGrepPasses: 0, repoIndexPasses: 0, lexicalPasses: 0, hybridPasses: 3,
+      semantic: { id: "frozen-semantic", model: "nomic-embed-text", sourceDigest: `sha256:${"ab".repeat(32)}`, dimensions: 768 },
+    })).toMatch(/Decision: no-go$/);
   });
   it.each([{ version: 1, questions: [] }, { version: 2, questions: [] }, { questions: [{}] }])("rejects incomplete fixtures", async (fixture) => {
     await expect(runBenchmark({ fixture: fixture as never })).rejects.toThrow();
@@ -101,24 +106,69 @@ describe("real repository retrieval", () => {
     await writeFile(join(root, "allowed.md"), "uncommitted replacement");
     expect((await retrieveHybridRepositoryContext({ repoPath: root, query: "Kestrel", tokenBudget: 1000 }))[0].text).toContain("retrieval target");
   });
-  it("measures real retrieval payloads and quality rather than question length", async () => {
+  it("measures semantic retrieval, baselines, and downstream outcomes", async () => {
     const result = await runBenchmark();
+    const again = await runBenchmark();
     expect(result.baselineTokenCount).toBeGreaterThan(0);
     expect(result.hybridTokenCount).toBeGreaterThan(0);
     expect(result.measurements).toHaveLength(6);
-    expect(result.measurements.every((m) => m.provenanceValid)).toBe(true);
-    expect(result.measurements.find((m) => m.id === "external")).toMatchObject({ baselinePaths: [], hybridPaths: [], hybridRecall: 1 });
-    expect(result.decision).toBe("no-go");
+    expect(result.measurements.every((measurement) => measurement.provenanceValid)).toBe(true);
+    expect(result.measurements.find((measurement) => measurement.id === "external")).toMatchObject({ baselinePaths: [], hybridPaths: [], hybridRecall: 1, hybridPass: true });
+    expect(stableBenchmark(result)).toEqual(stableBenchmark(again));
+    expect(result.measurements.map((measurement) => [measurement.id, measurement.fileGrepPass, measurement.repoIndexPass, measurement.baselinePass, measurement.hybridPass, measurement.hybridTop])).toEqual([
+      ["omitted-counter", false, false, false, true, "src/ledger/counters.ts"],
+      ["unknown-tally", false, false, false, true, "src/ledger/counters.ts"],
+      ["saved-record", false, false, false, true, "docs/kept-evidence.md"],
+      ["strip-material", true, false, true, true, "src/safety/passage-filter.ts"],
+      ["symbol-lookup", true, true, true, true, "src/ledger/counters.ts"],
+      ["external", true, true, true, true, ""],
+    ]);
+    expect(result.measurements.find((measurement) => measurement.id === "omitted-counter")).toMatchObject({ recencyReordered: true, recencyBefore: "src/showroom/drawer-label.ts" });
+    expect(result.proposals).toEqual([
+      "Stored flow evidence stays the source of truth.",
+      "A retrieved passage cannot replace a stored decision.",
+      "Prefer review before adopting a retrieved passage.",
+    ]);
+    expect(result.report.match(/^Decision: .+$/gm)).toEqual(["Decision: go"]);
+    expect(result.report).toContain("Semantic provider: frozen-semantic nomic-embed-text semantic=true");
+    expect(result.report).toContain("Downstream passes: file-grep 3, repo-index 2, BM25 3, hybrid 6");
+    expect(result.report).toContain("Proposals withheld: 1");
+    expect(result.report).not.toContain("api_key");
+    expect(result.decision).toBe("go");
+    const published = await readFile(new URL("../benchmarks/hybrid-retrieval-result.md", import.meta.url), "utf8");
+    const fixture = JSON.parse(await readFile(new URL("../benchmarks/hybrid-retrieval.fixture.json", import.meta.url), "utf8"));
+    expect(fixture).toEqual(benchmarkFixture);
+    expect(published).toContain(result.fixtureDigest);
+    expect(published.match(/^Decision: .+$/gm)).toEqual(["Decision: go"]);
+    expect(stripLatency(published).trimEnd()).toBe(stripLatency(result.report).trimEnd());
   });
 });
 
+function stableBenchmark(result: BenchmarkResult) {
+  return {
+    decision: result.decision,
+    fixtureDigest: result.fixtureDigest,
+    baselineTokenCount: result.baselineTokenCount,
+    hybridTokenCount: result.hybridTokenCount,
+    proposals: result.proposals,
+    measurements: result.measurements.map(({ baselineLatencyMs, hybridLatencyMs, fileGrepLatencyMs, repoIndexLatencyMs, ...measurement }) => {
+      void baselineLatencyMs; void hybridLatencyMs; void fileGrepLatencyMs; void repoIndexLatencyMs;
+      return measurement;
+    }),
+  };
+}
+function stripLatency(report: string): string {
+  return report.replace(/\d+\.\d{3}/g, "0.000");
+}
+
 
 describe("benchmark CLI", () => {
-  it("returns an explicit no-go exit status for the bundled smoke fixture", async () => {
+  it("returns a go exit status for the bundled semantic fixture", async () => {
     const stdout = vi.fn(); const stderr = vi.fn();
-    expect(await runCli(["benchmark", "hybrid-retrieval"], { stdout, stderr })).toBe(1);
+    expect(await runCli(["benchmark", "hybrid-retrieval"], { stdout, stderr })).toBe(0);
     expect(stdout.mock.calls[0][0]).toContain("Per-query budget: 1800");
-    expect(stdout.mock.calls[0][0]).toMatch(/Decision: no-go$/);
+    expect(stdout.mock.calls[0][0]).toMatch(/Decision: go$/);
+    expect(stdout.mock.calls[0][0].match(/^Decision: .+$/gm)).toEqual(["Decision: go"]);
     expect(stderr).not.toHaveBeenCalled();
   });
   it.each([["--fixture"], ["--budget", "-1"], ["--output", "--budget", "100"]])("rejects incomplete or malformed options %s", async (...args) => {
