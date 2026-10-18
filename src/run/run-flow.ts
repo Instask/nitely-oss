@@ -192,7 +192,9 @@ import {
   type ProjectedOperatorQuestion,
   type ProjectedRepoIndexQuery,
   type ProjectedRiskClassification,
+  type ProjectedAttemptInputBreakdown,
   type ProjectedRuntimeUsageTotal,
+  formatAttemptInputBreakdown,
   type ProjectedTaskScope,
   type ProjectedVerificationBudget,
   type ProjectedVerificationFailureDiagnosis,
@@ -320,6 +322,12 @@ import type {
 } from "../scm/types.js";
 import type { NormalizedReviewFeedback } from "../review-feedback/model.js";
 import { normalizeRuntimeUsageForPersistence } from "../eval/usage.js";
+import {
+  exportRunTrace,
+  otlpTraceConfigFromEnv,
+  type ExportRunTraceInput,
+  type RunTraceExportResult,
+} from "../telemetry/run-trace-otel.js";
 import {
   createExecutionBackend,
   normalizeExecutionBackendName,
@@ -716,6 +724,8 @@ export interface RunFlowDependencies {
   fingerprintKnowledgeRepositoryQuery?: typeof defaultFingerprintKnowledgeRepositoryQuery;
   pinKnowledgeRepositorySnapshots?: typeof defaultPinKnowledgeRepositorySnapshots;
   queryKnowledgeRepositories?: typeof defaultQueryKnowledgeRepositories;
+  /** Replaces the OpenTelemetry trace export that follows every run. */
+  exportRunTrace?: (input: ExportRunTraceInput) => Promise<RunTraceExportResult>;
 }
 
 export interface RunFlowResult {
@@ -7597,6 +7607,23 @@ function appendRuntimeUsageEvent(input: {
       input.context,
     ),
   });
+  // The per-call log feeds traces; it is kept out of the usage record, whose
+  // raw metadata is bounded far below a long attempt's call count.
+  if (input.usage.callLog && input.usage.callLog.length > 0) {
+    input.eventStore.append({
+      runId: input.runId,
+      stageId: input.stageId,
+      attempt: input.attempt,
+      type: "stage.runtime.calls",
+      payload: redactRuntimeUnknown(
+        {
+          calls: input.usage.callLog,
+          ...(input.usage.callLogDropped ? { dropped: input.usage.callLogDropped } : {}),
+        },
+        input.context,
+      ),
+    });
+  }
 }
 
 function appendGlobalSkillsEvent(input: {
@@ -10891,6 +10918,8 @@ async function recordTaskIssueRunLinks(input: {
 
 function formatRuntimeUsageEvidence(
   usage: ProjectedRuntimeUsageTotal | undefined,
+  breakdown: ProjectedAttemptInputBreakdown[] | undefined,
+  context: RuntimeContext,
 ): string {
   if (!usage) return "none";
   const lines = [
@@ -10898,7 +10927,13 @@ function formatRuntimeUsageEvidence(
     `- Runtime attempts without usage data: ${usage.unknownAttempts}`,
   ];
   if (usage.inputTokens !== undefined) {
-    lines.push(`- Input tokens: ${usage.inputTokens}`);
+    lines.push(`- Input tokens (runtime cumulative, cache reads included): ${usage.inputTokens}`);
+  }
+  if (usage.cachedInputTokens !== undefined) {
+    lines.push(`- Cached input tokens: ${usage.cachedInputTokens}`);
+  }
+  if (usage.freshInputTokens !== undefined) {
+    lines.push(`- Fresh input tokens: ${usage.freshInputTokens}`);
   }
   if (usage.outputTokens !== undefined) {
     lines.push(`- Output tokens: ${usage.outputTokens}`);
@@ -10908,6 +10943,17 @@ function formatRuntimeUsageEvidence(
   }
   if (usage.estimatedCostUsd !== undefined) {
     lines.push(`- Estimated cost USD: ${usage.estimatedCostUsd}`);
+  }
+  if (breakdown && breakdown.length > 0) {
+    lines.push(
+      "",
+      "Input by attempt (harness prompt vs. runtime-reported input):",
+      "",
+      ...breakdown.map(
+        (entry) =>
+          `- ${redactRuntimeText(formatAttemptInputBreakdown(entry), context) ?? ""}`,
+      ),
+    );
   }
   return lines.join("\n");
 }
@@ -11171,6 +11217,7 @@ async function writeEvidence(input: {
   stageReadPolicies?: StageReadPolicyEvidence[];
   stageTimeouts?: StageTimeoutEvidence[];
   runtimeUsage?: ProjectedRuntimeUsageTotal;
+  runtimeInputBreakdown?: ProjectedAttemptInputBreakdown[];
   verificationBudget?: ProjectedVerificationBudget;
   repoIndexQueries?: ProjectedRepoIndexQuery[];
   knowledgeRetrievals?: ProjectedKnowledgeRetrieval[];
@@ -11445,7 +11492,11 @@ async function writeEvidence(input: {
           )
           .join("\n")
       : "none";
-  const runtimeUsageLines = formatRuntimeUsageEvidence(input.runtimeUsage);
+  const runtimeUsageLines = formatRuntimeUsageEvidence(
+    input.runtimeUsage,
+    input.runtimeInputBreakdown,
+    input.context,
+  );
   const verificationBudgetLines = input.verificationBudget
     ? JSON.stringify(input.verificationBudget, null, 2)
     : "not declared";
@@ -12888,11 +12939,22 @@ export async function runFlow(
   input: RunFlowInput,
   dependencies: RunFlowDependencies = {},
 ): Promise<RunFlowResult> {
+  let createdRunId: string | undefined;
+  const createRunId = dependencies.createRunId ?? createDefaultRunId;
+  const tracked: RunFlowDependencies = {
+    ...dependencies,
+    createRunId: () => {
+      createdRunId = createRunId();
+      return createdRunId;
+    },
+  };
+  let resumed = false;
   try {
-    return await runFlowOnce(input, dependencies);
+    return await runFlowOnce(input, tracked);
   } catch (error) {
     const runId = autoAnsweredRunId(error);
     if (!runId) throw error;
+    resumed = true;
     return await resumeRun(
       {
         repoPath: input.repoPath,
@@ -12901,6 +12963,39 @@ export async function runFlow(
       },
       dependencies,
     );
+  } finally {
+    // resumeRun exports the trace itself.
+    if (createdRunId && !resumed) await exportRunTraceAfterRun(input.repoPath, createdRunId, dependencies);
+  }
+}
+
+/**
+ * Export the run's OpenTelemetry trace when an OTLP endpoint is configured.
+ * Bounded by NITELY_OTEL_EXPORT_TIMEOUT_MS and never throws, so it cannot
+ * change the run's result.
+ */
+async function exportRunTraceAfterRun(
+  repoPath: string,
+  runId: string,
+  dependencies: RunFlowDependencies,
+): Promise<void> {
+  const exporter = dependencies.exportRunTrace ?? exportRunTrace;
+  if (!dependencies.exportRunTrace && !otlpTraceConfigFromEnv()) return;
+  try {
+    await exporter({
+      runId,
+      listEvents: () => {
+        const store = (dependencies.createEventStore ??
+          ((path: string) => new EventStore(path)))(eventStorePath(resolve(repoPath)));
+        try {
+          return store.list(runId);
+        } finally {
+          store.close();
+        }
+      },
+    });
+  } catch {
+    // exportRunTrace never throws; an injected one must not fail the run either.
   }
 }
 
@@ -13456,6 +13551,7 @@ async function runFlowOnce(
       stageTimeouts: collectStageTimeoutEvidence(loaded.flow),
       conformancePolicies: collectConformancePolicies(loaded.flow.spec.stages),
       runtimeUsage: projection.runtimeUsage,
+      runtimeInputBreakdown: projection.runtimeInputBreakdown,
       verificationBudget: projection.verificationBudget,
       repoIndexQueries: projection.repoIndexQueries,
       knowledgeRetrievals: projection.knowledgeRetrievals,
@@ -14147,6 +14243,7 @@ async function runFlowOnce(
                 stageTimeouts: collectStageTimeoutEvidence(loaded.flow),
                 conformancePolicies: collectConformancePolicies(loaded.flow.spec.stages),
                 runtimeUsage: projection.runtimeUsage,
+                runtimeInputBreakdown: projection.runtimeInputBreakdown,
                 repoIndexQueries: projection.repoIndexQueries,
                 knowledgeRetrievals: projection.knowledgeRetrievals,
                 commandAttempts: collectCommandAttemptEvidence({
@@ -14235,6 +14332,7 @@ async function runFlowOnce(
                 stageTimeouts: collectStageTimeoutEvidence(loaded.flow),
                 conformancePolicies: collectConformancePolicies(loaded.flow.spec.stages),
                 runtimeUsage: projection.runtimeUsage,
+                runtimeInputBreakdown: projection.runtimeInputBreakdown,
                 repoIndexQueries: projection.repoIndexQueries,
                 knowledgeRetrievals: projection.knowledgeRetrievals,
                 commandAttempts: collectCommandAttemptEvidence({
@@ -14938,18 +15036,22 @@ export async function resumeRun(
   dependencies: RunFlowDependencies = {},
 ): Promise<RunFlowResult> {
   let current: ResumeRunInput = input;
-  for (let resumes = 0; ; resumes += 1) {
-    try {
-      return await resumeRunOnce(current, dependencies);
-    } catch (error) {
-      const runId = autoAnsweredRunId(error);
-      if (!runId || resumes >= MAX_AUTO_ANSWER_RESUMES) throw error;
-      current = {
-        repoPath: input.repoPath,
-        runId,
-        ...(input.executionBackend ? { executionBackend: input.executionBackend } : {}),
-      };
+  try {
+    for (let resumes = 0; ; resumes += 1) {
+      try {
+        return await resumeRunOnce(current, dependencies);
+      } catch (error) {
+        const runId = autoAnsweredRunId(error);
+        if (!runId || resumes >= MAX_AUTO_ANSWER_RESUMES) throw error;
+        current = {
+          repoPath: input.repoPath,
+          runId,
+          ...(input.executionBackend ? { executionBackend: input.executionBackend } : {}),
+        };
+      }
     }
+  } finally {
+    await exportRunTraceAfterRun(input.repoPath, current.runId, dependencies);
   }
 }
 
@@ -15513,6 +15615,7 @@ async function resumeRunOnce(
         stageTimeouts: collectStageTimeoutEvidence(loaded.flow),
         conformancePolicies: collectConformancePolicies(loaded.flow.spec.stages),
         runtimeUsage: projection.runtimeUsage,
+        runtimeInputBreakdown: projection.runtimeInputBreakdown,
         verificationBudget: projection.verificationBudget,
         repoIndexQueries: projection.repoIndexQueries,
         knowledgeRetrievals: projection.knowledgeRetrievals,

@@ -2,6 +2,13 @@ import { resolve } from "node:path";
 
 import { EventStore } from "../events/store.js";
 import type { StoredRunEvent } from "../events/types.js";
+import type { AgentRuntimeCall } from "./execution/types.js";
+import { summarizeRuntimeCalls } from "../telemetry/token-waste.js";
+import {
+  attemptShareOfCodexCalls,
+  codexSessionBaselineKey,
+  codexSessionBaselines,
+} from "./codex-session-usage.js";
 import {
   billableRuntimeTokens,
   eventStorePath,
@@ -27,7 +34,8 @@ export type EfficiencyRuleId =
   | "expensive-model-non-gate"
   | "repeated-large-payloads"
   | "usage-coverage-missing"
-  | "budget-loss-after-outputs";
+  | "budget-loss-after-outputs"
+  | "runtime-activity-shape";
 
 export interface EfficiencyFinding {
   ruleId: EfficiencyRuleId;
@@ -441,6 +449,95 @@ function budgetLossAfterOutputs(
   ];
 }
 
+const ACTIVITY_UNCACHED_TOKENS = 50_000;
+const ACTIVITY_TOOL_LOOP = 25;
+const ACTIVITY_TURN_INPUT_TOKENS = 20_000;
+
+function activityCalls(payload: unknown): AgentRuntimeCall[] {
+  const calls = asRecord(payload).calls;
+  if (!Array.isArray(calls)) return [];
+  return calls.filter((entry): entry is AgentRuntimeCall => {
+    const record = asRecord(entry);
+    return record.kind === "llm" || record.kind === "tool";
+  });
+}
+
+function runtimeActivityShape(events: StoredRunEvent[]): EfficiencyFinding[] {
+  const findings: EfficiencyFinding[] = [];
+  const codexBaselines = codexSessionBaselines(events);
+  for (const event of events) {
+    if (event.type !== "stage.runtime.calls" || !event.stageId) continue;
+    const baseline = event.attempt
+      ? codexBaselines.get(codexSessionBaselineKey(event.stageId, event.attempt))
+      : undefined;
+    const summary = summarizeRuntimeCalls(
+      activityCalls(attemptShareOfCodexCalls(asRecord(event.payload), baseline)),
+    );
+    if (!summary?.summable || summary.inputTokens <= 0) continue;
+    const uncached = summary.inputTokens - summary.cachedInputTokens;
+    const cacheShare = summary.cachedInputTokens / summary.inputTokens;
+    const reasoningShare = summary.outputTokens > 0
+      ? summary.reasoningOutputTokens / summary.outputTokens
+      : 0;
+    const turnLevel = summary.granularities.includes("turn");
+    const largeUncached = uncached >= ACTIVITY_UNCACHED_TOKENS && cacheShare < 0.5;
+    const toolLoop = summary.toolCount >= ACTIVITY_TOOL_LOOP;
+    const reasoningHeavy = summary.reasoningOutputTokens >= 1_000 && reasoningShare >= 0.5;
+    const visibleTurn = turnLevel && summary.inputTokens >= ACTIVITY_TURN_INPUT_TOKENS;
+    if (!largeUncached && !toolLoop && !reasoningHeavy && !visibleTurn) continue;
+    const severity: EfficiencySeverity = largeUncached
+      ? "high"
+      : toolLoop || reasoningHeavy
+        ? "warn"
+        : "info";
+    const tools = summary.toolNames
+      .slice(0, 3)
+      .map((entry) => `${entry.count} ${entry.name}`)
+      .join(", ");
+    const granularity = summary.granularities.join(", ");
+    findings.push(finding({
+      ruleId: "runtime-activity-shape",
+      severity,
+      confidence: turnLevel ? "medium" : "high",
+      title: largeUncached
+        ? "Most input tokens on this attempt were uncached"
+        : toolLoop
+          ? "This attempt ran many tools inside its model usage"
+          : reasoningHeavy
+            ? "Reasoning accounts for most of this attempt's output"
+            : "This attempt's tokens are turn totals",
+      summary:
+        `Stage ${event.stageId} attempt ${event.attempt ?? "?"} recorded ${summary.inputTokens} input tokens` +
+        ` (${summary.cachedInputTokens} cached, ${uncached} uncached)` +
+        ` and ${summary.outputTokens} output tokens` +
+        `${summary.reasoningOutputTokens > 0 ? ` (${summary.reasoningOutputTokens} reasoning)` : ""}` +
+        ` at ${granularity} granularity, across ${summary.toolCount} tool records` +
+        `${tools ? ` (${tools})` : ""}.` +
+        (turnLevel
+          ? " Codex reports a cumulative total per turn, so these numbers are the whole turn, not one model call."
+          : ""),
+      impact: {
+        inputTokens: summary.inputTokens,
+        cachedInputTokens: summary.cachedInputTokens,
+        totalTokens: summary.inputTokens + summary.outputTokens,
+      },
+      evidence: {
+        runId: event.runId,
+        stageIds: [event.stageId],
+        eventTypes: ["stage.runtime.calls"],
+        ...(event.attempt !== undefined ? { attempt: event.attempt } : {}),
+      },
+      remediation: largeUncached
+        ? "Keep the runtime session and the prompt prefix stable so later model calls hit the prompt cache (#713)."
+        : toolLoop
+          ? "Look at the tool records on this attempt. A long tool loop resends the growing context on every model call (#713)."
+          : "Read the turn or call records on stage.runtime.calls before treating the attempt total as one request (#713).",
+      relatedIssues: [713],
+    }));
+  }
+  return findings;
+}
+
 export function diagnoseRun(input: {
   projection: ProjectedRun;
   events: StoredRunEvent[];
@@ -457,6 +554,7 @@ export function diagnoseRun(input: {
       ...repeatedLargePayloads(projection, events),
       ...usageCoverageMissing(projection),
       ...budgetLossAfterOutputs(projection, events),
+      ...runtimeActivityShape(events),
     ],
   };
 }
