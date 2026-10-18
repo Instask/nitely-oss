@@ -32,11 +32,17 @@ ARG PNPM_VERSION=11.0.7
 
 # python3 is the in-container command mediator (docs/oci-command-mediation.md).
 # Removing it makes an enforcement-demanding stage fail closed.
+# gcc compiles the command-mediator race fixtures. libc6-dev is named on its
+# own because --no-install-recommends does not pull the pthread headers gcc
+# only recommends. Linux CI already has a compiler; without one here those
+# tests die at spawn and verification looks like an implementation fault.
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       bash \
       ca-certificates \
+      gcc \
+      libc6-dev \
       git \
       openssh-client \
       python3 \

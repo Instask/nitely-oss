@@ -26,7 +26,9 @@ import {
   type ClaudePermissionMode,
   type RuntimeEnv,
 } from "./local.js";
+import { createCodexExecCapture } from "./codex-activity.js";
 import {
+  captureCallContent,
   createPiJsonCapture,
   isPiJsonRuntime,
   normalizePiJsonResult,
@@ -80,7 +82,8 @@ export interface SandboxProcessInput {
   signal?: AbortSignal;
   /**
    * Receives stdout instead of a raw buffer; `maxOutputBytes` then counts
-   * what it holds. Used to keep Pi's JSON event stream in bounded memory.
+   * what it holds. Used to keep Pi and Codex JSON event streams in bounded
+   * memory.
    */
   stdoutCapture?: PiJsonCapture;
 }
@@ -508,6 +511,7 @@ function withPartialAgentOutput(
       stderr,
       exitCode: 1,
       ...(input.model ? { model: input.model } : {}),
+      ...(captureCallContent() ? { captureContent: true } : {}),
     });
     Object.assign(carrier, { stdout: normalized.stdout, stderr: normalized.stderr });
     if (carrier !== source) Object.assign(source, { stdout: normalized.stdout, stderr: normalized.stderr });
@@ -1457,7 +1461,8 @@ export class OciExecutionBackend implements ExecutionBackend {
         plan.launch.stdin = undefined;
       }
       const piJson = isPiJsonRuntime(launch.runtime);
-      if (piJson) plan.launch.stdoutCapture = createPiJsonCapture();
+      if (piJson) plan.launch.stdoutCapture = createPiJsonCapture({ captureContent: captureCallContent() });
+      else if (launch.runtime === "codex") plan.launch.stdoutCapture = createCodexExecCapture();
       if (mediation.status === "enforced") {
         await this.assertCommandMediatorPython();
         mediatorDir = await this.prepareCommandMediator(mediation.policy);
@@ -1483,6 +1488,7 @@ export class OciExecutionBackend implements ExecutionBackend {
           stderr: executed.stderr,
           exitCode: executed.exitCode,
           ...(input.stage.model ? { model: input.stage.model } : {}),
+          ...(captureCallContent() ? { captureContent: true } : {}),
         })
         : {
           ...executed,

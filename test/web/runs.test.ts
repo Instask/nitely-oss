@@ -3253,6 +3253,75 @@ describe("web run projection", () => {
     });
   });
 
+  it("shows harness prompt, fresh input, and cached input side by side for a Codex attempt", async () => {
+    const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
+    await mkdir(join(repoPath, ".nitely"), { recursive: true });
+    const store = new EventStore(join(repoPath, ".nitely/events.db"));
+    const runId = "run-input-breakdown";
+    store.append({
+      runId,
+      type: "run.created",
+      createdAt: "2026-06-20T00:00:00.000Z",
+      payload: { flowName: "implement-spec-bootstrap" },
+    });
+    store.append({
+      runId,
+      type: "stage.started",
+      stageId: "implement",
+      attempt: 1,
+      createdAt: "2026-06-20T00:00:01.000Z",
+      payload: { type: "agent", runtime: "codex" },
+    });
+    store.append({
+      runId,
+      type: "stage.context.usage",
+      stageId: "implement",
+      attempt: 1,
+      createdAt: "2026-06-20T00:00:02.000Z",
+      payload: {
+        promptBytes: 11_600,
+        approxTokens: 2_900,
+        inputBytesInlined: 0,
+        inputBytesSaved: 0,
+        inputCount: 1,
+      },
+    });
+    store.append({
+      runId,
+      type: "stage.runtime.usage",
+      stageId: "implement",
+      attempt: 1,
+      createdAt: "2026-06-20T00:00:03.000Z",
+      payload: {
+        inputTokens: 4_000_000,
+        outputTokens: 12_000,
+        totalTokens: 4_012_000,
+        cachedInputTokens: 3_930_000,
+        provenance: {
+          provider: "openai",
+          observedAt: "2026-06-20T00:00:03.000Z",
+          source: { kind: "provider-reported", reference: "codex.exec.turn.completed.usage" },
+        },
+      },
+    });
+    store.close();
+
+    const detail = await getRunDetail(repoPath, runId);
+    const implement = detail.timeline.find((item) => item.stageId === "implement");
+    expect(implement?.runtimeUsage).toMatchObject({
+      inputTokens: 4_000_000,
+      cachedInputTokens: 3_930_000,
+      freshInputTokens: 70_000,
+    });
+    const fields = Object.fromEntries(
+      (implement?.details?.fields ?? []).map((field) => [field.label, field.value]),
+    );
+    expect(fields["Runtime usage"]).toContain("70000 fresh input · 3930000 cached input");
+    expect(fields["Input by attempt"]).toBe(
+      "implement attempt 1 (codex): harness prompt ~2900 · fresh input 70000 · cached input 3930000 · cumulative input 4000000 · output 12000 [codex.exec.turn.completed.usage]",
+    );
+  });
+
   it("surfaces per-stage budget status in the timeline", async () => {
     const repoPath = await mkdtemp(join(tmpdir(), "nitely-web-runs-"));
     await mkdir(join(repoPath, ".nitely"), { recursive: true });

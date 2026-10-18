@@ -14,6 +14,7 @@ export type RunEventType =
   | "stage.requirements.failed"
   | "stage.context.usage"
   | "stage.runtime.usage"
+  | "stage.runtime.calls"
   | "stage.runtime.global-skills"
   | "stage.runtime.session"
   | "knowledge.generated"

@@ -4187,16 +4187,26 @@ class Component extends DCLogic {
     if (!u) return "";
     const tok = u.approxTokens >= 1000 ? Math.round(u.approxTokens / 100) / 10 + "k" : String(u.approxTokens || 0);
     const savedKb = Math.round((u.inputBytesSaved || 0) / 1024);
-    return "~" + tok + " tok" + (savedKb > 0 ? " · " + savedKb + "KB saved" : "");
+    return "~" + tok + " prompt tok" + (savedKb > 0 ? " · " + savedKb + "KB saved" : "");
   }
 
   formatRuntimeUsage(u) {
     if (!u) return "";
-    const fmt = (n) => n >= 1000 ? Math.round(n / 100) / 10 + "k" : String(n);
+    const fmt = (n) => this.compactNumber(n);
     const unknown = u.unknownAttempts || 0;
     const known = u.knownAttempts || 0;
     if (!known && unknown) return "runtime tokens unknown";
     const parts = [];
+    // The runtime's input is cumulative and mostly cache reads; show the split
+    // only when every attempt reported it, so the parts add up to the input.
+    if (
+      typeof u.inputTokens === "number" &&
+      typeof u.cachedInputTokens === "number" &&
+      typeof u.freshInputTokens === "number" &&
+      u.freshInputTokens + u.cachedInputTokens === u.inputTokens
+    ) {
+      parts.push(fmt(u.freshInputTokens) + " fresh in", fmt(u.cachedInputTokens) + " cached in");
+    }
     if (typeof u.totalTokens === "number") {
       parts.push(fmt(u.totalTokens) + " runtime tok");
     } else {
@@ -4527,7 +4537,7 @@ class Component extends DCLogic {
     const usageLabel = this.formatContextUsage(s.contextUsage);
     const runtimeUsageLabel = this.formatRuntimeUsage(s.runtimeUsage);
     const budgetLabel = this.formatBudget(s.budget);
-    const metaLabel = [s.duration, attempts, runtimeUsageLabel, usageLabel, budgetLabel].filter(Boolean).join(" · ") || (displayState === "pending" ? "queued" : "");
+    const metaLabel = [s.duration, attempts, usageLabel, runtimeUsageLabel, budgetLabel].filter(Boolean).join(" · ") || (displayState === "pending" ? "queued" : "");
     const gate = s.gate || null;
     return Object.assign({}, s, {
       openKey: key,

@@ -1124,7 +1124,9 @@ describe("LocalExecutionBackend", () => {
       },
     );
 
-    expect(result.stdout).toBe(stdout);
+    expect(result.stdout).toContain("019bffff-1111-7111-8111-111111111111");
+    expect(result.stdout).not.toContain("ignored_secret");
+    expect(result.stdout).not.toContain("999999");
     expect(result.stderr).toBe("codex diagnostic\n");
     expect(result.usage).toMatchObject({
       inputTokens: 120,
@@ -1190,7 +1192,6 @@ describe("LocalExecutionBackend", () => {
       );
 
       expect(result.usage).toBeUndefined();
-      expect(result.stdout).toBe(`${stdout}\n`);
     }
   });
 
