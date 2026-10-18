@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { EventStore } from "../../src/events/store.js";
 import {
   DEFAULT_STALE_RUNNING_RUN_MS,
+  formatAttemptInputBreakdown,
   getProjectedRunLogs,
   projectRun,
   projectRunStaleAware,
@@ -816,9 +817,93 @@ describe("run projection", () => {
       outputTokens: 40,
       totalTokens: 140,
       cachedInputTokens: 20,
+      freshInputTokens: 80,
       knownAttempts: 1,
       unknownAttempts: 1,
     });
+  });
+
+  it("splits each attempt's input into harness prompt, fresh input, and cached input", () => {
+    const at = (stageId: string, attempt: number) => ({ runId: "r1", stageId, attempt });
+    const codexUsage = (inputTokens: number, cachedInputTokens: number, outputTokens: number) => ({
+      inputTokens,
+      outputTokens,
+      totalTokens: inputTokens + outputTokens,
+      cachedInputTokens,
+      provenance: {
+        provider: "openai",
+        observedAt: "2026-06-20T00:00:01Z",
+        source: { kind: "provider-reported", reference: "codex.exec.turn.completed.usage" },
+      },
+    });
+    const context = (approxTokens: number) => ({
+      promptBytes: approxTokens * 4,
+      approxTokens,
+      inputBytesInlined: 0,
+      inputBytesSaved: 0,
+      inputCount: 1,
+    });
+    const run = projectRun([
+      event(1, "stage.started", { type: "agent", runtime: "codex", attemptDirectory: "/d/i1" }, at("implement", 1)),
+      event(2, "stage.context.usage", context(2_900), at("implement", 1)),
+      event(3, "stage.runtime.usage", codexUsage(4_000_000, 3_930_000, 12_000), at("implement", 1)),
+      event(4, "stage.started", { type: "agent", runtime: "codex", attemptDirectory: "/d/i2" }, at("implement", 2)),
+      event(5, "stage.context.usage", context(3_100), at("implement", 2)),
+      event(6, "stage.started", { type: "agent", runtime: "claude", attemptDirectory: "/d/r1" }, at("review", 1)),
+      event(7, "stage.context.usage", context(3_000), at("review", 1)),
+      event(8, "stage.runtime.usage", { inputTokens: 30_000, outputTokens: 600, totalTokens: 30_600 }, at("review", 1)),
+    ]);
+
+    expect(run.runtimeInputBreakdown).toEqual([
+      {
+        stageId: "implement",
+        attempt: 1,
+        runtime: "codex",
+        harnessPromptApproxTokens: 2_900,
+        usageReported: true,
+        cumulativeInputTokens: 4_000_000,
+        freshInputTokens: 70_000,
+        cachedInputTokens: 3_930_000,
+        outputTokens: 12_000,
+        usageSource: "codex.exec.turn.completed.usage",
+      },
+      {
+        stageId: "implement",
+        attempt: 2,
+        runtime: "codex",
+        harnessPromptApproxTokens: 3_100,
+        usageReported: false,
+      },
+      {
+        stageId: "review",
+        attempt: 1,
+        runtime: "claude",
+        harnessPromptApproxTokens: 3_000,
+        usageReported: true,
+        cumulativeInputTokens: 30_000,
+        outputTokens: 600,
+      },
+    ]);
+    // A missing snapshot is not a zero: the total keeps it as unknown, and the
+    // fresh/cached split covers only the attempts that reported one.
+    expect(run.runtimeUsage).toMatchObject({
+      inputTokens: 4_030_000,
+      cachedInputTokens: 3_930_000,
+      freshInputTokens: 70_000,
+      knownAttempts: 2,
+      unknownAttempts: 1,
+    });
+
+    const [codex, missing, uncached] = run.runtimeInputBreakdown ?? [];
+    expect(formatAttemptInputBreakdown(codex)).toBe(
+      "implement attempt 1 (codex): harness prompt ~2900 · fresh input 70000 · cached input 3930000 · cumulative input 4000000 · output 12000 [codex.exec.turn.completed.usage]",
+    );
+    expect(formatAttemptInputBreakdown(missing)).toBe(
+      "implement attempt 2 (codex): harness prompt ~3100 · runtime usage not reported (no final usage snapshot; not counted as zero)",
+    );
+    expect(formatAttemptInputBreakdown(uncached)).toBe(
+      "review attempt 1 (claude): harness prompt ~3000 · cumulative input 30000 (fresh/cached split not reported) · output 600",
+    );
   });
 
   it("does not promote legacy estimated cost to a proven run total", () => {

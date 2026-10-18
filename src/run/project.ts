@@ -141,6 +141,12 @@ export interface ProjectedRuntimeUsageTotal {
   outputTokens?: number;
   totalTokens?: number;
   cachedInputTokens?: number;
+  /**
+   * Input not served from the provider's cache, summed over attempts that
+   * reported both input and cache reads. Equals inputTokens minus
+   * cachedInputTokens only when every attempt reported that split.
+   */
+  freshInputTokens?: number;
   actualCostUsd?: number;
   estimatedCostUsd?: number;
   knownAttempts: number;
@@ -335,6 +341,7 @@ export function sumRuntimeUsage(
       | "outputTokens"
       | "totalTokens"
       | "cachedInputTokens"
+      | "freshInputTokens"
       | "actualCostUsd"
       | "estimatedCostUsd",
     value: number | undefined,
@@ -350,6 +357,7 @@ export function sumRuntimeUsage(
     add("outputTokens", usage.outputTokens);
     add("totalTokens", usage.totalTokens);
     add("cachedInputTokens", usage.cachedInputTokens);
+    add("freshInputTokens", freshInputTokens(usage));
     const provenance = usage.provenance;
     const hasProvenance = provenance !== undefined &&
       provenance.provider.trim().length > 0 &&
@@ -600,6 +608,7 @@ export interface ProjectedRun {
   resumeFailure?: ProjectedResumeFailure;
   contextUsage?: ProjectedContextUsage;
   runtimeUsage?: ProjectedRuntimeUsageTotal;
+  runtimeInputBreakdown?: ProjectedAttemptInputBreakdown[];
   budgetSummary?: ProjectedBudgetSummary;
   knowledgeGenerations?: ProjectedKnowledgeGeneration[];
   contextKnowledge?: ProjectedContextKnowledgeEntry[];
@@ -651,6 +660,126 @@ export function billableRuntimeTokens(
   const cached = usage?.cachedInputTokens;
   if (typeof cached !== "number") return total;
   return Math.max(0, total - cached);
+}
+
+function freshInputTokens(
+  usage: Pick<ProjectedRuntimeUsage, "inputTokens" | "cachedInputTokens">,
+): number | undefined {
+  if (
+    typeof usage.inputTokens !== "number" ||
+    typeof usage.cachedInputTokens !== "number"
+  ) {
+    return undefined;
+  }
+  return Math.max(0, usage.inputTokens - usage.cachedInputTokens);
+}
+
+/**
+ * One attempt's input, split three ways: the prompt Nitely packed, the input
+ * the runtime read fresh, and the input it read from the provider's cache.
+ *
+ * A runtime's reported input covers its own session prefix and every reread
+ * inside its tool loop, nearly all of it served from cache. Codex reports one
+ * cumulative `turn.completed` usage per turn, so an implement turn that ran
+ * many commands can report millions of input tokens for a prompt of a few
+ * thousand. The runtime figures here are that final snapshot and nothing
+ * more: no per-call split is derived from it, and an attempt that never
+ * produced one is reported as missing rather than as zero.
+ */
+export interface ProjectedAttemptInputBreakdown {
+  stageId: string;
+  attempt: number;
+  runtime?: string;
+  /** Nitely's packed prompt for the attempt (`stage.context.usage`). */
+  harnessPromptApproxTokens?: number;
+  /** False when the attempt recorded no provider usage snapshot. */
+  usageReported: boolean;
+  /** The runtime's cumulative input for the attempt, cache reads included. */
+  cumulativeInputTokens?: number;
+  freshInputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  /** Where the runtime figures came from, e.g. `codex.exec.turn.completed.usage`. */
+  usageSource?: string;
+}
+
+export function attemptInputBreakdowns(
+  stages: Iterable<ProjectedStage>,
+): ProjectedAttemptInputBreakdown[] {
+  const breakdowns: ProjectedAttemptInputBreakdown[] = [];
+  for (const stage of stages) {
+    for (const attempt of stage.attempts) {
+      const usage = attempt.runtimeUsage;
+      const harnessPromptApproxTokens = attempt.contextUsage?.approxTokens;
+      const isRuntimeAttempt =
+        (attempt.runtime !== undefined || stage.stageType === "agent") &&
+        attempt.status !== "unavailable" &&
+        attempt.status !== "skipped";
+      if (!usage && harnessPromptApproxTokens === undefined && !isRuntimeAttempt) {
+        continue;
+      }
+      const fresh = usage ? freshInputTokens(usage) : undefined;
+      breakdowns.push({
+        stageId: stage.stageId,
+        attempt: attempt.attempt,
+        ...(attempt.runtime !== undefined ? { runtime: attempt.runtime } : {}),
+        ...(harnessPromptApproxTokens !== undefined
+          ? { harnessPromptApproxTokens }
+          : {}),
+        usageReported: usage !== undefined,
+        ...(usage?.inputTokens !== undefined
+          ? { cumulativeInputTokens: usage.inputTokens }
+          : {}),
+        ...(fresh !== undefined ? { freshInputTokens: fresh } : {}),
+        ...(usage?.cachedInputTokens !== undefined
+          ? { cachedInputTokens: usage.cachedInputTokens }
+          : {}),
+        ...(usage?.outputTokens !== undefined
+          ? { outputTokens: usage.outputTokens }
+          : {}),
+        ...(usage?.provenance?.source.reference
+          ? { usageSource: usage.provenance.source.reference }
+          : {}),
+      });
+    }
+  }
+  return breakdowns;
+}
+
+export function formatAttemptInputBreakdown(
+  breakdown: ProjectedAttemptInputBreakdown,
+): string {
+  const heading = `${breakdown.stageId} attempt ${breakdown.attempt}${
+    breakdown.runtime ? ` (${breakdown.runtime})` : ""
+  }`;
+  const parts = [
+    breakdown.harnessPromptApproxTokens !== undefined
+      ? `harness prompt ~${breakdown.harnessPromptApproxTokens}`
+      : "harness prompt not recorded",
+  ];
+  if (!breakdown.usageReported) {
+    parts.push("runtime usage not reported (no final usage snapshot; not counted as zero)");
+  } else if (
+    breakdown.freshInputTokens !== undefined &&
+    breakdown.cachedInputTokens !== undefined
+  ) {
+    parts.push(
+      `fresh input ${breakdown.freshInputTokens}`,
+      `cached input ${breakdown.cachedInputTokens}`,
+      `cumulative input ${breakdown.cumulativeInputTokens}`,
+    );
+  } else if (breakdown.cumulativeInputTokens !== undefined) {
+    parts.push(
+      `cumulative input ${breakdown.cumulativeInputTokens} (fresh/cached split not reported)`,
+    );
+  } else {
+    parts.push("runtime input not reported");
+  }
+  if (breakdown.outputTokens !== undefined) {
+    parts.push(`output ${breakdown.outputTokens}`);
+  }
+  const source = breakdown.usageSource ? ` [${breakdown.usageSource}]` : "";
+  return `${heading}: ${parts.join(" · ")}${source}`;
 }
 
 function runtimeUsageTokenCount(
@@ -2642,6 +2771,10 @@ export function projectRun(
   );
   if (runtimeUsageTotal) {
     projection.runtimeUsage = runtimeUsageTotal;
+  }
+  const runtimeInputBreakdown = attemptInputBreakdowns(stages.values());
+  if (runtimeInputBreakdown.length > 0) {
+    projection.runtimeInputBreakdown = runtimeInputBreakdown;
   }
   const budgetSummary = buildBudgetSummary(stages.values(), budgetSignals);
   if (budgetSummary) {

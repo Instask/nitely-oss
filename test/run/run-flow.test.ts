@@ -11913,7 +11913,7 @@ describe("runFlow", () => {
           return {
             stdout: "resumed\n",
             stderr: "",
-            usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+            usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cachedInputTokens: 6 },
           };
         }),
       },
@@ -11926,6 +11926,15 @@ describe("runFlow", () => {
     expect(evidence).not.toContain("- Unknown attempts:");
     expect(evidence).toContain("- Attempts with runtime usage data: 1");
     expect(evidence).toContain("- Runtime attempts without usage data: 3");
+    expect(evidence).toContain("- Cached input tokens: 6");
+    expect(evidence).toContain("- Fresh input tokens: 4");
+    expect(evidence).toContain("Input by attempt (harness prompt vs. runtime-reported input):");
+    expect(evidence).toMatch(
+      /- implement attempt 4 \(codex\): harness prompt ~\d+ · fresh input 4 · cached input 6 · cumulative input 10 · output 5\n/,
+    );
+    expect(evidence).toMatch(
+      /- implement attempt 1 \(claude\): harness prompt [^\n]*runtime usage not reported \(no final usage snapshot; not counted as zero\)\n/,
+    );
     expect(evidence).not.toContain("attempt 4/2");
     expect(evidence).toContain(
       "- implement attempt 4 (max policy attempts 2): complete - agent completed on attempt 4",
