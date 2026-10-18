@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { normalizeRuntimeUsageForPersistence } from "../../../src/eval/usage.js";
 import { createPiJsonCapture, normalizePiJsonResult, readPiJsonStream } from "../../../src/run/execution/pi-json.js";
 
 const fixturePath = join(process.cwd(), "test/fixtures/pi-json/openrouter-two-calls.jsonl");
@@ -28,12 +29,32 @@ describe("readPiJsonStream", () => {
       provenance: {
         provider: "openrouter",
         model: "qwen/qwen3-coder-next-20260901",
-        source: { kind: "provider-reported", reference: "pi.json.message_end.usage" },
+        source: { kind: "calculated", reference: "pi.json.message_end.usage" },
       },
       raw: { calls: 2, uncachedInputTokens: 5_000, cacheReadInputTokens: 4_800, cacheWriteInputTokens: 0 },
     });
     expect(outcome.usage?.cost).toMatchObject({ classification: "estimated", method: "pi-model-pricing" });
     expect((outcome.usage?.cost as { usd: number }).usd).toBeCloseTo(0.000778, 9);
+    // What run-flow persists must accept it, or the stage fails after the agent succeeded.
+    expect(normalizeRuntimeUsageForPersistence(outcome.usage)).toMatchObject({
+      inputTokens: 9_800,
+      cost: { classification: "estimated", method: "pi-model-pricing" },
+    });
+  });
+
+  it("keeps provider-reported provenance when Pi reports no cost", () => {
+    const stream = [
+      JSON.stringify({ type: "message_start", message: { role: "assistant" } }),
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [], usage: { input: 10, output: 2 }, stopReason: "stop" },
+      }),
+      JSON.stringify({ type: "agent_settled" }),
+    ].join("\n");
+    const usage = readPiJsonStream(stream).usage;
+    expect(usage?.cost).toBeUndefined();
+    expect(usage?.provenance?.source.kind).toBe("provider-reported");
+    expect(() => normalizeRuntimeUsageForPersistence(usage)).not.toThrow();
   });
 
   it("keeps the partial usage of a run cut off mid-call, without an answer", async () => {
@@ -105,8 +126,12 @@ describe("createPiJsonCapture", () => {
     for (const chunkSize of [1, 7, 4096]) {
       const compact = captureOf(stream, chunkSize);
       expect(compact.length).toBeLessThan(stream.length);
-      expect(compact).not.toContain("tool_execution");
-      expect(readPiJsonStream(compact, options)).toEqual(expected);
+      const outcome = readPiJsonStream(compact, options);
+      // The capture stamps observation times onto the call log; the rest matches.
+      const { callLog: compactLog, ...compactUsage } = outcome.usage ?? {};
+      const { callLog: expectedLog, ...expectedUsage } = expected.usage ?? {};
+      expect({ ...outcome, usage: compactUsage }).toEqual({ ...expected, usage: expectedUsage });
+      expect(compactLog).toHaveLength(expectedLog?.length ?? -1);
     }
   });
 
@@ -115,8 +140,13 @@ describe("createPiJsonCapture", () => {
     const lines = stream.split("\n");
     const cut = lines.findIndex((line) => line.includes('"delta":"Done"'));
     const truncated = `${lines.slice(0, cut + 1).join("\n")}\n{"type":"message_up`;
+    // Observed times exist only in the capture.
+    const withoutTimes = (value: unknown) =>
+      JSON.parse(JSON.stringify(value, (key, field: unknown) =>
+        key === "startedAt" || key === "endedAt" ? undefined : field)) as unknown;
     const options = { observedAt: new Date("2026-10-08T09:00:00.000Z") };
-    expect(readPiJsonStream(captureOf(truncated, 5), options)).toEqual(readPiJsonStream(truncated, options));
+    expect(withoutTimes(readPiJsonStream(captureOf(truncated, 5), options)))
+      .toEqual(withoutTimes(readPiJsonStream(truncated, options)));
   });
 
   it("skips a huge agent_end without buffering it and still sees willRetry", () => {
@@ -129,6 +159,76 @@ describe("createPiJsonCapture", () => {
       expect(capture.size()).toBeLessThan(4096);
     }
     expect(capture.text()).toBe('{"type":"agent_end","willRetry":true}\n');
+  });
+
+  it("logs each model call and tool execution with the times it observed them", async () => {
+    const stream = await readFile(fixturePath, "utf8");
+    let clock = Date.parse("2026-10-08T09:00:00.000Z");
+    const capture = createPiJsonCapture({ now: () => (clock += 1_000) });
+    capture.write(stream);
+    const outcome = readPiJsonStream(capture.text(), { provider: "openrouter" });
+    const raw = outcome.usage as { callLog: Array<Record<string, unknown>> };
+
+    expect(raw.callLog.map((call) => call.kind)).toEqual(["llm", "tool", "llm"]);
+    const [first, tool, second] = raw.callLog;
+    expect(first).toMatchObject({
+      kind: "llm",
+      provider: "openrouter",
+      model: "qwen/qwen3-coder-next",
+      inputTokens: 4_800,
+      outputTokens: 40,
+      cacheReadInputTokens: 0,
+      toolCalls: [{ id: "call_1", name: "bash" }],
+    });
+    expect(Date.parse(first?.endedAt as string)).toBeGreaterThan(Date.parse(first?.startedAt as string));
+    expect(tool).toMatchObject({ kind: "tool", toolCallId: "call_1", toolName: "bash", isError: false });
+    expect(Date.parse(tool?.startedAt as string)).toBeGreaterThan(Date.parse(first?.endedAt as string));
+    expect(Date.parse(tool?.endedAt as string)).toBeGreaterThan(Date.parse(tool?.startedAt as string));
+    expect(second).toMatchObject({
+      inputTokens: 5_000,
+      cacheReadInputTokens: 4_800,
+      responseModel: "qwen/qwen3-coder-next-20260901",
+      stopReason: "stop",
+    });
+    // Per-call usage adds up to the attempt totals.
+    const llm = raw.callLog.filter((call) => call.kind === "llm");
+    expect(llm.reduce((sum, call) => sum + (call.inputTokens as number), 0)).toBe(outcome.usage?.inputTokens);
+    expect(llm.reduce((sum, call) => sum + (call.outputTokens as number), 0)).toBe(outcome.usage?.outputTokens);
+    expect(llm.reduce((sum, call) => sum + (call.costUsd as number), 0))
+      .toBeCloseTo((outcome.usage?.cost as { usd: number }).usd, 12);
+    // No content unless asked for.
+    expect(JSON.stringify(raw.callLog)).not.toContain("ls test");
+    expect(JSON.stringify(raw.callLog)).not.toContain("Reading the tests first.");
+  });
+
+  it("keeps completion text and tool arguments only when content capture is on", async () => {
+    const stream = await readFile(fixturePath, "utf8");
+    const capture = createPiJsonCapture({ captureContent: true });
+    capture.write(stream);
+    const outcome = readPiJsonStream(capture.text(), { captureContent: true });
+    const [first] = (outcome.usage as { callLog: Array<Record<string, unknown>> }).callLog;
+    expect(first).toMatchObject({
+      output: "Reading the tests first.\n",
+      toolCalls: [{ id: "call_1", name: "bash", arguments: JSON.stringify({ command: "ls test" }) }],
+    });
+  });
+
+  it("reads a failed tool from a huge tool_execution_end without buffering it", () => {
+    const huge = "z".repeat(5 * 1024 * 1024);
+    const capture = createPiJsonCapture({ now: () => 1_760_000_000_000 });
+    const start = `${JSON.stringify({ type: "tool_execution_start", toolCallId: "c9", toolName: "write", args: { content: huge } })}\n`;
+    const end = `${JSON.stringify({ type: "tool_execution_end", toolCallId: "c9", toolName: "write", result: { content: [{ type: "text", text: huge }] }, isError: true })}\n`;
+    for (const record of [start, end]) {
+      for (let offset = 0; offset < record.length; offset += 65_536) {
+        capture.write(record.slice(offset, offset + 65_536));
+        expect(capture.size()).toBeLessThan(4096);
+      }
+    }
+    const lines = capture.text().trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(lines).toEqual([
+      { type: "tool_execution_start", toolCallId: "c9", toolName: "write", observedAt: 1_760_000_000_000 },
+      { type: "tool_execution_end", toolCallId: "c9", toolName: "write", isError: true, observedAt: 1_760_000_000_000 },
+    ]);
   });
 
   it("passes output that is not Pi JSON through unchanged", () => {
