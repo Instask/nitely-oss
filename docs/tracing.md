@@ -85,12 +85,18 @@ Where the child spans come from:
 - **Pi** (`pi`, `openrouter`, `together`) records one model call per
   `message_end`, plus tool executions. `nitely.usage.granularity` is omitted,
   which means `call`.
-- **Codex** `exec --json` reports `turn.completed.usage` as a cumulative session
-  total. Nitely stores one turn record per snapshot. Its token attributes are
-  the increase since the previous snapshot (`nitely.usage.accounting=delta`),
-  so the turns add up to the last snapshot, which is the attempt total. If a
-  later snapshot is smaller, Nitely keeps that last snapshot as one cumulative
-  record and does not invent a per-turn split. Tool spans are the item type
+- **Codex** `exec --json` reports `turn.completed.usage` as the thread's
+  cumulative total. Nitely stores one turn record per snapshot. Its token
+  attributes are the increase since the previous snapshot in the same attempt
+  (`nitely.usage.accounting=delta`), so the turns add up to the attempt's last
+  snapshot. If a later snapshot is smaller, Nitely keeps that last snapshot as
+  one cumulative record and does not invent a per-turn split.
+  `codex exec resume` keeps the thread's total, so on an attempt that resumed
+  an earlier session the last snapshot also includes the earlier attempts on
+  that thread. It is the session total, not the attempt total, and the first
+  turn record of such an attempt carries the earlier attempts too. Until that
+  baseline is subtracted (jerryleooo/nitely#726), do not add resumed Codex
+  attempts together. Tool spans are the item type
   (`command_execution`, `file_change`, `mcp_tool_call`, `web_search`) and an
   error flag. Command lines, paths, and arguments are not recorded. Codex does
   not emit per-model-call usage on this stream.

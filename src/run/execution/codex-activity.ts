@@ -4,12 +4,17 @@ import { MAX_CALL_LOG_ENTRIES } from "./pi-json.js";
 /**
  * Read a `codex exec --json` stdout capture.
  *
- * `turn.completed.usage` is a cumulative session total, not one model call
+ * `turn.completed.usage` is the thread's cumulative total, not one model call
  * and not a delta. Each turn becomes a call-log record whose tokens are the
- * increase since the previous snapshot, so the records add up to the last
- * snapshot. That last snapshot is the attempt total. A later snapshot that
- * is smaller than an earlier one is not split; the attempt keeps the last
- * snapshot as one cumulative record.
+ * increase since the previous snapshot in this capture, so the records add up
+ * to the last snapshot. A later snapshot that is smaller than an earlier one
+ * is not split; the attempt keeps the last snapshot as one cumulative record.
+ *
+ * The last snapshot is the attempt total only when the attempt started the
+ * thread. `codex exec resume` keeps the thread's total, so a resumed attempt's
+ * snapshots also include every earlier attempt on that thread, and its first
+ * record carries them. This capture cannot see those attempts; subtracting
+ * them needs the session's previous snapshot (jerryleooo/nitely#726).
  *
  * Tool records keep identity, the error flag, and the times the start and
  * end lines were observed. Command lines, paths, arguments, and message text
