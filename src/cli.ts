@@ -3735,7 +3735,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
       }
       let fixturePath: string | undefined;
       let outputPath: string | undefined;
-      let budget = 30;
+      let budget = 1800;
       try {
         for (let index = 2; index < argv.length; index += 1) {
           const arg = argv[index];
@@ -3751,7 +3751,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
           await writeFile(resolve(outputPath), result.report + "\n", "utf8");
         }
         io.stdout(result.report);
-        return result.report.endsWith("Decision: go") ? 0 : 1;
+        return result.decision === "no-go" ? 1 : 0;
       } catch (error) {
         io.stderr(error instanceof Error ? error.message : String(error));
         return 1;

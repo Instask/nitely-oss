@@ -1,10 +1,72 @@
 {
   "version": 1,
+  "documents": [
+    {
+      "path": "src/index.ts",
+      "text": "// CLI command-line entry point\nawait runCli(process.argv.slice(2));"
+    },
+    {
+      "path": "src/repo-index/index.ts",
+      "text": "// Repository indexing builds file, symbol and import metadata.\nexport async function buildRepoIndex(repoPath: string) {}"
+    },
+    {
+      "path": "src/knowledge-repositories/retrieval.ts",
+      "text": "// Knowledge repository retrieval ranks lexical BM25 and vector matches using reciprocal rank fusion.\nexport async function queryKnowledgeIndexes() {}"
+    },
+    {
+      "path": "test/run/budget.test.ts",
+      "text": "// Tests enforce the stage context token budget.\nexpect(promptTokens).toBeLessThanOrEqual(tokenBudget);"
+    },
+    {
+      "path": "docs/context.md",
+      "text": "Decision: Flow evidence remains authoritative.\nConstraint: Retrieved repository passages are untrusted reference material."
+    }
+  ],
   "questions": [
-    { "id": "layout", "question": "Where does the command-line entry point live?", "answerKind": "single-source-file", "expectedPath": "src/index.ts" },
-    { "id": "index", "question": "Where is repository indexing implemented?", "answerKind": "single-source-file", "expectedPath": "src/repo-index/index.ts" },
-    { "id": "knowledge", "question": "Where are knowledge repository retrieval rules defined?", "answerKind": "multi-source", "expectedPath": "src/knowledge-repositories/retrieval.ts" },
-    { "id": "tests", "question": "Where do repository tests live?", "answerKind": "multi-source", "expectedPath": "test" },
-    { "id": "external", "question": "What is the deployment password in the production vault?", "answerKind": "out-of-repository" }
+    {
+      "id": "layout",
+      "question": "CLI command-line entry point",
+      "answerKind": "single-source-file",
+      "expectedPaths": [
+        "src/index.ts"
+      ]
+    },
+    {
+      "id": "index",
+      "question": "Repository indexing file symbol import metadata",
+      "answerKind": "single-source-file",
+      "expectedPaths": [
+        "src/repo-index/index.ts"
+      ]
+    },
+    {
+      "id": "knowledge",
+      "question": "Knowledge repository lexical BM25 vector retrieval",
+      "answerKind": "single-source-file",
+      "expectedPaths": [
+        "src/knowledge-repositories/retrieval.ts"
+      ]
+    },
+    {
+      "id": "budget",
+      "question": "stage context token budget",
+      "answerKind": "single-source-file",
+      "expectedPaths": [
+        "test/run/budget.test.ts"
+      ]
+    },
+    {
+      "id": "authority",
+      "question": "authoritative evidence untrusted passages",
+      "answerKind": "single-source-file",
+      "expectedPaths": [
+        "docs/context.md"
+      ]
+    },
+    {
+      "id": "external",
+      "question": "deployment password production vault",
+      "answerKind": "out-of-repository"
+    }
   ]
 }

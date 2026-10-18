@@ -1,189 +1,141 @@
-import { describe, expect, it, vi } from 'vitest';
-import {
-  benchmarkFixture,
-  buildComparisonReport,
-  packCandidates,
-  prepareContext,
-  runBenchmark,
-} from '../src/hybrid-retrieval.js';
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { buildComparisonReport, packCandidates, prepareContext, runBenchmark, retrieveHybridRepositoryContext } from "../src/hybrid-retrieval.js";
+import { runCli } from "../src/cli.js";
+import { estimateKnowledgeTokens } from "../src/knowledge-repositories/tokenize.js";
 
-describe('hybrid retrieval benchmark fixture', () => {
-  it('contains at least five repository questions, including a single-file answer and an out-of-repository question', () => {
-    expect(benchmarkFixture.questions.length).toBeGreaterThanOrEqual(5);
-    expect(benchmarkFixture.questions).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ answerKind: 'single-source-file' }),
-        expect.objectContaining({ answerKind: 'out-of-repository' }),
-      ]),
-    );
+const candidate = {
+  path: "src/example.ts", lineRange: { start: 100, end: 101 }, text: "first\nsecond",
+  sourceRevision: "a".repeat(40), relevanceScore: 1, reason: "lexical match",
+};
+const directories: string[] = [];
+afterEach(async () => { await Promise.all(directories.splice(0).map((p) => rm(p, { recursive: true, force: true }))); });
+
+describe("context pack boundary", () => {
+  it("accepts source-relative multiline ranges and rejects mismatched spans", () => {
+    expect(packCandidates([candidate], 1000).pack).toHaveLength(1);
+    expect(packCandidates([{ ...candidate, lineRange: { start: 1, end: 1 } }], 1000).invalid).toHaveLength(1);
+  });
+  it("budgets the full escaped context including long provenance", () => {
+    const packed = packCandidates([{ ...candidate, lineRange: { start: 1, end: 1 }, text: "a", reason: "x".repeat(10000) }], 30);
+    expect(packed.pack).toHaveLength(0);
+  });
+  it("does not emit credentials through any candidate field", () => {
+    for (const text of ["password=hunter2", "Authorization: Bearer abcdefgh", '{"password":"hunter2"}', "https://user:password@example.com", "-----BEGIN PRIVATE KEY-----"]) {
+      expect(packCandidates([{ ...candidate, text, lineRange: { start: 1, end: 1 } }], 1000).pack).toEqual([]);
+      expect(packCandidates([{ ...candidate, reason: text }], 1000).pack).toEqual([]);
+    }
+  });
+  it("rejects arbitrarily named symlinks including parent directories", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nitely-pack-")); directories.push(root);
+    await mkdir(join(root, "src"));
+    await symlink(tmpdir(), join(root, "anything"));
+    expect(packCandidates([{ ...candidate, path: "anything/outside.ts" }], 1000, { repositoryRoot: root }).invalid).toHaveLength(1);
+  });
+  it("rejects malformed scores, missing provenance and noncanonical paths", () => {
+    for (const changed of [{ relevanceScore: NaN }, { sourceRevision: "" }, { path: "src/../file.ts" }]) {
+      expect(packCandidates([{ ...candidate, ...changed }], 1000).invalid).toHaveLength(1);
+    }
+  });
+  it("ranks higher relevance first and enforces the exact rendered budget", () => {
+    const result = packCandidates([{ ...candidate, relevanceScore: 0.1 }, { ...candidate, path: "src/better.ts" }], 200);
+    expect(result.pack[0]?.path).toBe("src/better.ts");
+    expect(result.tokenCount).toBeLessThanOrEqual(200);
+    // The rendered form is the only payload passed to consumers.
+    expect(result).toHaveProperty("context");
+    expect(result.tokenCount).toBe(estimateKnowledgeTokens((result as unknown as { context: string }).context));
+  });
+  it("returns an empty pack at zero budget and rejects negative budgets", () => {
+    expect(packCandidates([candidate], 0).pack).toEqual([]);
+    expect(() => packCandidates([], -1)).toThrow();
   });
 });
 
-describe('token-budgeted context packing', () => {
-  const candidates = [
-    {
-      path: 'src/first.ts',
-      lineRange: { start: 1, end: 1 },
-      text: 'aaaa',
-      sourceRevision: 'fixture-revision',
-      relevanceScore: 1,
-      reason: 'lexical match',
-    },
-    {
-      path: 'src/second.ts',
-      lineRange: { start: 2, end: 2 },
-      text: 'bbbb',
-      sourceRevision: 'fixture-revision',
-      relevanceScore: 0.9,
-      reason: 'semantic match',
-    },
-    {
-      path: 'src/third.ts',
-      lineRange: { start: 3, end: 3 },
-      text: 'cccc',
-      sourceRevision: 'fixture-revision',
-      relevanceScore: 0.8,
-      reason: 'lexical match',
-    },
-  ];
-
-  it('keeps the exact deterministic order and paths that fit a 30-token budget, and reports dropped candidates', () => {
-    const result = packCandidates(candidates, 30);
-
-    expect(result.pack.map((snippet) => snippet.path)).toEqual([
-      'src/first.ts',
-      'src/second.ts',
-    ]);
-    expect(result.dropped.map((candidate) => candidate.path)).toEqual([
-      'src/third.ts',
-    ]);
-    expect(result.pack).toEqual([
-      expect.objectContaining({
-        path: 'src/first.ts',
-        lineRange: { start: 1, end: 1 },
-        sourceRevision: 'fixture-revision',
-        relevanceScore: 1,
-        reason: 'lexical match',
-      }),
-      expect.objectContaining({
-        path: 'src/second.ts',
-        lineRange: { start: 2, end: 2 },
-        sourceRevision: 'fixture-revision',
-        relevanceScore: 0.9,
-        reason: 'semantic match',
-      }),
-    ]);
+describe("benchmark evidence", () => {
+  it("does not approve on token savings without evaluation evidence", () => {
+    expect(buildComparisonReport({ baselineTokenCount: 42, hybridTokenCount: 0, proposals: [] })).toMatch(/Decision: no-go$/);
   });
-
-  it('uses caller-supplied snippet text and does not read arbitrary paths or follow outside-root symlinks', () => {
-    const result = packCandidates([
-      {
-        ...candidates[0],
-        path: 'link/outside.txt',
-        text: 'caller supplied text',
-      },
-    ], 30, { repositoryRoot: '/fixture/repository' });
-
-    expect(result.pack).toEqual([]);
-    expect(result.invalid).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ path: 'link/outside.txt' }),
-      ]),
-    );
+  it.each([{ version: 1, questions: [] }, { version: 2, questions: [] }, { questions: [{}] }])("rejects incomplete fixtures", async (fixture) => {
+    await expect(runBenchmark({ fixture: fixture as never })).rejects.toThrow();
   });
-
-  it('omits token-shaped secret text and counts it as sanitized', () => {
-    const result = packCandidates([
-      {
-        ...candidates[0],
-        text: 'token=ghp_123456789012345678901234567890123456',
-      },
-    ], 30);
-
-    expect(result.pack).toEqual([]);
-    expect(result.sanitized).toBe(1);
-  });
-
-  it('returns an empty pack for a zero budget', () => {
-    expect(packCandidates(candidates, 0).pack).toEqual([]);
-  });
-
-  it('rejects empty paths and line ranges outside the supplied snippet as invalid', () => {
-    const result = packCandidates([
-      { ...candidates[0], path: '' },
-      { ...candidates[1], lineRange: { start: 4, end: 5 }, text: 'one\ntwo' },
-    ], 30);
-
-    expect(result.pack).toEqual([]);
-    expect(result.invalid.map((candidate) => candidate.path)).toEqual(['', 'src/second.ts']);
-  });
-
-  it('keeps missing semantic scores missing and reports that the semantic signal was unavailable', () => {
-    const result = packCandidates([
-      { ...candidates[0], semanticScore: undefined },
-    ], 30);
-
-    expect(result.pack[0]).toEqual(
-      expect.objectContaining({ semanticScore: undefined }),
-    );
-    expect(result.report).toContain('semantic signal was unavailable');
-  });
-});
-
-describe('comparison report and benchmark behavior', () => {
-  it('reports baseline and hybrid token counts and ends with exactly one decision line', () => {
-    const report = buildComparisonReport({
-      baselineTokenCount: 42,
-      hybridTokenCount: 30,
-      proposals: [],
-    });
-
-    expect(report).toContain('Baseline tokens: 42');
-    expect(report).toContain('Hybrid tokens: 30');
-    expect(report.match(/^Decision: (go|no-go)$/gm)).toHaveLength(1);
-    expect(report.trim().split('\n').at(-1)).toMatch(/^Decision: (go|no-go)$/);
-  });
-
-  it('returns extracted decisions, constraints, and preferences as proposals without writing authoritative storage', async () => {
+  it("never writes authoritative context", async () => {
     const write = vi.fn();
-    const result = await runBenchmark({
-      fixture: benchmarkFixture,
-      writeAuthoritativeContext: write,
-    });
-
-    expect(result.proposals).toEqual(expect.any(Array));
+    await runBenchmark({ writeAuthoritativeContext: write });
     expect(write).not.toHaveBeenCalled();
   });
+});
 
-  it('fails when the fixture cannot be read and does not produce a go decision', async () => {
-    await expect(runBenchmark({ fixturePath: '/missing/fixture.json' })).rejects.toThrow();
+describe("feature flag", () => {
+  it("preserves evidence and skips retrieval when disabled", async () => {
+    const evidence = { id: "flow" }; const hybridPacker = vi.fn();
+    expect(await prepareContext({ env: {}, existingFlowEvidence: evidence, hybridPacker })).toBe(evidence);
+    expect(hybridPacker).not.toHaveBeenCalled();
+  });
+  it("returns supplemental context alongside unchanged authoritative evidence", async () => {
+    const evidence = { id: "flow" }; const hybrid = { pack: [candidate] };
+    expect(await prepareContext({ env: { NITELY_HYBRID_RETRIEVAL: "1" }, existingFlowEvidence: evidence, hybridPacker: () => hybrid })).toEqual({ existingFlowEvidence: evidence, hybridContext: hybrid });
   });
 });
 
-describe('hybrid retrieval feature flag', () => {
-  it('does not call the hybrid packer when NITELY_HYBRID_RETRIEVAL is unset', async () => {
-    const hybridPacker = vi.fn();
-    const existingEvidence = { id: 'flow-evidence' };
 
-    const result = await prepareContext({
-      env: {},
-      existingFlowEvidence: existingEvidence,
-      hybridPacker,
-    });
-
-    expect(hybridPacker).not.toHaveBeenCalled();
-    expect(result).toEqual(existingEvidence);
+describe("real repository retrieval", () => {
+  it("searches committed text, anchors provenance and excludes symlinks, secrets and policy-denied paths", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nitely-hybrid-")); directories.push(root);
+    const git = async (...args: string[]) => promisify(execFile)("git", ["-C", root, ...args]);
+    await git("init"); await git("config", "user.email", "fixture@example.test"); await git("config", "user.name", "Fixture");
+    await writeFile(join(root, "allowed.md"), "Kestrel retrieval target is implemented here.");
+    await writeFile(join(root, "denied.md"), "Kestrel forbidden policy content.");
+    await writeFile(join(root, "credential.md"), 'Kestrel {"password":"fixture-secret"}');
+    await symlink("allowed.md", join(root, "arbitrary.md"));
+    await git("add", "."); await git("commit", "-m", "fixture");
+    await writeFile(join(root, "nitely.context.json"), JSON.stringify({ exclude: ["denied.md"] }));
+    const matches = await retrieveHybridRepositoryContext({ repoPath: root, query: "Kestrel retrieval target", tokenBudget: 1000 });
+    expect(matches.map((m) => m.path)).toEqual(["allowed.md"]);
+    expect(matches[0].text).toBe("Kestrel retrieval target is implemented here.");
+    expect(matches[0].commitSha).toBe((await git("rev-parse", "HEAD")).stdout.trim());
+    expect(matches[0].contentDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
+    await writeFile(join(root, "allowed.md"), "uncommitted replacement");
+    expect((await retrieveHybridRepositoryContext({ repoPath: root, query: "Kestrel", tokenBudget: 1000 }))[0].text).toContain("retrieval target");
   });
+  it("measures real retrieval payloads and quality rather than question length", async () => {
+    const result = await runBenchmark();
+    expect(result.baselineTokenCount).toBeGreaterThan(0);
+    expect(result.hybridTokenCount).toBeGreaterThan(0);
+    expect(result.measurements).toHaveLength(6);
+    expect(result.measurements.every((m) => m.provenanceValid)).toBe(true);
+    expect(result.measurements.find((m) => m.id === "external")).toMatchObject({ baselinePaths: [], hybridPaths: [], hybridRecall: 1 });
+    expect(result.decision).toBe("no-go");
+  });
+});
 
-  it('uses hybrid ranking only when NITELY_HYBRID_RETRIEVAL is 1', async () => {
-    const hybridPacker = vi.fn().mockResolvedValue({ pack: [] });
 
-    await prepareContext({
-      env: { NITELY_HYBRID_RETRIEVAL: '1' },
-      existingFlowEvidence: { id: 'flow-evidence' },
-      hybridPacker,
-    });
+describe("benchmark CLI", () => {
+  it("returns an explicit no-go exit status for the bundled smoke fixture", async () => {
+    const stdout = vi.fn(); const stderr = vi.fn();
+    expect(await runCli(["benchmark", "hybrid-retrieval"], { stdout, stderr })).toBe(1);
+    expect(stdout.mock.calls[0][0]).toContain("Per-query budget: 1800");
+    expect(stdout.mock.calls[0][0]).toMatch(/Decision: no-go$/);
+    expect(stderr).not.toHaveBeenCalled();
+  });
+  it.each([["--fixture"], ["--budget", "-1"], ["--output", "--budget", "100"]])("rejects incomplete or malformed options %s", async (...args) => {
+    const stdout = vi.fn(); const stderr = vi.fn();
+    expect(await runCli(["benchmark", "hybrid-retrieval", ...args.flat()], { stdout, stderr })).toBe(1);
+    expect(stdout).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalled();
+  });
+});
 
-    expect(hybridPacker).toHaveBeenCalledTimes(1);
+describe("bounded benchmark provenance", () => {
+  it("validates the original source hash when a retrieved passage is truncated", async () => {
+    const result = await runBenchmark({ tokenBudget: 300, fixture: {
+      version: 1, documents: [{ path: "a.md", text: "kestrel ".repeat(200) }],
+      questions: [{ id: "long", question: "kestrel", answerKind: "single-source-file", expectedPaths: ["a.md"] }],
+    } });
+    expect(result.measurements[0].provenanceValid).toBe(true);
+    expect(result.hybridTokenCount).toBeLessThanOrEqual(300);
   });
 });

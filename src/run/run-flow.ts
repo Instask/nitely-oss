@@ -98,6 +98,8 @@ import {
   redactText,
   redactUnknown,
 } from "../context/redaction.js";
+import { estimateKnowledgeTokens } from "../knowledge-repositories/tokenize.js";
+import { prepareContext, retrieveHybridRepositoryContext } from "../hybrid-retrieval.js";
 import { renderExternalKnowledgePrompt } from "../knowledge-repositories/prompt.js";
 import { knowledgeRepositoryRegistryExists } from "../knowledge-repositories/paths.js";
 import {
@@ -3266,6 +3268,8 @@ async function executeGateStage(input: {
         configuration: input.configuration,
         inputs: scopedInputs,
         controls: input.contextControls.externalKnowledge,
+        readPolicy: input.readPolicy,
+        retrievalRepoPath: input.workspace.path,
         context: input.context,
         dependencies: input.dependencies,
       });
@@ -4398,6 +4402,8 @@ async function executeAgentStage(input: {
       configuration: input.configuration,
       inputs: scopedInputs,
       controls: input.contextControls.externalKnowledge,
+      readPolicy: input.readPolicy,
+      retrievalRepoPath: input.workspace.path,
       context: input.context,
       dependencies: input.dependencies,
     });
@@ -6040,7 +6046,52 @@ export function externalKnowledgeQueryFailureIsFatal(input: {
     input.pins.some((pin) => pin.attachmentRequired);
 }
 
-async function retrieveExternalKnowledgeForStage(input: {
+async function retrieveExternalKnowledgeForStage(input: Parameters<typeof retrieveAttachedKnowledgeForStage>[0] & {
+  readPolicy: ResolvedStageReadPolicy;
+  retrievalRepoPath?: string;
+}): Promise<StageKnowledgeRetrieval | undefined> {
+  const attached = await retrieveAttachedKnowledgeForStage(input);
+  // Explicitly scoped attachment selections and disabled/isolated stages cannot be widened by an environment flag.
+  if (!input.controls.enabled || input.controls.ids !== undefined) return attached;
+  let retrievalFailed = false;
+  const prepared = await prepareContext({
+    existingFlowEvidence: attached,
+    hybridPacker: async () => {
+      try {
+        if (!input.retrievalRepoPath) throw new Error("task repository worktree unavailable");
+        return await retrieveHybridRepositoryContext({
+          repoPath: input.retrievalRepoPath,
+          policyRepoPath: input.context.repoPath,
+          query: buildExternalKnowledgeQuery(input),
+          tokenBudget: input.controls.maxPromptTokens,
+          redactionSecrets: input.context.redactionSecrets,
+          readPolicy: input.readPolicy,
+        });
+      } catch (error) {
+        if (input.controls.availability === "required") throw error;
+        retrievalFailed = true;
+        return [];
+      }
+    },
+  });
+  if (!prepared || !("hybridContext" in prepared)) return attached;
+  const matches = [...(attached?.matches ?? []), ...prepared.hybridContext].slice(0, input.controls.topK);
+  const countBefore = (attached?.matches.length ?? 0) + prepared.hybridContext.length;
+  // Count exactly what renderPrompt consumes, including framing and escaped citations.
+  while (matches.length && estimateKnowledgeTokens(renderExternalKnowledgePrompt(matches).join("\n")) > input.controls.maxPromptTokens) matches.pop();
+  return {
+    matches,
+    queryFingerprint: attached?.queryFingerprint ?? sha256Text(buildExternalKnowledgeQuery(input)),
+    status: "degraded", // The local hash signal is explicitly non-semantic.
+    degradedAttachmentIds: attached?.degradedAttachmentIds ?? [],
+    reasonCodes: [...(attached?.reasonCodes ?? []), retrievalFailed ? "task-repository-query-failed" : "task-repository-lexical-hash"],
+    candidateCount: (attached?.candidateCount ?? 0) + prepared.hybridContext.length,
+    retrievalTrimmedCount: (attached?.retrievalTrimmedCount ?? 0) + countBefore - matches.length,
+    approxTokens: estimateKnowledgeTokens(renderExternalKnowledgePrompt(matches).join("\n")),
+  };
+}
+
+async function retrieveAttachedKnowledgeForStage(input: {
   stage: AgentRunnableStage;
   flowName: string;
   configuration: FlowConfiguration;
