@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  codexConfigOverrides,
   codexConfiguredMcpServers,
-  planMcpServerRestriction,
+  parseCodexMcpList,
+  restrictCodexMcpServers,
   withCodexMcpServersDisabled,
 } from "../../../src/run/execution/mcp-servers.js";
+import { fakeCodexMcpList } from "../../helpers/fake-codex-mcp-list.js";
 
 describe("codexConfiguredMcpServers", () => {
   it("reads server tables, sub-tables, and quoted names in file order", () => {
@@ -100,58 +103,155 @@ describe("withCodexMcpServersDisabled", () => {
   });
 });
 
-describe("planMcpServerRestriction", () => {
-  it("keeps exactly the declared servers and disables the rest", () => {
+describe("codexConfigOverrides", () => {
+  it("collects every -c pair of a launch", () => {
     expect(
-      planMcpServerRestriction({
-        request: { mode: "declared-if-supported", declared: ["github", "missing"] },
-        configured: ["context7", "github", "playwright"],
-        stageId: "implement",
-      }),
-    ).toEqual({
+      codexConfigOverrides(["exec", "-m", "x", "-c", "model_reasoning_effort=high", "--json", "-"]),
+    ).toEqual(["-c", "model_reasoning_effort=high"]);
+  });
+});
+
+describe("parseCodexMcpList", () => {
+  it("keeps only name and enabled", () => {
+    expect(
+      parseCodexMcpList(JSON.stringify([
+        { name: "a", enabled: true, transport: { env: { TOKEN: "secret" } } },
+        { name: "b", enabled: false },
+      ])),
+    ).toEqual([{ name: "a", enabled: true }, { name: "b", enabled: false }]);
+  });
+
+  it("rejects output that is not a server list", () => {
+    expect(parseCodexMcpList("ok\n")).toBeUndefined();
+    expect(parseCodexMcpList("{}")).toBeUndefined();
+    expect(parseCodexMcpList('[{"name":"a"}]')).toBeUndefined();
+  });
+});
+
+describe("restrictCodexMcpServers", () => {
+  it("disables every enabled undeclared server and verifies it", async () => {
+    const lister = fakeCodexMcpList({ context7: true, github: true, playwright: true, off: false });
+    const result = await restrictCodexMcpServers({
+      request: { mode: "declared-required", declared: ["github", "missing"] },
+      stageId: "implement",
+      list: lister.list,
+      baseOverrides: ["-c", "model_reasoning_effort=high"],
+    });
+
+    expect(result).toEqual({
       disable: ["context7", "playwright"],
       outcome: {
-        restricted: true,
+        enforcement: "enforced",
         enabled: ["github"],
         disabled: ["context7", "playwright"],
         unconfigured: ["missing"],
       },
     });
+    // One listing to enumerate, one to verify, both with the launch's overrides.
+    expect(lister.calls).toEqual([
+      ["-c", "model_reasoning_effort=high"],
+      [
+        "-c",
+        "model_reasoning_effort=high",
+        "-c",
+        "mcp_servers.context7.enabled=false",
+        "-c",
+        "mcp_servers.playwright.enabled=false",
+      ],
+    ]);
   });
 
-  it("disables every configured server when the stage declares none", () => {
-    expect(
-      planMcpServerRestriction({
-        request: { mode: "declared-if-supported", declared: [] },
-        configured: ["context7", "playwright"],
-        stageId: "reflect",
-      }).disable,
-    ).toEqual(["context7", "playwright"]);
-  });
-
-  it("leaves an unaddressable name enabled and says so", () => {
-    const plan = planMcpServerRestriction({
-      request: { mode: "declared-if-supported", declared: [] },
-      configured: ["dotted.name", "ok"],
+  it("needs no verification when nothing is enabled beyond the declared servers", async () => {
+    const lister = fakeCodexMcpList({ github: true });
+    const result = await restrictCodexMcpServers({
+      request: { mode: "declared-required", declared: ["github"] },
       stageId: "implement",
+      list: lister.list,
     });
-    expect(plan.disable).toEqual(["ok"]);
-    expect(plan.outcome).toMatchObject({
-      restricted: true,
+    expect(result.outcome).toEqual({ enforcement: "enforced", enabled: ["github"], disabled: [] });
+    expect(lister.calls).toHaveLength(1);
+  });
+
+  it("reports an unaddressable server as partial, and fails closed when required", async () => {
+    const lister = fakeCodexMcpList({ "dotted.name": true, ok: true });
+    const result = await restrictCodexMcpServers({
+      request: { mode: "declared-if-supported", declared: [] },
+      stageId: "implement",
+      list: lister.list,
+    });
+    expect(result.disable).toEqual(["ok"]);
+    expect(result.outcome).toMatchObject({
+      enforcement: "partial",
       enabled: ["dotted.name"],
       disabled: ["ok"],
+      reason: expect.stringMatching(/cannot address MCP server name\(s\) dotted\.name/),
     });
-    expect(plan.outcome.reason).toMatch(/cannot address MCP server name\(s\) dotted\.name/);
+
+    await expect(
+      restrictCodexMcpServers({
+        request: { mode: "declared-required", declared: [] },
+        stageId: "implement",
+        list: lister.list,
+      }),
+    ).rejects.toThrow(/stage implement requires only its declared MCP servers but codex cannot address/);
   });
 
-  it("fails closed on a required restriction it cannot complete", () => {
-    expect(() =>
-      planMcpServerRestriction({
+  it("is partial when a disabled server still reports enabled", async () => {
+    const lister = fakeCodexMcpList({ stubborn: true }, { ignoreOverrides: ["stubborn"] });
+    const result = await restrictCodexMcpServers({
+      request: { mode: "declared-if-supported", declared: [] },
+      stageId: "implement",
+      list: lister.list,
+    });
+    expect(result.outcome).toMatchObject({
+      enforcement: "partial",
+      disabled: [],
+      reason: expect.stringMatching(/stubborn stayed enabled/),
+    });
+  });
+
+  it("falls back to the user config only in the default mode when Codex cannot list", async () => {
+    const list = async () => "not json";
+    const result = await restrictCodexMcpServers({
+      request: { mode: "declared-if-supported", declared: ["keep"] },
+      stageId: "implement",
+      list,
+      fallbackServers: async () => ["keep", "drop", "dotted.name"],
+    });
+    expect(result.disable).toEqual(["drop"]);
+    expect(result.outcome).toMatchObject({
+      enforcement: "partial",
+      disabled: ["drop"],
+      reason: expect.stringMatching(/did not print a server list/),
+    });
+
+    await expect(
+      restrictCodexMcpServers({
         request: { mode: "declared-required", declared: [] },
-        configured: ["ok"],
         stageId: "implement",
-        incompleteReason: "plugins still load",
+        list: async () => {
+          throw new Error("spawn codex ENOENT");
+        },
       }),
-    ).toThrow(/stage implement requires only its declared MCP servers but plugins still load/);
+    ).rejects.toThrow(/requires only its declared MCP servers but codex mcp list failed: spawn codex ENOENT/);
+  });
+
+  it("drops the overrides when verifying them breaks Codex", async () => {
+    let call = 0;
+    const result = await restrictCodexMcpServers({
+      request: { mode: "declared-if-supported", declared: [] },
+      stageId: "implement",
+      list: async () => {
+        call++;
+        if (call === 1) return JSON.stringify([{ name: "a", enabled: true }]);
+        throw new Error("failed to load bootstrap configuration");
+      },
+    });
+    expect(result.disable).toEqual([]);
+    expect(result.outcome).toMatchObject({
+      enforcement: "partial",
+      enabled: ["a"],
+      reason: expect.stringMatching(/while verifying the disable overrides/),
+    });
   });
 });

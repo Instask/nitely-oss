@@ -116,32 +116,59 @@ the behavior, flow-wide or per stage:
 | `false` | The restriction is required. A runtime with no mechanism, or a restriction Nitely cannot complete, fails the stage. |
 | `true` | Opt back into every server the operator configured. |
 
+Codex merges MCP servers from several config layers: the system
+`/etc/codex/config.toml`, the user `config.toml` in `CODEX_HOME`, every trusted
+project `.codex/config.toml` from the working directory up to the repository
+root, and `-c` flags. A linked worktree inherits the trust entry of the
+repository it belongs to, and that entry lives in the user `config.toml` Nitely
+preserves, so a repository's committed `.codex/config.toml` servers load into
+its stages. No single file names the effective set, so Nitely asks Codex:
+
+1. Run `codex mcp list --json` exactly where the launch will run: same command,
+   environment and `CODEX_HOME`, the worktree as working directory, and the
+   launch's own `-c` overrides. Nitely reads only each entry's `name` and
+   `enabled`; the rest of the output carries server env, args, and headers and
+   is never logged or stored.
+2. Turn off every enabled, undeclared server with
+   `-c mcp_servers.<name>.enabled=false`. The config files are never rewritten,
+   so auth, model provider, and model settings reach Codex unchanged.
+3. Run the list again under those overrides. The restriction is **enforced**
+   only if every undeclared server now reports `enabled: false` and the declared
+   ones are still there.
+
+Anything short of that is **partial**: the listing failed or did not parse, the
+verification failed, an override was ignored, or a server name contains a dot,
+which Codex's `-c` key path cannot address. Codex 0.162.0 also fails to start
+when an override names a server it has no configuration for, so Nitely only
+ever disables names Codex itself listed. Under `globalMcpServers: false` a
+partial restriction fails the stage before launch. Under the default the stage
+launches best-effort: if the listing failed it disables the user `config.toml`
+servers it can read, and if verification failed it launches without the
+overrides, since they may be what broke Codex.
+
 Runtime support today:
 
-- `codex` on the local backend: Nitely reads the server names from the
-  `config.toml` in the `CODEX_HOME` the attempt runs with and turns off each
-  undeclared one with `-c mcp_servers.<name>.enabled=false`. The config file is
-  never rewritten, so auth, model provider, and model settings reach Codex
-  unchanged. Codex 0.162.0 fails its launch when an override names a server it
-  has no configuration for, which is why only names found in `config.toml` are
-  ever disabled; a name with a dot cannot be addressed by an override and stays
-  enabled, with the reason recorded. Codex plugins can also provide MCP
-  servers; they are left behind with the plugin cache when global skills are
-  isolated, but with `globalSkills: true` they still load, and the outcome says
-  so (`globalMcpServers: false` fails the stage in that case). A project-level
-  `.codex/config.toml` in the target repository is not read.
-- OCI backend: the container's `HOME` is an empty throwaway path, so no runtime
-  finds any MCP server configuration. The restriction holds trivially, and a
-  declared server is reported as unconfigured.
+- `codex` on the local backend: the probe above, run as a child process.
+- `codex` on the OCI backend: the probe runs in its own offline container with
+  the stage's image, mounts, and environment, so a system config baked into the
+  image is seen too. The container's `HOME` is an empty throwaway path, so
+  usually nothing is configured and the restriction is enforced trivially; a
+  declared server is then reported as unconfigured.
 - `claude`, `glm`, `grok`, and the Pi-based runtimes have no restriction
-  mechanism on the local backend; they run unchanged under the default and fail
+  mechanism; they run unchanged under the default (`unsupported`) and fail
   closed under `globalMcpServers: false`.
 
-Each agent attempt emits a `stage.runtime.mcp-servers` event with
-`restricted`, the `enabled` and `disabled` server names, any declared server
-the runtime had no configuration for (`unconfigured`), and a `reason` when the
-restriction was skipped or incomplete. Run evidence lists the resolved mode
-under `Stage Context Controls` as `MCP servers`.
+Each agent attempt emits a `stage.runtime.mcp-servers` event with an
+`enforcement` of `enforced`, `partial`, `unsupported`, or `inherited`, the
+`enabled` and `disabled` server names, any declared server Codex did not list
+(`unconfigured`), and a `reason` whenever the restriction is not enforced. Run
+evidence lists the resolved mode under `Stage Context Controls` as
+`MCP servers`, followed by one `MCP servers, attempt N` line per attempt with
+the same fields. Only `enforced` means the undeclared servers are confirmed off.
+
+The regression suite `test/run/execution/codex-mcp-servers.real.test.ts` runs
+the real Codex CLI against a trusted-project fixture; CI installs a pinned
+`@openai/codex` for it.
 
 `required_mcp_servers` keeps its admission role too: a declared server that
 maps to a provider still requires that provider to be configured before the

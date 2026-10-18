@@ -44,6 +44,18 @@ jobs:
       - name: Command-mediator compiler
         run: gcc --version
 
+      # The Codex MCP server regression runs the real CLI, because what it
+      # checks is Codex's own merge of its config layers. `codex mcp list`
+      # needs no credentials. Pinned and installed outside the checkout;
+      # NITELY_TEST_REQUIRE_CODEX makes a missing binary fail, not skip.
+      - name: Pinned Codex CLI
+        run: |
+          npm install --no-save --no-audit --no-fund --prefix "$RUNNER_TEMP/codex-cli" @openai/codex@0.162.0
+          codex_bin="$RUNNER_TEMP/codex-cli/node_modules/.bin/codex"
+          "$codex_bin" --version
+          echo "NITELY_TEST_CODEX_BIN=$codex_bin" >> "$GITHUB_ENV"
+          echo "NITELY_TEST_REQUIRE_CODEX=1" >> "$GITHUB_ENV"
+
       - name: Tests
         run: pnpm run test:run
 

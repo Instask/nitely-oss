@@ -38,8 +38,10 @@ import type {
 } from "./types.js";
 import { createCodexExecCapture, readCodexExecActivity } from "./codex-activity.js";
 import {
+  codexConfigOverrides,
   codexConfiguredMcpServers,
-  planMcpServerRestriction,
+  codexMcpListArgs,
+  restrictCodexMcpServers,
   withCodexMcpServersDisabled,
 } from "./mcp-servers.js";
 import {
@@ -135,17 +137,30 @@ export interface RuntimeHomeIsolation {
 }
 
 /**
+ * Runs the runtime's own CLI with `args` where the launch would run, with the
+ * launch's environment and working directory, and resolves its stdout. The
+ * output may carry configuration secrets, so callers must never log it.
+ */
+export type RuntimeProbe = (args: readonly string[]) => Promise<string>;
+
+/**
  * How a runtime limits which of the operator's configured MCP servers load
  * into one launch.
  */
 export interface RuntimeMcpServerRestriction {
-  /** The servers the runtime would load from this environment's configuration. */
-  configuredServers(env: RuntimeEnv): Promise<string[]>;
   /**
-   * Servers the configuration scan cannot see when the runtime home is not
-   * isolated, such as ones a plugin provides. Absent when there are none.
+   * Decides which servers to turn off for `launch`, asking the runtime itself
+   * through `probe`. `env` is the launch environment, for a best-effort
+   * fallback when `allowConfigFallback` is set.
    */
-  unisolatedHomeGap?: string;
+  restrict(input: {
+    request: Exclude<AgentMcpServersRequest, { mode: "inherited" }>;
+    stageId: string;
+    launch: AgentRuntimeLaunchSpec;
+    probe: RuntimeProbe;
+    env: RuntimeEnv;
+    allowConfigFallback: boolean;
+  }): Promise<{ disable: string[]; outcome: AgentMcpServersOutcome }>;
   /** Launch args with the named servers turned off. */
   disable(args: readonly string[], names: readonly string[]): string[];
 }
@@ -287,7 +302,29 @@ export interface LocalExecutionBackendOptions {
   runtimeRegistry?: AgentRuntimeRegistry;
   spawn?: AgentSpawn;
   commandWrapper?: ProcessCommandWrapper;
+  /** Runs a short runtime CLI probe, such as `codex mcp list --json`. */
+  probeRuntime?: RuntimeProbeRunner;
 }
+
+export type RuntimeProbeRunner = (input: {
+  command: string;
+  args: string[];
+  cwd: string;
+  env: RuntimeEnv;
+}) => Promise<string>;
+
+const RUNTIME_PROBE_TIMEOUT_MS = 30_000;
+
+/** Its stdout is returned, never logged: it can carry configuration secrets. */
+const defaultRuntimeProbe: RuntimeProbeRunner = async (input) => {
+  const { stdout } = await execFileAsync(input.command, input.args, {
+    cwd: input.cwd,
+    env: input.env,
+    timeout: RUNTIME_PROBE_TIMEOUT_MS,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  return stdout;
+};
 
 async function runGit(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args, { cwd });
@@ -602,6 +639,18 @@ function codexHome(env: RuntimeEnv): string | undefined {
     (env.HOME?.trim() ? join(env.HOME.trim(), ".codex") : undefined);
 }
 
+/** The MCP server tables in the user config.toml, which Codex always loads. */
+async function codexUserConfigServers(env: RuntimeEnv): Promise<string[]> {
+  const home = codexHome(env);
+  if (!home) return [];
+  try {
+    return codexConfiguredMcpServers(await readFile(join(home, "config.toml"), "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
 class DefaultAgentRuntimeRegistry implements AgentRuntimeRegistry {
   private readonly runtimes: Map<string, AgentRuntimeLauncher>;
 
@@ -641,22 +690,19 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
       },
       // Every enabled MCP server's tool definitions are resent on each model
       // call. config.toml stays linked verbatim for auth and provider settings;
-      // the servers a stage did not declare are turned off with -c overrides.
+      // the servers a stage did not declare are turned off with -c overrides,
+      // after `codex mcp list` names the effective set across every layer.
       mcpServerRestriction: {
-        configuredServers: async (env) => {
-          const home = codexHome(env);
-          if (!home) return [];
-          try {
-            return codexConfiguredMcpServers(
-              await readFile(join(home, "config.toml"), "utf8"),
-            );
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-            throw error;
-          }
-        },
-        unisolatedHomeGap:
-          "the operator's Codex home is not isolated, so MCP servers its plugins provide still load",
+        restrict: ({ request, stageId, launch, probe, env, allowConfigFallback }) =>
+          restrictCodexMcpServers({
+            request,
+            stageId,
+            list: (overrides) => probe(codexMcpListArgs(overrides)),
+            baseOverrides: codexConfigOverrides(launch.args),
+            ...(allowConfigFallback
+              ? { fallbackServers: () => codexUserConfigServers(env) }
+              : {}),
+          }),
         disable: withCodexMcpServersDisabled,
       },
       sessionReuse: {
@@ -862,12 +908,15 @@ async function resolveGlobalSkillsIsolation(input: {
   return { envOverrides, outcome: { isolated: true } };
 }
 
-async function resolveMcpServerRestriction(input: {
+export async function resolveMcpServerRestriction(input: {
   runtime: AgentRuntimeLauncher;
   request: AgentMcpServersRequest | undefined;
+  launch: AgentRuntimeLaunchSpec;
+  probe: RuntimeProbe;
   /** The environment the runtime launches with, isolated home included. */
   env: RuntimeEnv;
-  homeIsolated: boolean;
+  /** Whether the user config in `env` is the one the launch reads. */
+  allowConfigFallback: boolean;
   stageId: string;
 }): Promise<{ disable: string[]; outcome?: AgentMcpServersOutcome }> {
   const request = input.request;
@@ -877,7 +926,7 @@ async function resolveMcpServerRestriction(input: {
   if (request.mode === "inherited") {
     return {
       disable: [],
-      outcome: { restricted: false, reason: "flow opted into every configured MCP server" },
+      outcome: { enforcement: "inherited", reason: "flow opted into every configured MCP server" },
     };
   }
   const restriction = input.runtime.mcpServerRestriction;
@@ -888,15 +937,15 @@ async function resolveMcpServerRestriction(input: {
         `stage ${input.stageId} requires only its declared MCP servers but ${reason}`,
       );
     }
-    return { disable: [], outcome: { restricted: false, reason } };
+    return { disable: [], outcome: { enforcement: "unsupported", reason } };
   }
-  return planMcpServerRestriction({
+  return await restriction.restrict({
     request,
-    configured: await restriction.configuredServers(input.env),
     stageId: input.stageId,
-    ...(!input.homeIsolated && restriction.unisolatedHomeGap
-      ? { incompleteReason: restriction.unisolatedHomeGap }
-      : {}),
+    launch: input.launch,
+    probe: input.probe,
+    env: input.env,
+    allowConfigFallback: input.allowConfigFallback,
   });
 }
 
@@ -1255,6 +1304,7 @@ export class LocalExecutionBackend implements ExecutionBackend {
   private readonly runtimeRegistry: AgentRuntimeRegistry;
   private readonly spawnAgent: AgentSpawn;
   private readonly commandWrapper: ProcessCommandWrapper;
+  private readonly probeRuntime: RuntimeProbeRunner;
 
   constructor(options: LocalExecutionBackendOptions = {}) {
     this.env = options.env ?? process.env;
@@ -1264,6 +1314,7 @@ export class LocalExecutionBackend implements ExecutionBackend {
     this.commandWrapper =
       options.commandWrapper ??
       ((input) => ({ command: input.command, args: input.args }));
+    this.probeRuntime = options.probeRuntime ?? defaultRuntimeProbe;
   }
 
   async createWorkspace(input: {
@@ -1519,13 +1570,6 @@ export class LocalExecutionBackend implements ExecutionBackend {
       };
     }
     await assertRuntimeConfigured(runtime, runtimeEnv);
-    const mcpServers = await resolveMcpServerRestriction({
-      runtime,
-      request: input.mcpServers,
-      env: runtimeEnv,
-      homeIsolated: globalSkills.outcome?.isolated === true,
-      stageId: input.stage.id,
-    });
     const effortDecision = resolveRuntimeEffort({
       runtime: runtime.id,
       model: input.stage.model,
@@ -1567,6 +1611,28 @@ export class LocalExecutionBackend implements ExecutionBackend {
     const builtLaunch = canResume
       ? runtime.sessionReuse!.buildResume({ ...launchInput, sessionId: resumeSessionId! })
       : runtime.build(launchInput);
+    const mcpServers = await resolveMcpServerRestriction({
+      runtime,
+      request: input.mcpServers,
+      launch: builtLaunch,
+      probe: async (args) => {
+        const probeLaunch = this.commandWrapper({
+          kind: "agent",
+          cwd,
+          command: builtLaunch.command,
+          args: [...args],
+        });
+        return await this.probeRuntime({
+          command: probeLaunch.command,
+          args: probeLaunch.args,
+          cwd,
+          env: runtimeEnv,
+        });
+      },
+      env: runtimeEnv,
+      allowConfigFallback: true,
+      stageId: input.stage.id,
+    });
     const launch = mcpServers.disable.length > 0 && runtime.mcpServerRestriction
       ? {
         ...builtLaunch,

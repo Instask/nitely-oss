@@ -30,6 +30,8 @@ import {
   createPiAgentArgs,
   runInputsDirectoryFromAttempt,
 } from "../../../src/run/execution/local.js";
+import type { RuntimeProbeRunner } from "../../../src/run/execution/local.js";
+import { fakeCodexMcpListOutput } from "../../helpers/fake-codex-mcp-list.js";
 import { createOpenRouterAgentArgs } from "../../../src/run/execution/openrouter.js";
 import { createTogetherAgentArgs } from "../../../src/run/execution/together.js";
 import { classifyAgentRuntimeBlocker } from "../../../src/run/blockers.js";
@@ -885,58 +887,43 @@ describe("LocalExecutionBackend", () => {
     expect(calls).toHaveLength(1);
   });
 
-  async function codexHomeWithMcpServers(): Promise<string> {
-    const operatorHome = await mkdtemp(join(tmpdir(), "nitely-codex-home-"));
-    await writeFile(join(operatorHome, "auth.json"), "{}\n", "utf8");
-    await writeFile(
-      join(operatorHome, "config.toml"),
-      [
-        'model_provider = "openai"',
-        "[mcp_servers.context7]",
-        'command = "npx"',
-        "[mcp_servers.github]",
-        'url = "https://example.invalid/mcp"',
-        "[mcp_servers.playwright]",
-        'command = "npx"',
-        "",
-      ].join("\n"),
-      "utf8",
-    );
-    return operatorHome;
-  }
-
   async function runCodexWithMcpServers(input: {
     declared: string[];
     mode?: "declared-if-supported" | "declared-required";
-    isolate?: boolean;
-  }): Promise<{ calls: SpawnCall[]; result: Awaited<ReturnType<LocalExecutionBackend["runAgent"]>> }> {
-    const operatorHome = await codexHomeWithMcpServers();
+    servers?: Record<string, boolean>;
+    probe?: RuntimeProbeRunner;
+  }): Promise<{
+    calls: SpawnCall[];
+    probes: Array<{ command: string; args: string[]; cwd: string; env: Record<string, string | undefined> }>;
+    result: Awaited<ReturnType<LocalExecutionBackend["runAgent"]>>;
+  }> {
     const calls: SpawnCall[] = [];
+    const probes: Array<{ command: string; args: string[]; cwd: string; env: Record<string, string | undefined> }> = [];
+    const servers = input.servers ?? { context7: true, github: true, playwright: true };
     const backend = new LocalExecutionBackend({
-      env: { CODEX_HOME: operatorHome, PATH: "/usr/bin" },
+      env: { CODEX_HOME: "/home/operator/.codex", PATH: "/usr/bin" },
       spawn: createSuccessfulSpawn(calls),
+      probeRuntime: async (probe) => {
+        probes.push({ ...probe, env: { ...probe.env } });
+        return input.probe
+          ? await input.probe(probe)
+          : fakeCodexMcpListOutput(servers, probe.args);
+      },
     });
-    const isolatedHome = join(
-      await mkdtemp(join(tmpdir(), "nitely-isolated-home-")),
-      "codex",
-    );
     const result = await backend.runAgent(
       { runId: "run-agent", path: "/repo/worktree" },
       {
         stage: agentStage({ runtime: "codex" }),
         prompt: "Implement this.",
         attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
-        globalSkills: input.isolate === false
-          ? { mode: "inherited" }
-          : { mode: "required-isolated", homeDirectory: isolatedHome },
         mcpServers: { mode: input.mode ?? "declared-if-supported", declared: input.declared },
       },
     );
-    return { calls, result };
+    return { calls, probes, result };
   }
 
-  it("launches Codex with every configured MCP server off when the stage declares none", async () => {
-    const { calls, result } = await runCodexWithMcpServers({ declared: [] });
+  it("launches Codex with every effective MCP server off when the stage declares none", async () => {
+    const { calls, probes, result } = await runCodexWithMcpServers({ declared: [] });
 
     expect(calls[0]?.args.slice(0, 7)).toEqual([
       "exec",
@@ -948,9 +935,30 @@ describe("LocalExecutionBackend", () => {
       "mcp_servers.playwright.enabled=false",
     ]);
     expect(result.mcpServers).toEqual({
-      restricted: true,
+      enforcement: "enforced",
       enabled: [],
       disabled: ["context7", "github", "playwright"],
+    });
+    // The probe runs the launch command in the worktree with its environment,
+    // then again under the disable overrides to verify them.
+    expect(probes.map((probe) => probe.args)).toEqual([
+      ["mcp", "list", "--json"],
+      [
+        "-c",
+        "mcp_servers.context7.enabled=false",
+        "-c",
+        "mcp_servers.github.enabled=false",
+        "-c",
+        "mcp_servers.playwright.enabled=false",
+        "mcp",
+        "list",
+        "--json",
+      ],
+    ]);
+    expect(probes[0]).toMatchObject({
+      command: "codex",
+      cwd: "/repo/worktree",
+      env: { CODEX_HOME: "/home/operator/.codex" },
     });
   });
 
@@ -962,30 +970,36 @@ describe("LocalExecutionBackend", () => {
     expect(args).toContain("mcp_servers.playwright.enabled=false");
     expect(args.some((arg) => arg.startsWith("mcp_servers.github."))).toBe(false);
     expect(result.mcpServers).toEqual({
-      restricted: true,
+      enforcement: "enforced",
       enabled: ["github"],
       disabled: ["context7", "playwright"],
     });
   });
 
-  it("says when the restriction cannot reach plugin servers of an inherited Codex home", async () => {
-    const { result } = await runCodexWithMcpServers({ declared: [], isolate: false });
+  it("records a restriction it cannot confirm as partial, and fails closed when required", async () => {
+    const failing: RuntimeProbeRunner = async () => {
+      throw new Error("spawn codex ENOENT");
+    };
+    const { calls, result } = await runCodexWithMcpServers({ declared: [], probe: failing });
+    expect(calls).toHaveLength(1);
     expect(result.mcpServers).toMatchObject({
-      restricted: true,
-      disabled: ["context7", "github", "playwright"],
-      reason: expect.stringMatching(/plugins provide still load/),
+      enforcement: "partial",
+      reason: expect.stringMatching(/codex mcp list failed: spawn codex ENOENT/),
     });
 
     await expect(
-      runCodexWithMcpServers({ declared: [], isolate: false, mode: "declared-required" }),
-    ).rejects.toThrow(/requires only its declared MCP servers but the operator's Codex home is not isolated/);
+      runCodexWithMcpServers({ declared: [], probe: failing, mode: "declared-required" }),
+    ).rejects.toThrow(/requires only its declared MCP servers but codex mcp list failed/);
   });
 
   it("leaves MCP servers alone when the flow inherits them", async () => {
     const calls: SpawnCall[] = [];
     const backend = new LocalExecutionBackend({
-      env: { CODEX_HOME: await codexHomeWithMcpServers(), PATH: "/usr/bin" },
+      env: { CODEX_HOME: "/home/operator/.codex", PATH: "/usr/bin" },
       spawn: createSuccessfulSpawn(calls),
+      probeRuntime: async () => {
+        throw new Error("no probe for an inherited set");
+      },
     });
     const result = await backend.runAgent(
       { runId: "run-agent", path: "/repo/worktree" },
@@ -999,7 +1013,7 @@ describe("LocalExecutionBackend", () => {
 
     expect(calls[0]?.args.some((arg) => arg.startsWith("mcp_servers."))).toBe(false);
     expect(result.mcpServers).toEqual({
-      restricted: false,
+      enforcement: "inherited",
       reason: "flow opted into every configured MCP server",
     });
   });
@@ -1025,7 +1039,7 @@ describe("LocalExecutionBackend", () => {
     );
     await expect(run("declared-if-supported")).resolves.toMatchObject({
       mcpServers: {
-        restricted: false,
+        enforcement: "unsupported",
         reason: "agent runtime claude has no MCP server restriction mechanism",
       },
     });

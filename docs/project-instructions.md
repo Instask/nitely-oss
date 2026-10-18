@@ -133,7 +133,8 @@ settings for each agent and review-gate stage. Each agent attempt also emits a
 `stage.runtime.global-skills` event recording whether the operator's global
 packs were actually isolated, and why not when they were not, and a
 `stage.runtime.mcp-servers` event naming the MCP servers it enabled and
-disabled.
+disabled and whether Codex confirmed the restriction (`enforced`) or not
+(`partial`).
 
 ## Errors
 

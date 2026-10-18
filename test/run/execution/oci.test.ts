@@ -1,3 +1,4 @@
+import { fakeCodexMcpListOutput } from "../../helpers/fake-codex-mcp-list.js";
 import {
   access,
   chmod,
@@ -103,12 +104,19 @@ function offlineTogetherRegistry(): AgentRuntimeRegistry {
 function offlineRuntimeRegistry(input: {
   id?: string;
   requiredEnv?: string[][];
+  mcpServerRestriction?: boolean;
 } = {}): AgentRuntimeRegistry {
   const id = input.id ?? "codex";
   const runtime: AgentRuntimeLauncher = {
     id,
     networkAccess: "none",
     ...(input.requiredEnv ? { requiredEnv: input.requiredEnv } : {}),
+    ...(input.mcpServerRestriction
+      ? {
+        mcpServerRestriction:
+          createDefaultAgentRuntimeRegistry().resolve("codex").mcpServerRestriction,
+      }
+      : {}),
     build: ({ worktreePath }) => ({
       runtime: id,
       command: id,
@@ -2089,6 +2097,66 @@ describe("OciExecutionBackend", () => {
     expect(calls.some((call) => call.args[0] === "run")).toBe(false);
   });
 
+  it("restricts Codex MCP servers from a probe run in the same sandbox", async () => {
+    const fixture = await createFixture();
+    const calls: SandboxProcessInput[] = [];
+    const runner = successfulRunner(calls);
+    const backend = new OciExecutionBackend({
+      image: "nitely-runner:test",
+      env: {},
+      processRunner: async (input) => {
+        const listAt = input.args.indexOf("mcp");
+        if (input.args[0] === "run" && listAt !== -1 && input.args[listAt + 1] === "list") {
+          calls.push(input);
+          // An image's system config.toml is a layer the probe must see.
+          return {
+            stdout: fakeCodexMcpListOutput({ imageone: true, github: true }, input.args),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        return await runner(input);
+      },
+      containerName: () => "nitely-agent",
+      runtimeRegistry: offlineRuntimeRegistry({ mcpServerRestriction: true }),
+    });
+
+    const result = await backend.runAgent(
+      { runId: "agent", path: fixture.worktree },
+      {
+        stage: agentStage(sandboxCapabilities()),
+        prompt: "Implement.",
+        attemptDirectory: fixture.attempt,
+        mcpServers: { mode: "declared-required", declared: ["github"] },
+      },
+    );
+
+    expect(result.mcpServers).toEqual({
+      enforcement: "enforced",
+      enabled: ["github"],
+      disabled: ["imageone"],
+    });
+    const runs = calls.filter((call) => call.args[0] === "run");
+    expect(runs).toHaveLength(3);
+    const tail = (args: string[]) => args.slice(args.indexOf("nitely-runner:test") + 1);
+    // Both probes are offline containers of the same image.
+    expect(runs[0]!.args).toContain("--network=none");
+    expect(tail(runs[0]!.args)).toEqual(["codex", "mcp", "list", "--json"]);
+    expect(tail(runs[1]!.args)).toEqual([
+      "codex", "-c", "mcp_servers.imageone.enabled=false", "mcp", "list", "--json",
+    ]);
+    expect(tail(runs[2]!.args)).toEqual([
+      "codex",
+      "exec",
+      "-c",
+      "mcp_servers.imageone.enabled=false",
+      "--skip-git-repo-check",
+      "--cd",
+      "/workspace",
+      "-",
+    ]);
+  });
+
   it("runs an agent inside the sandbox and translates the persisted output path", async () => {
     const fixture = await createFixture();
     const calls: SandboxProcessInput[] = [];
@@ -2109,7 +2177,6 @@ describe("OciExecutionBackend", () => {
           prompt: `Write implementation.md to ${fixture.attempt}.`,
           attemptDirectory: fixture.attempt,
           timeoutMs: 30_000,
-          mcpServers: { mode: "declared-if-supported", declared: ["github"] },
         },
       ),
     ).resolves.toEqual({
@@ -2118,14 +2185,6 @@ describe("OciExecutionBackend", () => {
       // The container never mounts an operator home, so no global skill pack
       // can reach the attempt.
       globalSkills: { isolated: true },
-      // Nor any MCP server configuration: nothing loads, declared or not.
-      mcpServers: {
-        restricted: true,
-        enabled: [],
-        disabled: [],
-        unconfigured: ["github"],
-        reason: "the container's runtime home configures no MCP servers",
-      },
     });
 
     expect(calls.map((call) => call.args[0])).toEqual(["info", "run", "rm"]);

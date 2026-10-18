@@ -44,6 +44,7 @@ import { changeMutationDomains, runGuardedMutation } from "../../src/coordinatio
 import { createCodexExecArgs, resumeRun, runFlow, resolveMaxInputTokens, fitPromptToBudget } from "../../src/run/run-flow.js";
 import { createPiJsonCapture, readPiJsonStream } from "../../src/run/execution/pi-json.js";
 import { LocalExecutionBackend } from "../../src/run/execution/local.js";
+import { fakeCodexMcpListOutput } from "../helpers/fake-codex-mcp-list.js";
 import { DEFAULT_MAX_RUNTIME_TOKENS } from "../../src/run/budget-defaults.js";
 import { listNotificationDeliveryReceipts } from "../../src/web/notification-delivery.js";
 import { getRunDetail } from "../../src/web/runs.js";
@@ -17819,6 +17820,10 @@ describe("stage MCP servers", () => {
     const launches = new Map<string, string[]>();
     const backend = new LocalExecutionBackend({
       env: { PATH: process.env.PATH, CODEX_HOME: codexHome },
+      // Stands in for `codex mcp list --json` over the config above; the
+      // real-Codex suite covers what Codex itself reports.
+      probeRuntime: async ({ args }) =>
+        fakeCodexMcpListOutput({ context7: true, playwright: true }, args),
       spawn: (_command, args, options) => {
         const stageId = options.env.NITELY_OUTPUT_DIR?.split("/").at(-2) ?? "unknown";
         launches.set(stageId, [...args]);
@@ -17873,18 +17878,24 @@ describe("stage MCP servers", () => {
         (event) => event.type === "stage.runtime.mcp-servers" && event.stageId === stageId,
       )?.payload;
     expect(payloadFor("reflect")).toEqual({
-      restricted: true,
+      enforcement: "enforced",
       enabled: [],
       disabled: ["context7", "playwright"],
     });
     expect(payloadFor("implement")).toEqual({
-      restricted: true,
+      enforcement: "enforced",
       enabled: ["context7"],
       disabled: ["playwright"],
     });
 
     const evidence = await readFile(join(runDirectory, "evidence.md"), "utf8");
     expect(evidence).toContain("MCP servers: declared only where the runtime supports it");
+    expect(evidence).toContain(
+      "MCP servers, attempt 1: enforced; enabled: none; disabled: context7, playwright",
+    );
+    expect(evidence).toContain(
+      "MCP servers, attempt 1: enforced; enabled: context7; disabled: playwright",
+    );
   });
 
   it("loads every configured MCP server when the flow sets globalMcpServers to true", async () => {

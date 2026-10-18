@@ -6507,6 +6507,52 @@ function mcpServersEvidenceLabel(mode: McpServersMode): string {
   }
 }
 
+interface McpServerAttemptEvidence {
+  stageId: string;
+  attempt: number;
+  enforcement: string;
+  enabled: string[];
+  disabled: string[];
+  unconfigured: string[];
+  reason?: string;
+}
+
+function eventStringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function collectMcpServerAttemptEvidence(events: readonly StoredRunEvent[]): McpServerAttemptEvidence[] {
+  return events.flatMap((event) => {
+    if (event.type !== "stage.runtime.mcp-servers" || !event.stageId || !event.attempt) {
+      return [];
+    }
+    const payload = event.payload as Record<string, unknown>;
+    if (typeof payload.enforcement !== "string") return [];
+    return [{
+      stageId: event.stageId,
+      attempt: event.attempt,
+      enforcement: payload.enforcement,
+      enabled: eventStringList(payload.enabled),
+      disabled: eventStringList(payload.disabled),
+      unconfigured: eventStringList(payload.unconfigured),
+      ...(typeof payload.reason === "string" ? { reason: payload.reason } : {}),
+    }];
+  });
+}
+
+function mcpServerAttemptEvidenceLabel(attempt: McpServerAttemptEvidence): string {
+  const list = (names: string[]) => (names.length > 0 ? names.join(", ") : "none");
+  return [
+    attempt.enforcement,
+    `enabled: ${list(attempt.enabled)}`,
+    `disabled: ${list(attempt.disabled)}`,
+    ...(attempt.unconfigured.length > 0 ? [`unconfigured: ${list(attempt.unconfigured)}`] : []),
+    ...(attempt.reason ? [`reason: ${attempt.reason}`] : []),
+  ].join("; ");
+}
+
 function collectStageContextEvidence(flow: Flow): StageContextEvidence[] {
   return flow.spec.stages
     .filter(
@@ -7738,7 +7784,7 @@ function appendMcpServersEvent(input: {
     type: "stage.runtime.mcp-servers",
     payload: redactRuntimeUnknown(
       {
-        restricted: input.outcome.restricted,
+        enforcement: input.outcome.enforcement,
         ...(input.outcome.enabled ? { enabled: input.outcome.enabled } : {}),
         ...(input.outcome.disabled ? { disabled: input.outcome.disabled } : {}),
         ...(input.outcome.unconfigured ? { unconfigured: input.outcome.unconfigured } : {}),
@@ -11313,6 +11359,7 @@ async function writeEvidence(input: {
   gates: GateResult[];
   agentRuntimes: AgentRuntimeEvidence[];
   stageContextControls?: StageContextEvidence[];
+  mcpServerAttempts?: McpServerAttemptEvidence[];
   stageReadPolicies?: StageReadPolicyEvidence[];
   stageTimeouts?: StageTimeoutEvidence[];
   runtimeUsage?: ProjectedRuntimeUsageTotal;
@@ -11549,6 +11596,12 @@ async function writeEvidence(input: {
               `  Previous failures: ${controls.previousFailures ? "enabled" : "disabled"}`,
               `  Global runtime skills: ${globalSkillsEvidenceLabel(controls.globalSkills)}`,
               `  MCP servers: ${mcpServersEvidenceLabel(controls.mcpServers)}`,
+              ...(input.mcpServerAttempts ?? [])
+                .filter((attempt) => attempt.stageId === controls.stageId)
+                .map((attempt) =>
+                  `  MCP servers, attempt ${attempt.attempt}: ${
+                    redactRuntimeText(mcpServerAttemptEvidenceLabel(attempt), input.context) ?? ""
+                  }`),
               `  Full-read inputs: ${
                 controls.fullReadInputs.length > 0
                   ? controls.fullReadInputs
@@ -13647,6 +13700,7 @@ async function runFlowOnce(
       agentRuntimes: collectAgentRuntimeEvidence(loaded.flow.spec.stages),
       executionBackend: backend.describeExecution?.(),
       stageContextControls: collectStageContextEvidence(loaded.flow),
+      mcpServerAttempts: collectMcpServerAttemptEvidence(events),
       stageReadPolicies: collectStageReadPolicyEvidence(loaded.flow),
       stageTimeouts: collectStageTimeoutEvidence(loaded.flow),
       conformancePolicies: collectConformancePolicies(loaded.flow.spec.stages),
@@ -14339,6 +14393,7 @@ async function runFlowOnce(
                 agentRuntimes: collectAgentRuntimeEvidence(loaded.flow.spec.stages),
                 executionBackend: backend.describeExecution?.(),
                 stageContextControls: collectStageContextEvidence(loaded.flow),
+                mcpServerAttempts: collectMcpServerAttemptEvidence(events),
                 stageReadPolicies: collectStageReadPolicyEvidence(loaded.flow),
                 stageTimeouts: collectStageTimeoutEvidence(loaded.flow),
                 conformancePolicies: collectConformancePolicies(loaded.flow.spec.stages),
@@ -14428,6 +14483,7 @@ async function runFlowOnce(
                 agentRuntimes: collectAgentRuntimeEvidence(loaded.flow.spec.stages),
                 executionBackend: backend.describeExecution?.(),
                 stageContextControls: collectStageContextEvidence(loaded.flow),
+                mcpServerAttempts: collectMcpServerAttemptEvidence(events),
                 stageReadPolicies: collectStageReadPolicyEvidence(loaded.flow),
                 stageTimeouts: collectStageTimeoutEvidence(loaded.flow),
                 conformancePolicies: collectConformancePolicies(loaded.flow.spec.stages),
@@ -15711,6 +15767,7 @@ async function resumeRunOnce(
         agentRuntimes: collectAgentRuntimeEvidence(loaded.flow.spec.stages),
         executionBackend: backend.describeExecution?.(),
         stageContextControls: collectStageContextEvidence(loaded.flow),
+        mcpServerAttempts: collectMcpServerAttemptEvidence(events),
         stageReadPolicies: collectStageReadPolicyEvidence(loaded.flow),
         stageTimeouts: collectStageTimeoutEvidence(loaded.flow),
         conformancePolicies: collectConformancePolicies(loaded.flow.spec.stages),

@@ -104,6 +104,11 @@ export function codexConfiguredMcpServers(configToml: string): string[] {
   return names;
 }
 
+/** The `-c` overrides that turn the named Codex MCP servers off. */
+export function codexMcpServerDisableOverrides(names: readonly string[]): string[] {
+  return names.flatMap((name) => ["-c", `mcp_servers.${name}.enabled=false`]);
+}
+
 /**
  * Turns the named Codex MCP servers off for one launch with `-c` overrides,
  * placed right after the `exec` subcommand where both `codex exec` and
@@ -115,50 +120,214 @@ export function withCodexMcpServersDisabled(
   names: readonly string[],
 ): string[] {
   if (names.length === 0) return [...args];
-  const overrides = names.flatMap((name) => ["-c", `mcp_servers.${name}.enabled=false`]);
   const at = args[0] === "exec" ? 1 : 0;
-  return [...args.slice(0, at), ...overrides, ...args.slice(at)];
+  return [...args.slice(0, at), ...codexMcpServerDisableOverrides(names), ...args.slice(at)];
+}
+
+/** Every `-c <value>` pair in a launch, in order, so a probe sees the same config. */
+export function codexConfigOverrides(args: readonly string[]): string[] {
+  const overrides: string[] = [];
+  for (let index = 0; index < args.length - 1; index++) {
+    if (args[index] === "-c" || args[index] === "--config") {
+      overrides.push("-c", args[index + 1]!);
+      index++;
+    }
+  }
+  return overrides;
+}
+
+/** Argv for `codex mcp list --json` under the given config overrides. */
+export function codexMcpListArgs(overrides: readonly string[]): string[] {
+  return [...overrides, "mcp", "list", "--json"];
+}
+
+export interface McpServerListing {
+  name: string;
+  enabled: boolean;
 }
 
 /**
- * Decides which configured servers an attempt keeps. Exactly the declared ones
- * stay enabled; everything else configured is disabled unless it cannot be
- * addressed, in which case a required restriction fails closed.
+ * Reads only `name` and `enabled` from `codex mcp list --json`. The rest of
+ * each entry carries server env, args, and headers, so it is never kept.
+ * Returns undefined for anything that is not that shape.
  */
-export function planMcpServerRestriction(input: {
+export function parseCodexMcpList(stdout: string): McpServerListing[] | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(parsed)) return undefined;
+  const servers: McpServerListing[] = [];
+  for (const entry of parsed) {
+    if (typeof entry !== "object" || entry === null) return undefined;
+    const { name, enabled } = entry as { name?: unknown; enabled?: unknown };
+    if (typeof name !== "string" || typeof enabled !== "boolean") return undefined;
+    servers.push({ name, enabled });
+  }
+  return servers;
+}
+
+/**
+ * Runs `codex mcp list --json` with the attempt's environment, working
+ * directory, and the given extra overrides, and resolves its stdout. It must
+ * see the same config layers the launch will: system, user, trusted project,
+ * and `-c` session flags.
+ */
+export type CodexMcpLister = (overrides: readonly string[]) => Promise<string>;
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message.split("\n")[0]! : String(error);
+}
+
+async function listCodexMcpServers(
+  list: CodexMcpLister,
+  overrides: readonly string[],
+): Promise<{ servers: McpServerListing[] } | { problem: string }> {
+  let stdout: string;
+  try {
+    stdout = await list(overrides);
+  } catch (error) {
+    return { problem: `codex mcp list failed: ${errorMessage(error)}` };
+  }
+  const servers = parseCodexMcpList(stdout);
+  return servers ? { servers } : { problem: "codex mcp list did not print a server list" };
+}
+
+/**
+ * Leaves exactly the declared MCP servers enabled for a Codex launch.
+ *
+ * Codex merges MCP servers from several config layers (system, user, every
+ * trusted project `.codex/config.toml` from the working directory up to the
+ * repository root, and `-c` flags), so the effective set is read from Codex
+ * itself rather than from any one file. Every enabled server the stage did not
+ * declare gets a disable override, and the list is read again under those
+ * overrides: the restriction is `enforced` only if that second listing shows
+ * every undeclared server off. Anything less is `partial`, which a required
+ * restriction turns into a failure before launch.
+ */
+export async function restrictCodexMcpServers(input: {
   request: Exclude<AgentMcpServersRequest, { mode: "inherited" }>;
-  configured: readonly string[];
   stageId: string;
-  /** Why some configured servers may be invisible to the scan, if any. */
-  incompleteReason?: string;
-}): { disable: string[]; outcome: AgentMcpServersOutcome } {
+  list: CodexMcpLister;
+  /** The launch's own `-c` overrides, so the probe resolves the same config. */
+  baseOverrides?: readonly string[];
+  /**
+   * Best-effort server names to disable when Codex cannot list them, such as
+   * the user config.toml's tables. Never used for a required restriction.
+   */
+  fallbackServers?: () => Promise<string[]>;
+}): Promise<{ disable: string[]; outcome: AgentMcpServersOutcome }> {
   const declared = new Set(input.request.declared);
-  const enabled = input.configured.filter((name) => declared.has(name));
-  const unwanted = input.configured.filter((name) => !declared.has(name));
-  const disabled = unwanted.filter((name) => CODEX_ADDRESSABLE_SERVER_NAME.test(name));
-  const unaddressable = unwanted.filter((name) => !CODEX_ADDRESSABLE_SERVER_NAME.test(name));
-  const reasons = [
-    ...(unaddressable.length > 0
-      ? [`codex cannot address MCP server name(s) ${unaddressable.join(", ")} in a config override, so they stay enabled`]
-      : []),
-    ...(input.incompleteReason ? [input.incompleteReason] : []),
-  ];
-  if (reasons.length > 0 && input.request.mode === "declared-required") {
+  const base = input.baseOverrides ?? [];
+  const failClosed = (reason: string): never => {
     throw new Error(
-      `stage ${input.stageId} requires only its declared MCP servers but ${reasons.join("; ")}`,
+      `stage ${input.stageId} requires only its declared MCP servers but ${reason}`,
+    );
+  };
+  const partial = (
+    reason: string,
+    fields: {
+      disable?: string[];
+      disabled?: string[];
+      enabled?: string[];
+      unconfigured?: string[];
+    } = {},
+  ) => {
+    if (input.request.mode === "declared-required") failClosed(reason);
+    const disable = fields.disable ?? [];
+    return {
+      disable,
+      outcome: {
+        enforcement: "partial" as const,
+        ...(fields.enabled ? { enabled: fields.enabled } : {}),
+        disabled: fields.disabled ?? disable,
+        ...(fields.unconfigured && fields.unconfigured.length > 0
+          ? { unconfigured: fields.unconfigured }
+          : {}),
+        reason,
+      },
+    };
+  };
+
+  const listed = await listCodexMcpServers(input.list, base);
+  if ("problem" in listed) {
+    if (input.request.mode === "declared-required") failClosed(listed.problem);
+    let fallback: string[] = [];
+    try {
+      fallback = (await input.fallbackServers?.()) ?? [];
+    } catch {
+      fallback = [];
+    }
+    const disable = fallback.filter(
+      (name) => !declared.has(name) && CODEX_ADDRESSABLE_SERVER_NAME.test(name),
+    );
+    return partial(
+      `${listed.problem}, so the effective MCP servers are unknown${
+        disable.length > 0 ? "; disabled the user config.toml servers it could read" : ""
+      }`,
+      { disable },
     );
   }
-  const unconfigured = input.request.declared.filter(
-    (name) => !input.configured.includes(name),
+
+  const present = new Set(listed.servers.map((server) => server.name));
+  const unconfigured = input.request.declared.filter((name) => !present.has(name));
+  const unwanted = listed.servers
+    .filter((server) => server.enabled && !declared.has(server.name))
+    .map((server) => server.name);
+  const disable = unwanted.filter((name) => CODEX_ADDRESSABLE_SERVER_NAME.test(name));
+  const unaddressable = unwanted.filter((name) => !CODEX_ADDRESSABLE_SERVER_NAME.test(name));
+  const keptDeclared = listed.servers
+    .filter((server) => server.enabled && declared.has(server.name))
+    .map((server) => server.name);
+
+  let verified = listed.servers;
+  if (disable.length > 0) {
+    const check = await listCodexMcpServers(input.list, [
+      ...base,
+      ...codexMcpServerDisableOverrides(disable),
+    ]);
+    if ("problem" in check) {
+      // The overrides themselves may be what broke Codex, so the launch does
+      // not carry them.
+      return partial(`${check.problem} while verifying the disable overrides`, {
+        enabled: [...keptDeclared, ...unwanted],
+        unconfigured,
+      });
+    }
+    verified = check.servers;
+  }
+  const ignored = disable.filter((name) =>
+    verified.some((server) => server.name === name && server.enabled));
+  const missingDeclared = input.request.declared.filter(
+    (name) => present.has(name) && !verified.some((server) => server.name === name),
   );
+  const reasons = [
+    ...(unaddressable.length > 0
+      ? [`codex cannot address MCP server name(s) ${unaddressable.join(", ")} in a config override`]
+      : []),
+    ...(ignored.length > 0
+      ? [`MCP server(s) ${ignored.join(", ")} stayed enabled under the disable overrides`]
+      : []),
+    ...(missingDeclared.length > 0
+      ? [`declared MCP server(s) ${missingDeclared.join(", ")} disappeared under the disable overrides`]
+      : []),
+  ];
+  const enabled = verified
+    .filter((server) => server.enabled)
+    .map((server) => server.name);
+  const disabled = disable.filter((name) => !ignored.includes(name));
+  if (reasons.length > 0) {
+    return partial(reasons.join("; "), { disable, disabled, enabled, unconfigured });
+  }
   return {
-    disable: disabled,
+    disable,
     outcome: {
-      restricted: true,
-      enabled: [...enabled, ...unaddressable],
+      enforcement: "enforced",
+      enabled,
       disabled,
       ...(unconfigured.length > 0 ? { unconfigured } : {}),
-      ...(reasons.length > 0 ? { reason: reasons.join("; ") } : {}),
     },
   };
 }
