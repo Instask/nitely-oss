@@ -5,6 +5,11 @@ import type { StoredRunEvent } from "../events/types.js";
 import type { AgentRuntimeCall } from "./execution/types.js";
 import { summarizeRuntimeCalls } from "../telemetry/token-waste.js";
 import {
+  attemptShareOfCodexCalls,
+  codexSessionBaselineKey,
+  codexSessionBaselines,
+} from "./codex-session-usage.js";
+import {
   billableRuntimeTokens,
   eventStorePath,
   projectRun,
@@ -459,9 +464,15 @@ function activityCalls(payload: unknown): AgentRuntimeCall[] {
 
 function runtimeActivityShape(events: StoredRunEvent[]): EfficiencyFinding[] {
   const findings: EfficiencyFinding[] = [];
+  const codexBaselines = codexSessionBaselines(events);
   for (const event of events) {
     if (event.type !== "stage.runtime.calls" || !event.stageId) continue;
-    const summary = summarizeRuntimeCalls(activityCalls(event.payload));
+    const baseline = event.attempt
+      ? codexBaselines.get(codexSessionBaselineKey(event.stageId, event.attempt))
+      : undefined;
+    const summary = summarizeRuntimeCalls(
+      activityCalls(attemptShareOfCodexCalls(asRecord(event.payload), baseline)),
+    );
     if (!summary?.summable || summary.inputTokens <= 0) continue;
     const uncached = summary.inputTokens - summary.cachedInputTokens;
     const cacheShare = summary.cachedInputTokens / summary.inputTokens;

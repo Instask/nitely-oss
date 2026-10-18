@@ -93,10 +93,13 @@ Where the child spans come from:
   one cumulative record and does not invent a per-turn split.
   `codex exec resume` keeps the thread's total, so on an attempt that resumed
   an earlier session the last snapshot also includes the earlier attempts on
-  that thread. It is the session total, not the attempt total, and the first
-  turn record of such an attempt carries the earlier attempts too. Until that
-  baseline is subtracted (jerryleooo/nitely#726), do not add resumed Codex
-  attempts together. Tool spans are the item type
+  that thread. The usage record keeps the thread id (`raw.threadId`), and the
+  trace, run projection, and `nitely diagnose` subtract the latest snapshot
+  recorded earlier on the same thread. The resumed attempt's span and its
+  first turn record then carry only its own share, so resumed attempts add up
+  to the session total. The stored event is not rewritten. If a snapshot is
+  below that baseline, the attempt's tokens are reported as unknown and its
+  turn records are marked `cumulative`. Tool spans are the item type
   (`command_execution`, `file_change`, `mcp_tool_call`, `web_search`) and an
   error flag. Command lines, paths, and arguments are not recorded. Codex does
   not emit per-model-call usage on this stream.

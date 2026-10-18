@@ -129,6 +129,17 @@ cannot resume. Each attempt emits a `stage.runtime.session` event carrying
 `cold` or `resumed`, the session id, and the reason a requested resume did not
 happen.
 
+A resumed Codex attempt reports the session's cumulative usage, not its own:
+`codex exec resume` keeps the thread's token total, so the attempt's final
+`turn.completed` snapshot includes every earlier attempt on that thread. Run
+projection subtracts the latest snapshot recorded earlier on the same thread
+before it totals attempts. That subtraction feeds the runtime-token ceiling,
+the budget summary, efficiency findings, the Console, evidence, and traces.
+The attempt's `stage.runtime.usage` record keeps the cumulative snapshot as
+written. Without the subtraction, a loop of N resumed iterations would count
+about N(N+1)/2 iterations' worth of tokens. An attempt whose snapshot is
+below that baseline is reported as unknown rather than guessed.
+
 Session ids are held in memory for the life of the `runFlow` call and are
 deliberately not persisted. A resumed Nitely run starts its next stage
 execution cold rather than reaching for a session it cannot prove is still

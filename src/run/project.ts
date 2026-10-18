@@ -7,6 +7,11 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { EventStore } from "../events/store.js";
 import type { StoredRunEvent } from "../events/types.js";
 import type { StageCostClass } from "../flow/schema.js";
+import {
+  attemptShareOfCodexUsage,
+  codexSessionBaselineKey,
+  codexSessionBaselines,
+} from "./codex-session-usage.js";
 import type {
   GateResult,
   GateReviewOutput,
@@ -1803,6 +1808,7 @@ export function projectRun(
   }
 
   const runId = events[0]?.runId ?? "";
+  const codexBaselines = codexSessionBaselines(events);
   const stages = new Map<string, ProjectedStage>();
   const completedStages = new Set<string>();
   const logs: ProjectedLog[] = [];
@@ -2256,7 +2262,16 @@ export function projectRun(
     if (event.type === "stage.runtime.usage" && event.stageId && event.attempt) {
       const stage = ensureStage(stages, event.stageId);
       const attempt = ensureAttempt(stage, event.attempt);
-      const usage = asRuntimeUsage(payload);
+      // A resumed Codex attempt reports its session's total; keep its own share.
+      const share = attemptShareOfCodexUsage(
+        payload,
+        codexBaselines.get(codexSessionBaselineKey(event.stageId, event.attempt)),
+      );
+      if (!share) {
+        delete attempt.runtimeUsage;
+        continue;
+      }
+      const usage = asRuntimeUsage(share);
       if (usage) {
         attempt.runtimeUsage = usage;
       }
