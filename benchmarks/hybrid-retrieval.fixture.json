@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "questions": [
+    { "id": "layout", "question": "Where does the command-line entry point live?", "answerKind": "single-source-file", "expectedPath": "src/index.ts" },
+    { "id": "index", "question": "Where is repository indexing implemented?", "answerKind": "single-source-file", "expectedPath": "src/repo-index/index.ts" },
+    { "id": "knowledge", "question": "Where are knowledge repository retrieval rules defined?", "answerKind": "multi-source", "expectedPath": "src/knowledge-repositories/retrieval.ts" },
+    { "id": "tests", "question": "Where do repository tests live?", "answerKind": "multi-source", "expectedPath": "test" },
+    { "id": "external", "question": "What is the deployment password in the production vault?", "answerKind": "out-of-repository" }
+  ]
+}
