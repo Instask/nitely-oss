@@ -46,6 +46,8 @@ pnpm exec tsx scripts/freeze-hybrid-embeddings.mts
 
 `NITELY_HYBRID_RETRIEVAL=1` still adds BM25 plus local-hash task-repository passages to agent and review-gate prompts. The default Run path is unchanged. The flag reads committed regular Git blobs at the execution worktree HEAD, honors `nitely.context.json` and the stage read-deny and file-size limits, and skips `.nitely/`, `node_modules/`, `dist/`, lock files, symlinks, submodules, and sensitive text. It does not consult the frozen vector table and does not call an embedding server. Retrieved passages remain untrusted evidence with reason code `task-repository-lexical-hash`. Flow evidence stays authoritative.
 
+Task-repository passages share the stage's external-knowledge `topK` and prompt-token budget with attached knowledge repositories. Attached knowledge keeps precedence: it comes first in the prompt and takes every slot the repository quota leaves. The quota reserves `max(1, floor(topK / 4))` slots for task-repository passages when `topK` is at least 2, which is one slot at the default `topK` of 6, so a stage whose attachments alone fill `topK` still receives repository context. At `topK` 1 the single slot goes to attached knowledge first. Repository passages also fill any slots attached knowledge leaves empty. When the selection exceeds the prompt-token budget, repository passages beyond the quota are dropped first, then attached passages from the end, and the reserved repository passages last.
+
 The go decision below is the benchmark result for this fixture. It leaves the default Run path unchanged.
 
 ## Published result

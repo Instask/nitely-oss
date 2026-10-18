@@ -100,6 +100,7 @@ import {
 } from "../context/redaction.js";
 import { estimateKnowledgeTokens } from "../knowledge-repositories/tokenize.js";
 import { prepareContext, retrieveHybridRepositoryContext } from "../hybrid-retrieval.js";
+import { selectStageKnowledgeMatches } from "./knowledge-selection.js";
 import { renderExternalKnowledgePrompt } from "../knowledge-repositories/prompt.js";
 import { knowledgeRepositoryRegistryExists } from "../knowledge-repositories/paths.js";
 import {
@@ -6075,10 +6076,18 @@ async function retrieveExternalKnowledgeForStage(input: Parameters<typeof retrie
     },
   });
   if (!prepared || !("hybridContext" in prepared)) return attached;
-  const matches = [...(attached?.matches ?? []), ...prepared.hybridContext].slice(0, input.controls.topK);
+  // Attached knowledge keeps precedence, but a reserved repository quota keeps
+  // the flag from being a no-op when attachments alone fill topK.
+  const matches = selectStageKnowledgeMatches({
+    attached: attached?.matches ?? [],
+    repository: prepared.hybridContext,
+    topK: input.controls.topK,
+    // Count exactly what renderPrompt consumes, including framing and escaped citations.
+    fits: (selected) =>
+      estimateKnowledgeTokens(renderExternalKnowledgePrompt([...selected]).join("\n")) <=
+        input.controls.maxPromptTokens,
+  });
   const countBefore = (attached?.matches.length ?? 0) + prepared.hybridContext.length;
-  // Count exactly what renderPrompt consumes, including framing and escaped citations.
-  while (matches.length && estimateKnowledgeTokens(renderExternalKnowledgePrompt(matches).join("\n")) > input.controls.maxPromptTokens) matches.pop();
   return {
     matches,
     queryFingerprint: attached?.queryFingerprint ?? sha256Text(buildExternalKnowledgeQuery(input)),
