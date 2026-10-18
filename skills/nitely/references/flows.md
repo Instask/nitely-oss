@@ -123,7 +123,9 @@ Skills are repo-defined instruction packs, discovered only from
 resources, copied into `.nitely/runs/<run-id>/skills/<skill-id>/` and listed in
 the prompt's `## Skills` section. Symlinks are rejected. `skills` is valid on
 `agent` stages only (review gates also accept `required_mcp_servers` and
-`required_connectors`).
+`required_connectors`). On Codex, `required_mcp_servers` is exactly the set of
+MCP servers the stage loads; an empty list loads none. Set
+`context.globalMcpServers: true` to load every server the operator configured.
 
 Install a skill into a repo with `nitely skill import <path> --repo <path>`.
 

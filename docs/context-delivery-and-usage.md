@@ -97,6 +97,83 @@ into every customer run.
 Nitely's own `stage.skills` are unaffected: those are declared by the flow,
 content-hash checked, and rendered into the prompt.
 
+## Stage MCP Servers
+
+Every MCP server a runtime loads adds its tool definitions to the fixed prefix
+the runtime resends on each model call inside a turn. Isolating global skills
+keeps Codex's `config.toml`, so before this policy every `[mcp_servers.*]` the
+operator configured globally loaded into every stage: a short Codex stage
+measured about 24k cached prefix tokens against a 3k-token Nitely prompt, and a
+reflect stage called MCP servers it never declared.
+
+A stage now loads exactly the MCP servers it lists in `required_mcp_servers`.
+An empty list means no MCP servers at all. `context.globalMcpServers` selects
+the behavior, flow-wide or per stage:
+
+| Value | Behavior |
+| --- | --- |
+| unset (default) | Load only the declared servers on runtimes that can restrict them; run unchanged on runtimes that cannot, and record why. |
+| `false` | The restriction is required. A runtime with no mechanism, or a restriction Nitely cannot complete, fails the stage. |
+| `true` | Opt back into every server the operator configured. |
+
+Codex merges MCP servers from several config layers: the system
+`/etc/codex/config.toml`, the user `config.toml` in `CODEX_HOME`, every trusted
+project `.codex/config.toml` from the working directory up to the repository
+root, and `-c` flags. A linked worktree inherits the trust entry of the
+repository it belongs to, and that entry lives in the user `config.toml` Nitely
+preserves, so a repository's committed `.codex/config.toml` servers load into
+its stages. No single file names the effective set, so Nitely asks Codex:
+
+1. Run `codex mcp list --json` exactly where the launch will run: same command,
+   environment and `CODEX_HOME`, the worktree as working directory, and the
+   launch's own `-c` overrides. Nitely reads only each entry's `name` and
+   `enabled`; the rest of the output carries server env, args, and headers and
+   is never logged or stored.
+2. Turn off every enabled, undeclared server with
+   `-c mcp_servers.<name>.enabled=false`. The config files are never rewritten,
+   so auth, model provider, and model settings reach Codex unchanged.
+3. Run the list again under those overrides. The restriction is **enforced**
+   only if every undeclared server now reports `enabled: false` and the declared
+   ones are still there.
+
+Anything short of that is **partial**: the listing failed or did not parse, the
+verification failed, an override was ignored, or a server name contains a dot,
+which Codex's `-c` key path cannot address. Codex 0.162.0 also fails to start
+when an override names a server it has no configuration for, so Nitely only
+ever disables names Codex itself listed. Under `globalMcpServers: false` a
+partial restriction fails the stage before launch. Under the default the stage
+launches best-effort: if the listing failed it disables the user `config.toml`
+servers it can read, and if verification failed it launches without the
+overrides, since they may be what broke Codex.
+
+Runtime support today:
+
+- `codex` on the local backend: the probe above, run as a child process.
+- `codex` on the OCI backend: the probe runs in its own offline container with
+  the stage's image, mounts, and environment, so a system config baked into the
+  image is seen too. The container's `HOME` is an empty throwaway path, so
+  usually nothing is configured and the restriction is enforced trivially; a
+  declared server is then reported as unconfigured.
+- `claude`, `glm`, `grok`, and the Pi-based runtimes have no restriction
+  mechanism; they run unchanged under the default (`unsupported`) and fail
+  closed under `globalMcpServers: false`.
+
+Each agent attempt emits a `stage.runtime.mcp-servers` event with an
+`enforcement` of `enforced`, `partial`, `unsupported`, or `inherited`, the
+`enabled` and `disabled` server names, any declared server Codex did not list
+(`unconfigured`), and a `reason` whenever the restriction is not enforced. Run
+evidence lists the resolved mode under `Stage Context Controls` as
+`MCP servers`, followed by one `MCP servers, attempt N` line per attempt with
+the same fields. Only `enforced` means the undeclared servers are confirmed off.
+
+The regression suite `test/run/execution/codex-mcp-servers.real.test.ts` runs
+the real Codex CLI against a trusted-project fixture; CI installs a pinned
+`@openai/codex` for it.
+
+`required_mcp_servers` keeps its admission role too: a declared server that
+maps to a provider still requires that provider to be configured before the
+stage starts.
+
 ## Agent Session Reuse
 
 A task-plan loop re-runs one stage in one worktree over and over. Every

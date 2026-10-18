@@ -7,6 +7,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 
 import type {
   AgentResult,
+  AgentMcpServersRequest,
   AgentReadPolicy,
   AgentRuntimePreflightResult,
   CommandResult,
@@ -22,6 +23,7 @@ import {
   createDefaultAgentRuntimeRegistry,
   LocalExecutionBackend,
   parseRuntimeUsage,
+  resolveMcpServerRestriction,
   type AgentRuntimeRegistry,
   type ClaudePermissionMode,
   type RuntimeEnv,
@@ -226,6 +228,8 @@ const OCI_LIFECYCLE_LABELS = [
   "com.nitely.expires-at",
   "com.nitely.instance-id",
 ] as const;
+
+const OCI_RUNTIME_PROBE_TIMEOUT_MS = 60_000;
 
 function unsupervisedCommandMediation(stageId: string, mechanism: string): string {
   return `stage ${stageId}: command mediation mechanism ${mechanism} cannot supervise agent-spawned commands; refusing to launch an unmediated workload`;
@@ -1274,6 +1278,7 @@ export class OciExecutionBackend implements ExecutionBackend {
       attemptDirectory: string;
       timeoutMs?: number;
       signal?: AbortSignal;
+      mcpServers?: AgentMcpServersRequest;
       visibleInputPaths?: string[];
       readPolicy?: AgentReadPolicy;
     },
@@ -1309,6 +1314,7 @@ export class OciExecutionBackend implements ExecutionBackend {
     let boundedWorkspace: { path: string; cleanup: string } | undefined;
     let networkPlan: ContainerNetworkPlan | undefined;
     let mediatorDir: string | undefined;
+    let mcpServers: Awaited<ReturnType<typeof resolveMcpServerRestriction>> | undefined;
     try {
       if (networkDecision.mode === "allowlist") {
         if (!this.networkGatewayFactory) {
@@ -1438,9 +1444,42 @@ export class OciExecutionBackend implements ExecutionBackend {
         input.visibleInputPaths ?? [],
         secretNames,
       );
-      const runtimeArgs = [...launch.args];
+      let runtimeArgs = [...launch.args];
       if (launch.runtime === "codex" && runtimeArgs[0] === "exec") {
         runtimeArgs.splice(1, 0, "--skip-git-repo-check");
+      }
+      // The probe runs the runtime CLI in its own offline container with the
+      // same image, mounts, and environment, so it sees exactly the config
+      // layers the launch will (an image's system config included).
+      mcpServers = await resolveMcpServerRestriction({
+        runtime,
+        request: input.mcpServers,
+        launch: { ...launch, args: runtimeArgs },
+        probe: async (args) => {
+          const probePlan = await this.commandPlan(
+            ws,
+            "",
+            { ...options, timeoutMs: OCI_RUNTIME_PROBE_TIMEOUT_MS, signal: input.signal },
+            workspaceMountArgs,
+            undefined,
+            input.visibleInputPaths ?? [],
+            secretNames,
+          );
+          probePlan.launch.args.splice(-3, 3, launch.command, ...args);
+          probePlan.launch.stdin = undefined;
+          const probed = await this.executePlan(probePlan);
+          if (probed.exitCode !== 0) {
+            throw new Error(`${launch.command} ${args.join(" ")} exited with code ${probed.exitCode}`);
+          }
+          return probed.stdout;
+        },
+        env: runtimeEnv,
+        // The container has no user config of its own to fall back on.
+        allowConfigFallback: false,
+        stageId: input.stage.id,
+      });
+      if (mcpServers.disable.length > 0 && runtime.mcpServerRestriction) {
+        runtimeArgs = runtime.mcpServerRestriction.disable(runtimeArgs, mcpServers.disable);
       }
       if (launch.runtime === "claude") {
         // A rootless engine maps the operator to uid 0 inside the container,
@@ -1531,6 +1570,7 @@ export class OciExecutionBackend implements ExecutionBackend {
         // The container never mounts the operator's home; HOME is a throwaway
         // path inside the sandbox, so no user-global skill pack can load.
         globalSkills: { isolated: true },
+        ...(mcpServers?.outcome ? { mcpServers: mcpServers.outcome } : {}),
       };
     } finally {
       await gateway?.dispose().catch(() => undefined);

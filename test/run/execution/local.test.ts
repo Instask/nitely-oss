@@ -30,6 +30,8 @@ import {
   createPiAgentArgs,
   runInputsDirectoryFromAttempt,
 } from "../../../src/run/execution/local.js";
+import type { RuntimeProbeRunner } from "../../../src/run/execution/local.js";
+import { fakeCodexMcpListOutput } from "../../helpers/fake-codex-mcp-list.js";
 import { createOpenRouterAgentArgs } from "../../../src/run/execution/openrouter.js";
 import { createTogetherAgentArgs } from "../../../src/run/execution/together.js";
 import { classifyAgentRuntimeBlocker } from "../../../src/run/blockers.js";
@@ -883,6 +885,164 @@ describe("LocalExecutionBackend", () => {
       reason: "agent runtime claude has no global skill isolation mechanism",
     });
     expect(calls).toHaveLength(1);
+  });
+
+  async function runCodexWithMcpServers(input: {
+    declared: string[];
+    mode?: "declared-if-supported" | "declared-required";
+    servers?: Record<string, boolean>;
+    probe?: RuntimeProbeRunner;
+  }): Promise<{
+    calls: SpawnCall[];
+    probes: Array<{ command: string; args: string[]; cwd: string; env: Record<string, string | undefined> }>;
+    result: Awaited<ReturnType<LocalExecutionBackend["runAgent"]>>;
+  }> {
+    const calls: SpawnCall[] = [];
+    const probes: Array<{ command: string; args: string[]; cwd: string; env: Record<string, string | undefined> }> = [];
+    const servers = input.servers ?? { context7: true, github: true, playwright: true };
+    const backend = new LocalExecutionBackend({
+      env: { CODEX_HOME: "/home/operator/.codex", PATH: "/usr/bin" },
+      spawn: createSuccessfulSpawn(calls),
+      probeRuntime: async (probe) => {
+        probes.push({ ...probe, env: { ...probe.env } });
+        return input.probe
+          ? await input.probe(probe)
+          : fakeCodexMcpListOutput(servers, probe.args);
+      },
+    });
+    const result = await backend.runAgent(
+      { runId: "run-agent", path: "/repo/worktree" },
+      {
+        stage: agentStage({ runtime: "codex" }),
+        prompt: "Implement this.",
+        attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
+        mcpServers: { mode: input.mode ?? "declared-if-supported", declared: input.declared },
+      },
+    );
+    return { calls, probes, result };
+  }
+
+  it("launches Codex with every effective MCP server off when the stage declares none", async () => {
+    const { calls, probes, result } = await runCodexWithMcpServers({ declared: [] });
+
+    expect(calls[0]?.args.slice(0, 7)).toEqual([
+      "exec",
+      "-c",
+      "mcp_servers.context7.enabled=false",
+      "-c",
+      "mcp_servers.github.enabled=false",
+      "-c",
+      "mcp_servers.playwright.enabled=false",
+    ]);
+    expect(result.mcpServers).toEqual({
+      enforcement: "enforced",
+      enabled: [],
+      disabled: ["context7", "github", "playwright"],
+    });
+    // The probe runs the launch command in the worktree with its environment,
+    // then again under the disable overrides to verify them.
+    expect(probes.map((probe) => probe.args)).toEqual([
+      ["mcp", "list", "--json"],
+      [
+        "-c",
+        "mcp_servers.context7.enabled=false",
+        "-c",
+        "mcp_servers.github.enabled=false",
+        "-c",
+        "mcp_servers.playwright.enabled=false",
+        "mcp",
+        "list",
+        "--json",
+      ],
+    ]);
+    expect(probes[0]).toMatchObject({
+      command: "codex",
+      cwd: "/repo/worktree",
+      env: { CODEX_HOME: "/home/operator/.codex" },
+    });
+  });
+
+  it("keeps only the MCP server a stage declares", async () => {
+    const { calls, result } = await runCodexWithMcpServers({ declared: ["github"] });
+
+    const args = calls[0]?.args ?? [];
+    expect(args).toContain("mcp_servers.context7.enabled=false");
+    expect(args).toContain("mcp_servers.playwright.enabled=false");
+    expect(args.some((arg) => arg.startsWith("mcp_servers.github."))).toBe(false);
+    expect(result.mcpServers).toEqual({
+      enforcement: "enforced",
+      enabled: ["github"],
+      disabled: ["context7", "playwright"],
+    });
+  });
+
+  it("records a restriction it cannot confirm as partial, and fails closed when required", async () => {
+    const failing: RuntimeProbeRunner = async () => {
+      throw new Error("spawn codex ENOENT");
+    };
+    const { calls, result } = await runCodexWithMcpServers({ declared: [], probe: failing });
+    expect(calls).toHaveLength(1);
+    expect(result.mcpServers).toMatchObject({
+      enforcement: "partial",
+      reason: expect.stringMatching(/codex mcp list failed: spawn codex ENOENT/),
+    });
+
+    await expect(
+      runCodexWithMcpServers({ declared: [], probe: failing, mode: "declared-required" }),
+    ).rejects.toThrow(/requires only its declared MCP servers but codex mcp list failed/);
+  });
+
+  it("leaves MCP servers alone when the flow inherits them", async () => {
+    const calls: SpawnCall[] = [];
+    const backend = new LocalExecutionBackend({
+      env: { CODEX_HOME: "/home/operator/.codex", PATH: "/usr/bin" },
+      spawn: createSuccessfulSpawn(calls),
+      probeRuntime: async () => {
+        throw new Error("no probe for an inherited set");
+      },
+    });
+    const result = await backend.runAgent(
+      { runId: "run-agent", path: "/repo/worktree" },
+      {
+        stage: agentStage({ runtime: "codex" }),
+        prompt: "Implement this.",
+        attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
+        mcpServers: { mode: "inherited" },
+      },
+    );
+
+    expect(calls[0]?.args.some((arg) => arg.startsWith("mcp_servers."))).toBe(false);
+    expect(result.mcpServers).toEqual({
+      enforcement: "inherited",
+      reason: "flow opted into every configured MCP server",
+    });
+  });
+
+  it("fails closed when a runtime without MCP restriction must restrict", async () => {
+    const backend = new LocalExecutionBackend({
+      env: { ANTHROPIC_API_KEY: "key", PATH: "/usr/bin" },
+      spawn: createSuccessfulSpawn([]),
+    });
+    const run = (mode: "declared-if-supported" | "declared-required") =>
+      backend.runAgent(
+        { runId: "run-agent", path: "/repo/worktree" },
+        {
+          stage: agentStage({ runtime: "claude" }),
+          prompt: "Implement this.",
+          attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
+          mcpServers: { mode, declared: [] },
+        },
+      );
+
+    await expect(run("declared-required")).rejects.toThrow(
+      /requires only its declared MCP servers but agent runtime claude has no MCP server restriction mechanism/,
+    );
+    await expect(run("declared-if-supported")).resolves.toMatchObject({
+      mcpServers: {
+        enforcement: "unsupported",
+        reason: "agent runtime claude has no MCP server restriction mechanism",
+      },
+    });
   });
 
   it("reports the Codex session id so the next execution can continue it", async () => {

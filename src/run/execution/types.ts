@@ -135,6 +135,7 @@ export interface AgentResult {
   stderrPath?: string;
   usage?: AgentRuntimeUsage;
   globalSkills?: AgentGlobalSkillsOutcome;
+  mcpServers?: AgentMcpServersOutcome;
   session?: AgentSessionOutcome;
 }
 
@@ -167,6 +168,40 @@ export type AgentGlobalSkillsRequest =
 export interface AgentGlobalSkillsOutcome {
   isolated: boolean;
   /** Present when isolation was skipped, explaining why. */
+  reason?: string;
+}
+
+/**
+ * Which of the operator's configured MCP servers an attempt may load. Every
+ * enabled server's tool definitions are resent on each model call, so a stage
+ * loads only the servers it declares unless the flow opts back in.
+ */
+export type AgentMcpServersRequest =
+  | { mode: "inherited" }
+  | {
+      mode: "declared-if-supported" | "declared-required";
+      declared: string[];
+    };
+
+/**
+ * - `enforced`: the runtime confirmed every undeclared server is off.
+ * - `partial`: a restriction was attempted but could not be confirmed
+ *   complete; some undeclared server may still load.
+ * - `unsupported`: the runtime has no restriction mechanism, so every
+ *   configured server loads.
+ * - `inherited`: the flow opted into every configured server.
+ */
+export type AgentMcpServersEnforcement = "enforced" | "partial" | "unsupported" | "inherited";
+
+export interface AgentMcpServersOutcome {
+  enforcement: AgentMcpServersEnforcement;
+  /** Configured servers the attempt left enabled. */
+  enabled?: string[];
+  /** Configured servers the attempt disabled. */
+  disabled?: string[];
+  /** Declared servers the runtime has no configuration for. */
+  unconfigured?: string[];
+  /** Present when the restriction is not enforced, explaining why. */
   reason?: string;
 }
 
@@ -280,6 +315,7 @@ export interface ExecutionBackend {
       signal?: AbortSignal;
       cancellationGraceMs?: number;
       globalSkills?: AgentGlobalSkillsRequest;
+      mcpServers?: AgentMcpServersRequest;
       session?: AgentSessionRequest;
       visibleInputPaths?: string[];
       readPolicy?: AgentReadPolicy;
