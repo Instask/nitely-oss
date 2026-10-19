@@ -73,3 +73,145 @@ export function summarizeRuntimeCalls(
       .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name)),
   };
 }
+
+/** A rough byte-to-token ratio for tool output text; English and code land near it. */
+export const APPROX_BYTES_PER_TOKEN = 4;
+
+export interface ResentToolOutput {
+  toolName: string;
+  outputBytes: number;
+  /** Model calls after this output, up to the next context drop, that resent it. */
+  laterCalls: number;
+}
+
+export interface ResentToolOutputSummary {
+  modelCalls: number;
+  cachedInputTokens: number;
+  inputTokens: number;
+  largeOutputs: ResentToolOutput[];
+  /** Σ outputBytes × laterCalls over the large outputs. */
+  resentBytes: number;
+  resentApproxTokens: number;
+  /** Model calls after the first whose new tool output was below the tiny threshold. */
+  tinyNewInputCalls: number;
+  /** Input tokens those calls read, nearly all of it resent context. */
+  tinyNewInputCallInputTokens: number;
+}
+
+/**
+ * Attribute a call-level attempt's input to the tool outputs it resent.
+ *
+ * Every model call in a tool loop resends the whole context, so a tool output
+ * of N bytes is read again by every later call until the context is compacted.
+ * A call whose input falls well below the call before it is taken as a
+ * compaction, and outputs from before it stop counting. Needs records with
+ * `granularity: "call"` and tool records with `outputBytes`; returns undefined
+ * otherwise.
+ */
+export function summarizeResentToolOutputs(
+  calls: readonly AgentRuntimeCall[],
+  options: { largeOutputBytes: number; tinyNewInputBytes: number },
+): ResentToolOutputSummary | undefined {
+  const models = llmCalls(calls);
+  if (
+    models.length === 0 ||
+    models.some((call) => call.granularity !== "call" || call.accounting === "cumulative") ||
+    !calls.some((call) => call.kind === "tool" && call.outputBytes !== undefined)
+  ) {
+    return undefined;
+  }
+  const live: ResentToolOutput[] = [];
+  const large: ResentToolOutput[] = [];
+  let newBytes = 0;
+  let previousInput: number | undefined;
+  let modelIndex = 0;
+  let tinyNewInputCalls = 0;
+  let tinyNewInputCallInputTokens = 0;
+  let inputTokens = 0;
+  let cachedInputTokens = 0;
+  for (const call of calls) {
+    if (call.kind === "tool") {
+      const bytes = call.outputBytes ?? 0;
+      newBytes += bytes;
+      if (bytes >= options.largeOutputBytes) {
+        const entry = { toolName: call.toolName ?? "unknown", outputBytes: bytes, laterCalls: 0 };
+        large.push(entry);
+        live.push(entry);
+      }
+      continue;
+    }
+    inputTokens += call.inputTokens;
+    cachedInputTokens += call.cacheReadInputTokens;
+    if (previousInput !== undefined && call.inputTokens < previousInput * 0.6) {
+      live.length = 0;
+    }
+    // The call right after an output is the one that reads it first; every
+    // call after that resends it.
+    for (const entry of live) entry.laterCalls += 1;
+    if (modelIndex > 0 && newBytes < options.tinyNewInputBytes) {
+      tinyNewInputCalls += 1;
+      tinyNewInputCallInputTokens += call.inputTokens;
+    }
+    newBytes = 0;
+    previousInput = call.inputTokens;
+    modelIndex += 1;
+  }
+  for (const entry of large) entry.laterCalls = Math.max(0, entry.laterCalls - 1);
+  const resentBytes = large.reduce((total, entry) => total + entry.outputBytes * entry.laterCalls, 0);
+  return {
+    modelCalls: models.length,
+    inputTokens,
+    cachedInputTokens,
+    largeOutputs: large,
+    resentBytes,
+    resentApproxTokens: Math.round(resentBytes / APPROX_BYTES_PER_TOKEN),
+    tinyNewInputCalls,
+    tinyNewInputCallInputTokens,
+  };
+}
+
+function compactTokens(value: number): string {
+  return value >= 1000 ? `${Math.round(value / 100) / 10}k` : String(value);
+}
+
+/**
+ * One line describing an attempt's `stage.runtime.calls` payload: per-call
+ * input curve and tool output sizes when the records are per call, or the
+ * reason they are not. Numbers and tool counts only.
+ */
+export function formatModelCallCurve(payload: Record<string, unknown>): string | undefined {
+  const raw = Array.isArray(payload.calls) ? payload.calls : [];
+  const calls = raw.filter((entry): entry is AgentRuntimeCall => {
+    const kind = typeof entry === "object" && entry !== null ? (entry as { kind?: unknown }).kind : undefined;
+    return kind === "llm" || kind === "tool";
+  });
+  const models = llmCalls(calls);
+  const fallback = typeof payload.fallback === "object" && payload.fallback !== null
+    ? (payload.fallback as { reason?: unknown }).reason
+    : undefined;
+  if (models.length === 0) return undefined;
+  if (models.some((call) => call.granularity !== "call")) {
+    const granularity = models[0]?.granularity ?? "call";
+    return `${models.length} ${granularity} record${models.length === 1 ? "" : "s"}, no per-call split` +
+      (typeof fallback === "string" ? ` (rollout: ${fallback})` : "");
+  }
+  const inputs = models.map((call) => call.inputTokens);
+  const first = inputs[0] ?? 0;
+  const last = inputs[inputs.length - 1] ?? 0;
+  const peak = Math.max(...inputs);
+  const tools = calls.filter((call) => call.kind === "tool");
+  const measured = tools.filter((call) => call.outputBytes !== undefined);
+  const outputBytes = measured.reduce((total, call) => total + (call.outputBytes ?? 0), 0);
+  const large = measured.filter((call) => (call.outputBytes ?? 0) >= 8 * 1024).length;
+  const step = Math.max(1, Math.ceil(inputs.length / 24));
+  const sampled = inputs.filter((_, index) => index % step === 0).map(compactTokens).join(" ");
+  const parts = [
+    `${models.length} model call${models.length === 1 ? "" : "s"}`,
+    `input per call ${compactTokens(first)} → ${compactTokens(last)} (peak ${compactTokens(peak)})`,
+    measured.length > 0
+      ? `${measured.length} tool outputs, ${Math.round(outputBytes / 1024)} KB (${large} ≥ 8 KB)`
+      : `${tools.length} tool records`,
+    `curve${step > 1 ? ` (1 in ${step})` : ""}: ${sampled}`,
+  ];
+  return parts.join(" · ");
+}

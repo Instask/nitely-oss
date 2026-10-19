@@ -217,6 +217,28 @@ written. Without the subtraction, a loop of N resumed iterations would count
 about N(N+1)/2 iterations' worth of tokens. An attempt whose snapshot is
 below that baseline is reported as unknown rather than guessed.
 
+### Per-call Codex usage
+
+`codex exec --json` reports one cumulative total per turn, so an implement
+turn that ran fifty commands shows as one record of millions of mostly cached
+input tokens. Codex's rollout file under `CODEX_HOME/sessions` has the usage of
+every model call. After each Codex attempt Nitely reads it and writes one
+`stage.runtime.calls` record per model call, plus each tool output's size. That
+shows how the cached input builds up. Large tool outputs read early are resent
+on every later call. Late calls that add a few hundred bytes of new tool output
+still reread the whole context.
+
+The attempt total stays the `turn.completed` snapshot. A resumed attempt only
+counts the calls appended after it started. When the rollout is missing,
+unreadable, or does not add up to that total, the turn records stay and the
+reason is recorded. Only numbers and identifiers are read from the rollout.
+[Tracing](tracing.md) has the record format, the fallback reasons, and how the
+OCI backend finds the rollout.
+
+The Web Console stage details show the per-call curve under "Model calls", and
+`nitely diagnose` reports `resent-tool-output` when large early outputs account
+for a large share of an attempt's cached input.
+
 Session ids are held in memory for the life of the `runFlow` call and are
 deliberately not persisted. A resumed Nitely run starts its next stage
 execution cold rather than reaching for a session it cannot prove is still

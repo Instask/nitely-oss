@@ -37,6 +37,7 @@ import type {
   WorkspaceHandle,
 } from "./types.js";
 import { createCodexExecCapture, readCodexExecActivity } from "./codex-activity.js";
+import { withCodexRolloutCalls } from "./codex-rollout.js";
 import {
   codexConfigOverrides,
   codexConfiguredMcpServers,
@@ -1669,7 +1670,12 @@ export class LocalExecutionBackend implements ExecutionBackend {
         },
       });
     }
-    return await new Promise<AgentResult>((resolvePromise, reject) => {
+    // Codex writes a rollout per thread under its CODEX_HOME; after the attempt
+    // it gives the per-model-call usage that codex exec --json leaves out.
+    const rollout = launch.runtime === "codex"
+      ? { codexHome: codexHome(runtimeEnv), attemptStartedAtMs: Date.now() }
+      : undefined;
+    return await withCodexRolloutCalls(new Promise<AgentResult>((resolvePromise, reject) => {
       let timedOut = false;
       let cancelled = false;
       let settled = false;
@@ -1892,7 +1898,7 @@ export class LocalExecutionBackend implements ExecutionBackend {
           });
         settle(() => reject(Object.assign(new Error(message), result)));
       });
-    });
+    }), rollout);
   }
 
   async preflightAgentRuntime(

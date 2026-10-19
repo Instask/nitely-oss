@@ -7797,6 +7797,8 @@ function appendRuntimeUsageEvent(input: {
         {
           calls: input.usage.callLog,
           ...(input.usage.callLogDropped ? { dropped: input.usage.callLogDropped } : {}),
+          ...(input.usage.callLogSource ? { source: input.usage.callLogSource } : {}),
+          ...(input.usage.callLogFallback ? { fallback: input.usage.callLogFallback } : {}),
         },
         input.context,
       ),

@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 import { describe, expect, it } from "vitest";
+import { CONTENT_MARKER, outputOf, ROLLOUT_THREAD, RolloutBuilder } from "../../fixtures/codex-rollout.js";
 
 import {
   OciExecutionBackend,
@@ -1085,6 +1086,57 @@ describe("OciExecutionBackend", () => {
         { outputDirectory: fixture.attempt },
       ),
     ).rejects.toThrow(/Docker endpoint.*Unix socket/i);
+  });
+
+  it("reads a Codex attempt's rollout from the host-backed CODEX_HOME after the container exits", async () => {
+    const fixture = await createFixture();
+    const codexHome = await mkdtemp(join(tmpdir(), "nitely-oci-codex-home-"));
+    const runner = async (input: SandboxProcessInput): Promise<SandboxProcessResult> => {
+      if (input.args[0] !== "run") return successfulRunner([])(input);
+      const rollout = new RolloutBuilder(Date.now() + 5)
+        .meta()
+        .turn()
+        .call({ input: 8_000, cached: 0, output: 20 })
+        .tool("call_1", outputOf(12_000))
+        .call({ input: 11_100, cached: 8_000, output: 20 });
+      await rollout.write(codexHome);
+      const total = rollout.runningTotal;
+      return {
+        stdout: [
+          { type: "thread.started", thread_id: ROLLOUT_THREAD },
+          { type: "turn.started" },
+          { type: "turn.completed", usage: { input_tokens: total.input, cached_input_tokens: total.cached, output_tokens: total.output } },
+        ].map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+        stderr: "",
+        exitCode: 0,
+      };
+    };
+    const run = (options: { environmentAllowlist?: string[] }) =>
+      new OciExecutionBackend({
+        image: "nitely-runner:test",
+        processRunner: runner,
+        runtimeRegistry: offlineRuntimeRegistry(),
+        env: { CODEX_HOME: codexHome },
+        ...options,
+      }).runAgent(
+        { runId: "codex-rollout", path: fixture.worktree },
+        { stage: agentStage(sandboxCapabilities()), prompt: "Implement.", attemptDirectory: fixture.attempt },
+      );
+    try {
+      const passed = await run({ environmentAllowlist: ["CODEX_HOME"] });
+      expect(passed.usage?.callLogSource).toBe("codex.rollout.token_count");
+      expect(passed.usage?.callLog?.map((call) => call.kind === "llm" ? call.inputTokens : call.outputBytes))
+        .toEqual([8_000, 12_000, 11_100]);
+      expect(JSON.stringify(passed.usage)).not.toContain(CONTENT_MARKER);
+
+      await rm(join(codexHome, "sessions"), { recursive: true, force: true });
+      const hidden = await run({});
+      expect(hidden.usage?.callLogSource).toBe("codex.exec.json");
+      expect(hidden.usage?.callLogFallback?.reason).toBe("no-codex-home");
+      expect(hidden.usage?.callLog?.[0]).toMatchObject({ kind: "llm", granularity: "turn" });
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
   });
 
   it("attaches stdin to the workload when the runtime reads its prompt from stdin", async () => {

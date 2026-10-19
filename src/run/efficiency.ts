@@ -3,7 +3,10 @@ import { resolve } from "node:path";
 import { EventStore } from "../events/store.js";
 import type { StoredRunEvent } from "../events/types.js";
 import type { AgentRuntimeCall } from "./execution/types.js";
-import { summarizeRuntimeCalls } from "../telemetry/token-waste.js";
+import {
+  summarizeResentToolOutputs,
+  summarizeRuntimeCalls,
+} from "../telemetry/token-waste.js";
 import {
   attemptShareOfCodexCalls,
   codexSessionBaselineKey,
@@ -35,7 +38,8 @@ export type EfficiencyRuleId =
   | "repeated-large-payloads"
   | "usage-coverage-missing"
   | "budget-loss-after-outputs"
-  | "runtime-activity-shape";
+  | "runtime-activity-shape"
+  | "resent-tool-output";
 
 export interface EfficiencyFinding {
   ruleId: EfficiencyRuleId;
@@ -538,6 +542,75 @@ function runtimeActivityShape(events: StoredRunEvent[]): EfficiencyFinding[] {
   return findings;
 }
 
+const RESENT_LARGE_OUTPUT_BYTES = 8 * 1024;
+const RESENT_TINY_NEW_INPUT_BYTES = 1024;
+const RESENT_MIN_TOKENS = 100_000;
+const RESENT_MIN_CACHED_SHARE = 0.2;
+
+function kib(bytes: number): string {
+  return `${Math.round(bytes / 102.4) / 10} KB`;
+}
+
+/**
+ * Per-call Codex records (from its rollout) show what an attempt's cached
+ * input was made of: large tool outputs read early, then resent on every later
+ * model call. This attributes the cached input to those outputs.
+ */
+function resentToolOutput(events: StoredRunEvent[]): EfficiencyFinding[] {
+  const findings: EfficiencyFinding[] = [];
+  for (const event of events) {
+    if (event.type !== "stage.runtime.calls" || !event.stageId) continue;
+    const summary = summarizeResentToolOutputs(activityCalls(event.payload), {
+      largeOutputBytes: RESENT_LARGE_OUTPUT_BYTES,
+      tinyNewInputBytes: RESENT_TINY_NEW_INPUT_BYTES,
+    });
+    if (!summary || summary.largeOutputs.length === 0 || summary.cachedInputTokens <= 0) continue;
+    const share = Math.min(1, summary.resentApproxTokens / summary.cachedInputTokens);
+    if (summary.resentApproxTokens < RESENT_MIN_TOKENS && share < RESENT_MIN_CACHED_SHARE) continue;
+    const largeBytes = summary.largeOutputs.reduce((total, entry) => total + entry.outputBytes, 0);
+    const biggest = [...summary.largeOutputs]
+      .sort((left, right) => right.outputBytes * right.laterCalls - left.outputBytes * left.laterCalls)
+      .slice(0, 3)
+      .map((entry) => `${entry.toolName} ${kib(entry.outputBytes)} × ${entry.laterCalls}`)
+      .join(", ");
+    const laterCalls = summary.modelCalls > 1 ? summary.modelCalls - 1 : 0;
+    const tinyShare = laterCalls > 0 ? summary.tinyNewInputCalls / laterCalls : 0;
+    findings.push(finding({
+      ruleId: "resent-tool-output",
+      severity: share >= 0.3 ? "warn" : "info",
+      confidence: "medium",
+      title: "Large tool outputs were resent on every later model call",
+      summary:
+        `Stage ${event.stageId} attempt ${event.attempt ?? "?"} made ${summary.modelCalls} model calls` +
+        ` that read ${summary.cachedInputTokens} cached input tokens.` +
+        ` ${summary.largeOutputs.length} tool output${summary.largeOutputs.length === 1 ? "" : "s"}` +
+        ` of at least ${kib(RESENT_LARGE_OUTPUT_BYTES)} (${kib(largeBytes)} in total) account for` +
+        ` about ${summary.resentApproxTokens} resent input tokens (each output's size × the later calls` +
+        ` that resent it, ~4 bytes per token), roughly ${Math.round(share * 100)}% of the cached input.` +
+        ` Largest: ${biggest}.` +
+        ` ${summary.tinyNewInputCalls} of ${laterCalls} later calls (${Math.round(tinyShare * 100)}%)` +
+        ` added under ${kib(RESENT_TINY_NEW_INPUT_BYTES)} of new tool output and still read` +
+        ` ${summary.tinyNewInputCallInputTokens} input tokens of resent context.`,
+      impact: {
+        inputTokens: summary.inputTokens,
+        cachedInputTokens: summary.cachedInputTokens,
+        contextTokens: summary.resentApproxTokens,
+        ratio: Math.round(share * 1000) / 1000,
+      },
+      evidence: {
+        runId: event.runId,
+        stageIds: [event.stageId],
+        eventTypes: ["stage.runtime.calls"],
+        ...(event.attempt !== undefined ? { attempt: event.attempt } : {}),
+      },
+      remediation:
+        "Bound exploratory reads (rg with -l or --max-count, sed/head line ranges) or hand the agent a focused excerpt in its prompt, so a large output is not carried through every later call (#713, #725).",
+      relatedIssues: [713, 725],
+    }));
+  }
+  return findings;
+}
+
 export function diagnoseRun(input: {
   projection: ProjectedRun;
   events: StoredRunEvent[];
@@ -555,6 +628,7 @@ export function diagnoseRun(input: {
       ...usageCoverageMissing(projection),
       ...budgetLossAfterOutputs(projection, events),
       ...runtimeActivityShape(events),
+      ...resentToolOutput(events),
     ],
   };
 }
