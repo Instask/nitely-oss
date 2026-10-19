@@ -41,6 +41,7 @@ import { withCodexRolloutCalls } from "./codex-rollout.js";
 import {
   codexConfigOverrides,
   codexConfiguredMcpServers,
+  codexFeaturesListArgs,
   codexMcpListArgs,
   restrictCodexMcpServers,
   withCodexMcpServersDisabled,
@@ -693,12 +694,15 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
       // call. config.toml stays linked verbatim for auth and provider settings;
       // the servers a stage did not declare are turned off with -c overrides,
       // after `codex mcp list` names the effective set across every layer.
+      // The runtime-registered Apps connector (codex_apps) is turned off with
+      // features.apps=false and confirmed with `codex features list`.
       mcpServerRestriction: {
         restrict: ({ request, stageId, launch, probe, env, allowConfigFallback }) =>
           restrictCodexMcpServers({
             request,
             stageId,
             list: (overrides) => probe(codexMcpListArgs(overrides)),
+            features: (overrides) => probe(codexFeaturesListArgs(overrides)),
             baseOverrides: codexConfigOverrides(launch.args),
             ...(allowConfigFallback
               ? { fallbackServers: () => codexUserConfigServers(env) }

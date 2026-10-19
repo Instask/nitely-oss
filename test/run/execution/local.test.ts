@@ -32,7 +32,7 @@ import {
 } from "../../../src/run/execution/local.js";
 import type { RuntimeProbeRunner } from "../../../src/run/execution/local.js";
 import type { AgentRuntimeUsage } from "../../../src/run/execution/types.js";
-import { fakeCodexMcpListOutput } from "../../helpers/fake-codex-mcp-list.js";
+import { fakeCodexProbeOutput } from "../../helpers/fake-codex-mcp-list.js";
 import { CONTENT_MARKER, outputOf, ROLLOUT_THREAD, RolloutBuilder } from "../../fixtures/codex-rollout.js";
 import { createOpenRouterAgentArgs } from "../../../src/run/execution/openrouter.js";
 import { createTogetherAgentArgs } from "../../../src/run/execution/together.js";
@@ -909,7 +909,7 @@ describe("LocalExecutionBackend", () => {
         probes.push({ ...probe, env: { ...probe.env } });
         return input.probe
           ? await input.probe(probe)
-          : fakeCodexMcpListOutput(servers, probe.args);
+          : fakeCodexProbeOutput(servers, probe.args);
       },
     });
     const result = await backend.runAgent(
@@ -927,35 +927,29 @@ describe("LocalExecutionBackend", () => {
   it("launches Codex with every effective MCP server off when the stage declares none", async () => {
     const { calls, probes, result } = await runCodexWithMcpServers({ declared: [] });
 
-    expect(calls[0]?.args.slice(0, 7)).toEqual([
-      "exec",
+    const disableOverrides = [
       "-c",
       "mcp_servers.context7.enabled=false",
       "-c",
       "mcp_servers.github.enabled=false",
       "-c",
       "mcp_servers.playwright.enabled=false",
-    ]);
+      "-c",
+      "features.apps=false",
+    ];
+    expect(calls[0]?.args.slice(0, 9)).toEqual(["exec", ...disableOverrides]);
     expect(result.mcpServers).toEqual({
       enforcement: "enforced",
       enabled: [],
-      disabled: ["context7", "github", "playwright"],
+      disabled: ["context7", "github", "playwright", "codex_apps"],
     });
     // The probe runs the launch command in the worktree with its environment,
-    // then again under the disable overrides to verify them.
+    // then verifies the overrides: the server list, and the apps feature
+    // behind the runtime-registered codex_apps connector.
     expect(probes.map((probe) => probe.args)).toEqual([
       ["mcp", "list", "--json"],
-      [
-        "-c",
-        "mcp_servers.context7.enabled=false",
-        "-c",
-        "mcp_servers.github.enabled=false",
-        "-c",
-        "mcp_servers.playwright.enabled=false",
-        "mcp",
-        "list",
-        "--json",
-      ],
+      [...disableOverrides, "mcp", "list", "--json"],
+      [...disableOverrides, "features", "list"],
     ]);
     expect(probes[0]).toMatchObject({
       command: "codex",
@@ -971,10 +965,55 @@ describe("LocalExecutionBackend", () => {
     expect(args).toContain("mcp_servers.context7.enabled=false");
     expect(args).toContain("mcp_servers.playwright.enabled=false");
     expect(args.some((arg) => arg.startsWith("mcp_servers.github."))).toBe(false);
+    expect(args).toContain("features.apps=false");
     expect(result.mcpServers).toEqual({
       enforcement: "enforced",
       enabled: ["github"],
-      disabled: ["context7", "playwright"],
+      disabled: ["context7", "playwright", "codex_apps"],
+    });
+  });
+
+  it("turns the Apps connector off on a resumed Codex session too", async () => {
+    const calls: SpawnCall[] = [];
+    const backend = new LocalExecutionBackend({
+      env: { CODEX_HOME: "/home/operator/.codex", PATH: "/usr/bin" },
+      spawn: createSuccessfulSpawn(calls),
+      probeRuntime: async (probe) => fakeCodexProbeOutput({}, probe.args),
+    });
+    const result = await backend.runAgent(
+      { runId: "run-agent", path: "/repo/worktree" },
+      {
+        stage: agentStage({ runtime: "codex" }),
+        prompt: "Continue.",
+        attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/2",
+        session: { resumeSessionId: "019bffff-1111-7111-8111-111111111111" },
+        mcpServers: { mode: "declared-required", declared: [] },
+      },
+    );
+    expect(calls[0]?.args.slice(0, 5)).toEqual([
+      "exec",
+      "-c",
+      "features.apps=false",
+      "resume",
+      "019bffff-1111-7111-8111-111111111111",
+    ]);
+    expect(result.mcpServers).toEqual({
+      enforcement: "enforced",
+      enabled: [],
+      disabled: ["codex_apps"],
+    });
+  });
+
+  it("keeps the Apps connector on for a stage that declares codex_apps", async () => {
+    const { calls, result } = await runCodexWithMcpServers({
+      declared: ["codex_apps"],
+      mode: "declared-required",
+    });
+    expect(calls[0]?.args).not.toContain("features.apps=false");
+    expect(result.mcpServers).toEqual({
+      enforcement: "enforced",
+      enabled: ["codex_apps"],
+      disabled: ["context7", "github", "playwright"],
     });
   });
 
@@ -1014,6 +1053,7 @@ describe("LocalExecutionBackend", () => {
     );
 
     expect(calls[0]?.args.some((arg) => arg.startsWith("mcp_servers."))).toBe(false);
+    expect(calls[0]?.args).not.toContain("features.apps=false");
     expect(result.mcpServers).toEqual({
       enforcement: "inherited",
       reason: "flow opted into every configured MCP server",

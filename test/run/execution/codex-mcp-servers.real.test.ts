@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import { LocalExecutionBackend } from "../../../src/run/execution/local.js";
 import {
   codexConfigOverrides,
+  parseCodexFeatureState,
   parseCodexMcpList,
 } from "../../../src/run/execution/mcp-servers.js";
 import type { AgentMcpServersRequest } from "../../../src/run/execution/types.js";
@@ -121,6 +122,29 @@ async function listServers(input: {
   return Object.fromEntries(servers.map((server) => [server.name, server.enabled]));
 }
 
+/**
+ * The effective `apps` feature, which decides whether Codex registers the
+ * ChatGPT Apps connector (codex_apps). Registration itself also needs ChatGPT
+ * auth, which this suite does not have, so the feature state is the most that
+ * can be observed here.
+ */
+async function appsFeature(input: {
+  codexHome: string;
+  home: string;
+  cwd: string;
+  overrides?: string[];
+}): Promise<boolean | undefined> {
+  const { stdout } = await execFileAsync(
+    codexBin!,
+    [...(input.overrides ?? []), "features", "list"],
+    {
+      cwd: input.cwd,
+      env: { PATH: process.env.PATH, HOME: input.home, CODEX_HOME: input.codexHome },
+    },
+  );
+  return parseCodexFeatureState(stdout, "apps");
+}
+
 async function runStage(input: {
   fixture: Awaited<ReturnType<typeof trustedProjectFixture>>;
   mcpServers: AgentMcpServersRequest;
@@ -179,17 +203,23 @@ describe.skipIf(!codexBin && !requireCodex)("Codex MCP servers against the real 
       const { result, launch } = await runStage({ fixture, mcpServers: { mode, declared: [] } });
 
       expect(result.mcpServers?.enforcement).toBe("enforced");
-      expect([...(result.mcpServers?.disabled ?? [])].sort()).toEqual(["projone", "userone"]);
+      expect([...(result.mcpServers?.disabled ?? [])].sort()).toEqual([
+        "codex_apps",
+        "projone",
+        "userone",
+      ]);
       expect(result.mcpServers?.enabled).toEqual([]);
       // What the launch carries is what Codex itself now reports.
-      await expect(
-        listServers({
-          codexHome: fixture.isolatedHome,
-          home: fixture.home,
-          cwd: fixture.worktree,
-          overrides: codexConfigOverrides(launch),
-        }),
-      ).resolves.toEqual({ projone: false, userone: false });
+      const observed = {
+        codexHome: fixture.isolatedHome,
+        home: fixture.home,
+        cwd: fixture.worktree,
+        overrides: codexConfigOverrides(launch),
+      };
+      await expect(listServers(observed)).resolves.toEqual({ projone: false, userone: false });
+      // Apps is on by default and off under the launch's overrides.
+      await expect(appsFeature({ ...observed, overrides: [] })).resolves.toBe(true);
+      await expect(appsFeature(observed)).resolves.toBe(false);
     },
     60_000,
   );
@@ -204,7 +234,7 @@ describe.skipIf(!codexBin && !requireCodex)("Codex MCP servers against the real 
     expect(result.mcpServers).toEqual({
       enforcement: "enforced",
       enabled: ["projone"],
-      disabled: ["userone"],
+      disabled: ["userone", "codex_apps"],
     });
     await expect(
       listServers({
@@ -226,7 +256,7 @@ describe.skipIf(!codexBin && !requireCodex)("Codex MCP servers against the real 
     expect(result.mcpServers).toMatchObject({
       enforcement: "partial",
       enabled: ["proj.dotted"],
-      disabled: ["userone"],
+      disabled: ["userone", "codex_apps"],
     });
     await expect(
       listServers({
@@ -240,5 +270,30 @@ describe.skipIf(!codexBin && !requireCodex)("Codex MCP servers against the real 
     await expect(
       runStage({ fixture, mcpServers: { mode: "declared-required", declared: [] } }),
     ).rejects.toThrow(/requires only its declared MCP servers but codex cannot address MCP server name\(s\) proj\.dotted/);
+  }, 60_000);
+
+  it("leaves the apps feature on for a stage that declares codex_apps", async () => {
+    const fixture = await trustedProjectFixture('[mcp_servers.projone]\ncommand = "true"\n');
+    const { result, launch } = await runStage({
+      fixture,
+      mcpServers: { mode: "declared-required", declared: ["codex_apps"] },
+    });
+
+    // Without ChatGPT auth Codex registers no connector even with the feature
+    // on, so this asserts the feature, not a live codex_apps server.
+    expect(result.mcpServers).toEqual({
+      enforcement: "enforced",
+      enabled: ["codex_apps"],
+      disabled: ["projone", "userone"],
+    });
+    expect(launch).not.toContain("features.apps=false");
+    await expect(
+      appsFeature({
+        codexHome: fixture.isolatedHome,
+        home: fixture.home,
+        cwd: fixture.worktree,
+        overrides: codexConfigOverrides(launch),
+      }),
+    ).resolves.toBe(true);
   }, 60_000);
 });

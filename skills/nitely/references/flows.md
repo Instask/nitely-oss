@@ -126,6 +126,7 @@ the prompt's `## Skills` section. Symlinks are rejected. `skills` is valid on
 `required_connectors`). On Codex, `required_mcp_servers` is exactly the set of
 MCP servers the stage loads; an empty list loads none. Set
 `context.globalMcpServers: true` to load every server the operator configured.
+The ChatGPT Apps connector counts too: declare `codex_apps` to keep it.
 
 Install a skill into a repo with `nitely skill import <path> --repo <path>`.
 
