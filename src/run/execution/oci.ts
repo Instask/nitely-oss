@@ -29,6 +29,7 @@ import {
   type RuntimeEnv,
 } from "./local.js";
 import { createCodexExecCapture } from "./codex-activity.js";
+import { applyCodexRolloutCalls } from "./codex-rollout.js";
 import {
   captureCallContent,
   createPiJsonCapture,
@@ -1508,6 +1509,7 @@ export class OciExecutionBackend implements ExecutionBackend {
         this.installCommandMediator(plan.launch.args, mediatorDir);
       }
       let executed: SandboxProcessResult;
+      const attemptStartedAtMs = Date.now();
       try {
         executed = await this.executePlan(plan);
       } catch (error) {
@@ -1533,7 +1535,13 @@ export class OciExecutionBackend implements ExecutionBackend {
           ...executed,
           usage: parseRuntimeUsage(launch.runtime, executed.stdout),
         };
-      const usage = result.usage ? { usage: result.usage } : {};
+      const resultUsage = launch.runtime === "codex"
+        ? await applyCodexRolloutCalls(result.usage, {
+          ...this.codexRolloutHome(),
+          attemptStartedAtMs,
+        })
+        : result.usage;
+      const usage = resultUsage ? { usage: resultUsage } : {};
       if (result.exitCode !== 0) {
         if (
           input.timeoutMs !== undefined &&
@@ -2008,6 +2016,24 @@ export class OciExecutionBackend implements ExecutionBackend {
       );
     }
     return args;
+  }
+
+  /**
+   * Where the host sees the container's CODEX_HOME, so a Codex attempt's
+   * rollout can be read after the container exits. Without a host-backed
+   * CODEX_HOME the rollout lives in the container's throwaway home.
+   */
+  private codexRolloutHome(): { codexHome?: string; unavailableReason?: string } {
+    const configured = this.env.NITELY_OCI_CODEX_HOME_HOST_PATH?.trim();
+    if (configured) return { codexHome: configured };
+    const passed = this.environmentAllowlist.includes("CODEX_HOME")
+      ? this.env.CODEX_HOME?.trim()
+      : undefined;
+    if (passed) return { codexHome: passed };
+    return {
+      unavailableReason:
+        "the container's CODEX_HOME is not a host path Nitely knows (allowlist CODEX_HOME bind-mounted at the same path, or set NITELY_OCI_CODEX_HOME_HOST_PATH), so the rollout does not outlive the container",
+    };
   }
 
   private runtimeSecretNames(runtime: {
