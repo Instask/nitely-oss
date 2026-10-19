@@ -240,6 +240,28 @@ it belongs to leaves `running`, so `task start` works again. An API token needs
 `runs:start`. A cancel is refused with `409` while a resume of the same run is
 starting.
 
+Check provider keys after rotating one, or before resuming a run blocked on a
+rejected key:
+
+```bash
+nitely provider list --server http://192.0.2.10:4173
+nitely provider validate openrouter --server http://192.0.2.10:4173
+nitely provider validate openrouter --connection <connection-id> --json
+```
+
+`provider list` queries `GET /api/providers` and prints each provider's id,
+`configured`, `not-configured`, or `reconnect-required`, the connection a run
+would use, and the server's message. `provider validate` posts to
+`/api/providers/<id>/connections/<connection-id>/validate`, which is the
+Console's **Providers → Validate** button. Without `--connection` it validates
+the connection `provider list` reports. It prints `valid` or `invalid` with
+what was checked (`provider` for a live check against the provider, `stored`
+for a stored-state check only), and exits non-zero unless the connection is
+valid. Setting, clearing, or OAuth-connecting a key stays in the Web Console,
+so these commands never send or print a provider secret. An API token needs the
+high-impact `providers:validate` capability; validation acts on the token
+owner's own connections.
+
 Trigger one scheduler cycle on the remote Nitely server:
 
 ```bash

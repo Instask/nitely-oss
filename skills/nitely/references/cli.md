@@ -172,11 +172,16 @@ nitely whoami
 nitely disconnect
 nitely auth login --server <url> --capability <cap> [--allow-high-impact] [--no-browser]
 nitely auth logout
+nitely provider list [--server <url>] [--json]
+nitely provider validate <provider-id> [--connection <id>] [--server <url>] [--json]
 nitely scheduler [--repo <path>] [--window HH:MM-HH:MM] [--once] [--server <url>] \
   [--interval-ms <n>] [--max-cycles <n>] [--max-concurrent-tasks <n>]
 ```
 
 There is no `--token` flag anywhere; tokens are read from `NITELY_API_TOKEN`.
+`provider validate` is the Console's **Providers → Validate**: it exits non-zero
+unless the stored key is valid, and needs the high-impact `providers:validate`
+capability. Keys are set only in the Console.
 `scheduler` stays local unless `--server` or `NITELY_SERVER_URL` is set.
 
 ## Repo index, knowledge, eval, pilots
