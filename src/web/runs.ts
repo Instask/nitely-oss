@@ -61,6 +61,7 @@ import {
   type ProjectedWorkflowStage,
   attemptInputBreakdowns,
   formatAttemptInputBreakdown,
+  formatRuntimeUsageTotal,
   staleRunningRunMs,
   sumContextUsage,
   sumRuntimeUsage,
@@ -2294,20 +2295,7 @@ function contextUsageDetail(usage: ProjectedContextUsage | undefined): string | 
 }
 
 function runtimeUsageDetail(usage: ProjectedRuntimeUsageTotal | undefined): string | undefined {
-  if (!usage) return undefined;
-  const parts = [
-    usage.totalTokens !== undefined ? `${usage.totalTokens} total tokens` : undefined,
-    usage.inputTokens !== undefined ? `${usage.inputTokens} input` : undefined,
-    usage.freshInputTokens !== undefined ? `${usage.freshInputTokens} fresh input` : undefined,
-    usage.cachedInputTokens !== undefined ? `${usage.cachedInputTokens} cached input` : undefined,
-    usage.outputTokens !== undefined ? `${usage.outputTokens} output` : undefined,
-    usage.estimatedCostUsd !== undefined ? `$${usage.estimatedCostUsd.toFixed(4)}` : undefined,
-    `${usage.knownAttempts} known attempt${usage.knownAttempts === 1 ? "" : "s"}`,
-  ].filter((part): part is string => part !== undefined);
-  if (usage.unknownAttempts > 0) {
-    parts.push(`${usage.unknownAttempts} unknown attempt${usage.unknownAttempts === 1 ? "" : "s"}`);
-  }
-  return parts.join(" · ");
+  return usage ? formatRuntimeUsageTotal(usage) : undefined;
 }
 
 function budgetDetail(budget: ProjectedAttemptBudget | undefined): string | undefined {

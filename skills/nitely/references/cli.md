@@ -69,7 +69,7 @@ already exist locally — see `docker/runner/`).
 
 ```bash
 nitely runs [--repo <path>]
-nitely status <run-id> [--repo <path>]
+nitely status <run-id> [--repo <path>] [--json]
 nitely logs <run-id> [--repo <path>] [--stage <stage-id>]
 nitely diagnose <run-id> [--repo <path>] [--json]
 nitely run list [--server <url>] [--status <status>] [--json]
