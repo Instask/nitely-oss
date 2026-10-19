@@ -19,7 +19,9 @@ import {
  *
  * A run's event log is turned into one trace: `run` → `stage` → `attempt` →
  * one span per model call and per tool execution (from the attempt's
- * `stage.runtime.calls` event). Export happens after the run returns, not
+ * `stage.runtime.calls` event). A Codex attempt whose rollout was readable has
+ * one `chat` span per model call and tool spans carrying
+ * `nitely.tool.output_bytes`; otherwise it has one `turn` span per turn. Export happens after the run returns, not
  * while it executes, so a slow or unreachable collector can only add the
  * bounded flush time and never changes the run's outcome.
  *
@@ -401,10 +403,16 @@ export function buildRunTraceSpans(
         "nitely.usage.cost_classification": asString(cost.classification),
         "nitely.usage.calls": asNumber(raw.calls),
         "nitely.usage.call_log_dropped": asNumber(state.calls?.dropped),
+        "nitely.usage.call_source": asString(state.calls?.source),
+        "nitely.usage.call_fallback": asString(asRecord(state.calls?.fallback).reason),
       }),
     }, true);
 
     const calls = callLogOf(state.calls ?? {});
+    // Tool output a model call reads for the first time; the rest of its
+    // input is context it resends.
+    const measuredOutputs = calls.some((call) => call.kind === "tool" && call.outputBytes !== undefined);
+    let newToolOutputBytes = 0;
     calls.forEach((call, index) => {
       const times = clamp(state.window, call.startedAt, call.endedAt);
       if (call.kind === "llm") {
@@ -465,13 +473,16 @@ export function buildRunTraceSpans(
             "nitely.usage.granularity": call.granularity,
             "nitely.usage.accounting": call.accounting,
             "nitely.usage.reasoning_output_tokens": call.reasoningOutputTokens,
+            "nitely.call.new_tool_output_bytes": measuredOutputs ? newToolOutputBytes : undefined,
             "nitely.call.tool_call_names": toolCalls.length > 0
               ? toolCalls.map((toolCall) => toolCall.name ?? "unknown")
               : undefined,
             ...content,
           }),
         });
+        newToolOutputBytes = 0;
       } else {
+        newToolOutputBytes += call.outputBytes ?? 0;
         callSpans.push({
           key: `${attemptKey}:call:${index}`,
           parentKey: attemptKey,
@@ -488,6 +499,8 @@ export function buildRunTraceSpans(
             "gen_ai.tool.name": call.toolName,
             "gen_ai.tool.call.id": call.toolCallId,
             "nitely.tool.is_error": call.isError,
+            "nitely.tool.output_bytes": call.outputBytes,
+            "nitely.tool.output_bytes_estimated": call.outputBytesEstimated,
           }),
         });
       }

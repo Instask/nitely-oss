@@ -131,6 +131,13 @@ does not grant host root authority. Advanced images can override them with
 `NITELY_OCI_TMPFS_BYTES`, `NITELY_OCI_MAX_FILE_BYTES`,
 `NITELY_OCI_MAX_CAPTURED_OUTPUT_BYTES`, and `NITELY_OCI_TIMEOUT_MS`.
 
+Codex writes a per-thread rollout under `CODEX_HOME/sessions`, which Nitely
+reads after the attempt for per-model-call usage. Inside a container it is lost
+with the container unless `CODEX_HOME` is a bind-mounted host directory. Set
+`NITELY_OCI_CODEX_HOME_HOST_PATH` to that directory's host path, or allowlist
+`CODEX_HOME` when it is mounted at the same path inside and out. See
+[Tracing](tracing.md).
+
 **Agent command policy:** a stage declares which commands its agent may spawn
 with `capabilities.commands`:
 

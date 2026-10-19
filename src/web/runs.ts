@@ -92,6 +92,7 @@ import { feedbackMemoryEntryId } from "../review-feedback/memory.js";
 import type { OrchestratorDecisionEvent } from "../policy/decide.js";
 import type { ChangeRequestStatus } from "../scm/types.js";
 import type { PlanningApprovalStatus } from "../work-items/planning.js";
+import { formatModelCallCurve } from "../telemetry/token-waste.js";
 import { WebInputError, WebNotFoundError } from "./errors.js";
 import { redactForWeb, redactUnknownForWeb } from "./redaction.js";
 
@@ -2517,6 +2518,22 @@ function eventsForStage(events: StoredRunEvent[], stageId: string): WebStageDeta
     });
 }
 
+function modelCallsDetail(
+  events: readonly StoredRunEvent[],
+  stageId: string,
+  attempt: number | undefined,
+): string | undefined {
+  if (attempt === undefined) return undefined;
+  let latest: StoredRunEvent | undefined;
+  for (const event of events) {
+    if (event.type === "stage.runtime.calls" && event.stageId === stageId && event.attempt === attempt) {
+      latest = event;
+    }
+  }
+  if (!latest || typeof latest.payload !== "object" || latest.payload === null) return undefined;
+  return formatModelCallCurve(latest.payload as Record<string, unknown>);
+}
+
 async function projectedStageDetails(input: {
   stage: ProjectedStage;
   declaration: Stage | undefined;
@@ -2577,6 +2594,7 @@ async function projectedStageDetails(input: {
     "Input by attempt",
     attemptInputBreakdowns([stage]).map(formatAttemptInputBreakdown).join("; ") || undefined,
   );
+  addDetailField(fields, "Model calls", modelCallsDetail(input.events, stage.stageId, attempt?.attempt));
   addDetailField(fields, "Budget", budgetDetail(attempt?.budget));
   addDetailField(fields, "Task plan input", input.taskPlan?.inputId, { mono: true });
   addDetailField(fields, "Current task", input.taskPlan?.currentTaskId, { mono: true });
