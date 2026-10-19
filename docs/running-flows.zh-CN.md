@@ -194,6 +194,12 @@ prompt（`stage.context.usage`）、fresh input 和 cached input，累计 input 
 旁边。Runtime 数字取自该 attempt 最后一次 usage 快照，Nitely 不会把它拆成每次调用的
 数字；没有产生快照的 attempt 标为未上报，不按零计。
 
+CLI 显示同样的数字。`nitely status <run-id>` 打印 run 的 `Runtime usage` 合计和
+每个 attempt 一行的 `Input by attempt`；`nitely status <run-id> --json` 以
+`runtimeUsage` 和 `runtimeInputBreakdown` 返回这两项。`nitely run watch` 在 run
+结束时打印一行 `USAGE` 合计。只有所有 attempt 上报的成本类型一致时才显示成本：
+`actual`（provider 上报）或 `estimated`（计算得出）。
+
 ## 操作员提问策略
 
 Agent stage 可以写 `question.json` 向人请求决定。提问策略决定之后的行为，可以设在 Flow 上

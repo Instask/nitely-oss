@@ -787,6 +787,28 @@ export function formatAttemptInputBreakdown(
   return `${heading}: ${parts.join(" · ")}${source}`;
 }
 
+/**
+ * One line for a run's or stage's summed runtime usage, shared by the Console
+ * and the CLI. Cost is shown only when `sumRuntimeUsage` kept one: it drops
+ * cost that mixes actual and estimated figures or misses some attempts.
+ */
+export function formatRuntimeUsageTotal(usage: ProjectedRuntimeUsageTotal): string {
+  const parts = [
+    usage.totalTokens !== undefined ? `${usage.totalTokens} total tokens` : undefined,
+    usage.inputTokens !== undefined ? `${usage.inputTokens} input` : undefined,
+    usage.freshInputTokens !== undefined ? `${usage.freshInputTokens} fresh input` : undefined,
+    usage.cachedInputTokens !== undefined ? `${usage.cachedInputTokens} cached input` : undefined,
+    usage.outputTokens !== undefined ? `${usage.outputTokens} output` : undefined,
+    usage.actualCostUsd !== undefined ? `$${usage.actualCostUsd.toFixed(4)} actual` : undefined,
+    usage.estimatedCostUsd !== undefined ? `$${usage.estimatedCostUsd.toFixed(4)} estimated` : undefined,
+    `${usage.knownAttempts} known attempt${usage.knownAttempts === 1 ? "" : "s"}`,
+  ].filter((part): part is string => part !== undefined);
+  if (usage.unknownAttempts > 0) {
+    parts.push(`${usage.unknownAttempts} unknown attempt${usage.unknownAttempts === 1 ? "" : "s"}`);
+  }
+  return parts.join(" · ");
+}
+
 function runtimeUsageTokenCount(
   usage:
     | Pick<ProjectedRuntimeUsage, "inputTokens" | "outputTokens" | "totalTokens">

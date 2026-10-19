@@ -363,6 +363,14 @@ snapshot. Nitely does not split them into per-call numbers, and an attempt
 that never produced a snapshot is listed as not reported rather than counted
 as zero.
 
+The CLI shows the same figures. `nitely status <run-id>` prints the run's
+`Runtime usage` total and an `Input by attempt` line per attempt, and
+`nitely status <run-id> --json` returns both as `runtimeUsage` and
+`runtimeInputBreakdown`. `nitely run watch` prints one `USAGE` line with the
+run's total when the run ends. Cost appears only when every attempt reported
+the same kind of cost: `actual` (provider-reported) or `estimated`
+(calculated).
+
 ## Operator Question Policy
 
 Agent stages may write `question.json` to ask a human for a decision. A
