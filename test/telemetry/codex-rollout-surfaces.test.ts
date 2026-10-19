@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { StoredRunEvent } from "../../src/events/types.js";
 import { readCodexExecActivity } from "../../src/run/execution/codex-activity.js";
 import { applyCodexRolloutCalls } from "../../src/run/execution/codex-rollout.js";
-import type { AgentRuntimeUsage } from "../../src/run/execution/types.js";
+import type { AgentRuntimeCall, AgentRuntimeUsage } from "../../src/run/execution/types.js";
 import { diagnoseRun } from "../../src/run/efficiency.js";
 import { projectRun } from "../../src/run/project.js";
 import { buildRunTraceSpans } from "../../src/telemetry/run-trace-otel.js";
@@ -106,29 +106,138 @@ function events(usage: AgentRuntimeUsage): StoredRunEvent[] {
   ];
 }
 
+const OPTIONS = { largeOutputBytes: 8 * 1024, tinyNewInputBytes: 1024 };
+
+function llmCall(input: number, cached: number): AgentRuntimeCall {
+  return {
+    kind: "llm",
+    granularity: "call",
+    accounting: "delta",
+    provider: "openai",
+    inputTokens: input,
+    outputTokens: 10,
+    totalTokens: input + 10,
+    cacheReadInputTokens: cached,
+    cacheWriteInputTokens: 0,
+  };
+}
+
+function toolCall(bytes: number): AgentRuntimeCall {
+  return { kind: "tool", toolName: "exec", outputBytes: bytes };
+}
+
+function cachedSum(calls: readonly AgentRuntimeCall[]): number {
+  return calls.reduce((total, call) => total + (call.kind === "llm" ? call.cacheReadInputTokens : 0), 0);
+}
+
+/** Cache-read tokens of the calls after the first large output was first read. */
+function cappedLaterCachedSum(calls: readonly AgentRuntimeCall[]): number {
+  const firstTool = calls.findIndex((call) => call.kind === "tool");
+  const reading = calls.findIndex((call, index) => index > firstTool && call.kind === "llm");
+  return cachedSum(calls.slice(reading + 1));
+}
+
+/** A 20k context, one 40 KB output, then 20 more calls that grow by 300 tokens each. */
+function growingAttempt(input: { cachedPerCall: (index: number) => number }): AgentRuntimeCall[] {
+  const calls: AgentRuntimeCall[] = [llmCall(20_000, 0), toolCall(40_000), llmCall(30_100, 0)];
+  for (let index = 0; index < 20; index += 1) {
+    calls.push(toolCall(300), llmCall(30_400 + index * 300, input.cachedPerCall(index)));
+  }
+  return calls;
+}
+
+function eventsFor(calls: AgentRuntimeCall[]): StoredRunEvent[] {
+  return events({ inputTokens: 1, outputTokens: 1, totalTokens: 2, callLog: calls });
+}
+
+function resentFinding(all: StoredRunEvent[]) {
+  return diagnoseRun({ projection: projectRun(all), events: all }).findings
+    .find((entry) => entry.ruleId === "resent-tool-output");
+}
+
 describe("Codex per-call records on the operator surfaces", () => {
-  it("attributes cached input to early large tool outputs resent on later calls", async () => {
+  it("bounds the cached input early large tool outputs could account for, and labels it an upper bound", async () => {
     const usage = await implementAttempt();
-    const summary = summarizeResentToolOutputs(usage.callLog ?? [], {
-      largeOutputBytes: 8 * 1024,
-      tinyNewInputBytes: 1024,
-    });
+    const summary = summarizeResentToolOutputs(usage.callLog ?? [], OPTIONS);
     expect(summary?.modelCalls).toBe(52);
     expect(summary?.largeOutputs).toHaveLength(7);
-    // The first read is resent by every call after the one that read it.
-    expect(summary?.largeOutputs[0]).toMatchObject({ outputBytes: 36_000, laterCalls: 50 });
+    // The first read stays attributable on every call after the one that read it.
+    expect(summary?.largeOutputs[0]).toMatchObject({
+      outputBytes: 36_000,
+      approxTokens: 9_000,
+      laterCalls: 50,
+      estimatedUpperBoundTokens: 450_000,
+    });
+    expect(summary?.estimatedUpperBoundResentCachedTokens).toBe(1_972_500);
+    expect(summary?.estimatedUpperBoundResentCachedTokens).toBeLessThanOrEqual(cachedSum(usage.callLog ?? []));
     expect(summary?.tinyNewInputCalls).toBe(44);
 
-    const all = events(usage);
-    const finding = diagnoseRun({ projection: projectRun(all), events: all }).findings
-      .find((entry) => entry.ruleId === "resent-tool-output");
-    expect(finding).toMatchObject({ severity: "warn", evidence: { stageIds: ["implement"], attempt: 1 } });
-    expect(finding?.summary).toContain("52 model calls");
-    expect(finding?.summary).toContain("7 tool outputs");
+    const finding = resentFinding(events(usage));
+    expect(finding).toMatchObject({
+      severity: "warn",
+      confidence: "low",
+      evidence: { stageIds: ["implement"], attempt: 1 },
+      impact: { estimatedUpperBoundResentCachedTokens: 1_972_500 },
+    });
+    expect(finding?.title).toContain("upper-bound estimate");
+    expect(finding?.summary).toContain("account for at most 1972500");
+    expect(finding?.summary).toContain("upper-bound heuristic estimate, not a measurement");
+    expect(finding?.summary).toContain("no call is credited with more than its own cache-read tokens");
     expect(finding?.summary).toContain("44 of 51 later calls");
-    expect(finding?.impact?.ratio).toBeGreaterThan(0.4);
-    expect(finding?.impact?.ratio).toBeLessThan(0.7);
+    expect(finding?.impact?.estimatedUpperBoundResentCachedShare).toBeGreaterThan(0.6);
+    expect(finding?.impact?.estimatedUpperBoundResentCachedShare).toBeLessThan(0.7);
+    expect(finding?.impact).not.toHaveProperty("ratio");
+    expect(finding?.impact).not.toHaveProperty("contextTokens");
     expect(JSON.stringify(finding)).not.toContain(CONTENT_MARKER);
+  });
+
+  it("attributes nothing to calls that read no cached input", () => {
+    const calls = growingAttempt({ cachedPerCall: () => 0 });
+    const summary = summarizeResentToolOutputs(calls, OPTIONS);
+    expect(summary?.largeOutputs).toHaveLength(1);
+    expect(summary?.estimatedUpperBoundResentCachedTokens).toBe(0);
+    expect(summary?.largeOutputs[0]).toMatchObject({ laterCalls: 0, estimatedUpperBoundTokens: 0 });
+    expect(resentFinding(eventsFor(calls))).toBeUndefined();
+  });
+
+  it("caps each later call at its own cache-read tokens when the cache is low", () => {
+    const calls = growingAttempt({ cachedPerCall: () => 1_000 });
+    const summary = summarizeResentToolOutputs(calls, OPTIONS);
+    // 20 calls after the reading call, each credited at most its 1,000 cached tokens.
+    expect(summary?.estimatedUpperBoundResentCachedTokens).toBe(20_000);
+    expect(summary?.estimatedUpperBoundResentCachedTokens).toBeLessThanOrEqual(cappedLaterCachedSum(calls));
+    expect(summary?.estimatedUpperBoundResentCachedTokens).toBeLessThan(10_000 * 20);
+  });
+
+  it("shares one call's cache-read tokens among outputs instead of crediting each in full", () => {
+    // Two 40 KB outputs (10k tokens each) are both live on later calls that read 12k cached tokens.
+    const calls: AgentRuntimeCall[] = [
+      llmCall(20_000, 0),
+      toolCall(40_000),
+      toolCall(40_000),
+      llmCall(40_500, 20_000),
+      ...Array.from({ length: 5 }, (_, index) => llmCall(41_000 + index * 100, 12_000)),
+    ];
+    const summary = summarizeResentToolOutputs(calls, OPTIONS);
+    expect(summary?.largeOutputs.map((entry) => entry.estimatedUpperBoundTokens)).toEqual([50_000, 10_000]);
+    expect(summary?.estimatedUpperBoundResentCachedTokens).toBe(60_000);
+    expect(summary?.estimatedUpperBoundResentCachedTokens).toBeLessThanOrEqual(cappedLaterCachedSum(calls));
+  });
+
+  it("stops attributing an output once the context shrinks below it, even by less than 40%", () => {
+    // A 40 KB output (10k tokens) read at a 20k context; the next call falls to
+    // 25k, 17% smaller, below the 30k the output would need. Later growth does
+    // not bring it back.
+    const calls: AgentRuntimeCall[] = [
+      llmCall(20_000, 0),
+      toolCall(40_000),
+      llmCall(30_200, 20_000),
+      ...Array.from({ length: 20 }, (_, index) => llmCall(25_000 + index * 400, 24_000 + index * 400)),
+    ];
+    const summary = summarizeResentToolOutputs(calls, OPTIONS);
+    expect(summary?.largeOutputs[0]).toMatchObject({ laterCalls: 0, estimatedUpperBoundTokens: 0 });
+    expect(summary?.estimatedUpperBoundResentCachedTokens).toBe(0);
+    expect(resentFinding(eventsFor(calls))).toBeUndefined();
   });
 
   it("does not attribute turn-level Codex records", async () => {

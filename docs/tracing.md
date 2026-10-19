@@ -149,11 +149,22 @@ Where the child spans come from:
 `stage.runtime.calls` holds these records, with `source` and, after a
 fallback, `fallback: { reason, detail }`. `nitely diagnose` reads them for
 uncached input, reasoning share, and tool volume. On per-call Codex records it
-also reports `resent-tool-output`: tool outputs of at least 8 KB, each
-multiplied by the later calls that resent it until the context dropped (a
-compaction), as an estimate of the cached input they account for (about 4
-bytes per token), and the share of later calls that added under 1 KB of new
-tool output yet read the full context. An attempt keeps at most
+also reports `resent-tool-output`, an **upper-bound heuristic estimate** of how
+much of the attempt's cached input tool outputs of at least 8 KB could account
+for. The rollout does not say what each call's cached prefix contained, so the
+figure bounds the effect; it does not measure it. Each large output is taken as
+`ceil(bytes / 4)` tokens. On every model call after the one that first read it,
+the output counts only while that call's input is at least the input of the
+call before the output plus the output's estimated tokens. The first call below
+that ends the output's attribution, since it may have been dropped, truncated,
+or compacted. Each call is credited with at most its own cache-read tokens,
+shared among the outputs still counted on it in arrival order, so a call with
+no cache reads adds nothing. The finding's impact carries
+`estimatedUpperBoundResentCachedTokens` and
+`estimatedUpperBoundResentCachedShare`. It also counts the later calls that
+added under 1 KB of new tool output, with the cached tokens they read. The
+OTel attributes and the Web "Model calls" line carry only measured values
+(token counts and output bytes), not this estimate. An attempt keeps at most
 1,000 call log entries; the count of
 any it left out is on the attempt span as `nitely.usage.call_log_dropped`.
 Tool start and end times are the times Nitely observed the events in the

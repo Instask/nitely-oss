@@ -80,8 +80,12 @@ export const APPROX_BYTES_PER_TOKEN = 4;
 export interface ResentToolOutput {
   toolName: string;
   outputBytes: number;
-  /** Model calls after this output, up to the next context drop, that resent it. */
+  /** `ceil(outputBytes / APPROX_BYTES_PER_TOKEN)`. */
+  approxTokens: number;
+  /** Later model calls this output was still attributed to. */
   laterCalls: number;
+  /** Upper-bound cache-read tokens attributed to this output across those calls. */
+  estimatedUpperBoundTokens: number;
 }
 
 export interface ResentToolOutputSummary {
@@ -89,24 +93,33 @@ export interface ResentToolOutputSummary {
   cachedInputTokens: number;
   inputTokens: number;
   largeOutputs: ResentToolOutput[];
-  /** Σ outputBytes × laterCalls over the large outputs. */
-  resentBytes: number;
-  resentApproxTokens: number;
+  /**
+   * Upper bound on the cache-read tokens that large tool outputs account for.
+   * Never more than the cache-read tokens of the calls it is drawn from.
+   */
+  estimatedUpperBoundResentCachedTokens: number;
   /** Model calls after the first whose new tool output was below the tiny threshold. */
   tinyNewInputCalls: number;
-  /** Input tokens those calls read, nearly all of it resent context. */
-  tinyNewInputCallInputTokens: number;
+  /** Cache-read tokens those calls read. */
+  tinyNewInputCallCachedTokens: number;
 }
 
 /**
- * Attribute a call-level attempt's input to the tool outputs it resent.
+ * An upper-bound, heuristic attribution of a call-level attempt's cached input
+ * to the large tool outputs it may have resent.
  *
- * Every model call in a tool loop resends the whole context, so a tool output
- * of N bytes is read again by every later call until the context is compacted.
- * A call whose input falls well below the call before it is taken as a
- * compaction, and outputs from before it stop counting. Needs records with
- * `granularity: "call"` and tool records with `outputBytes`; returns undefined
- * otherwise.
+ * The rollout does not say what each call's cached prefix contained, so this
+ * only bounds it. A large output is estimated at `ceil(bytes / 4)` tokens. On
+ * every model call after the one that first read it, the output stays
+ * attributable only while the call's input is at least the input of the call
+ * before the output plus the output's estimated tokens; the first call below
+ * that ends its attribution for good, since the output may have been dropped,
+ * truncated, or compacted. Each call contributes at most its own cache-read
+ * tokens, shared among the outputs still attributable to it in the order they
+ * arrived, so a call with no cache reads contributes nothing.
+ *
+ * Needs records with `granularity: "call"` and tool records with
+ * `outputBytes`; returns undefined otherwise.
  */
 export function summarizeResentToolOutputs(
   calls: readonly AgentRuntimeCall[],
@@ -120,53 +133,74 @@ export function summarizeResentToolOutputs(
   ) {
     return undefined;
   }
-  const live: ResentToolOutput[] = [];
+  interface Tracked {
+    entry: ResentToolOutput;
+    /** Input of the model call before this output arrived. */
+    baseInput: number;
+    /** False until the call that reads it first has passed. */
+    read: boolean;
+  }
+  let live: Tracked[] = [];
   const large: ResentToolOutput[] = [];
   let newBytes = 0;
-  let previousInput: number | undefined;
+  let previousInput = 0;
   let modelIndex = 0;
   let tinyNewInputCalls = 0;
-  let tinyNewInputCallInputTokens = 0;
+  let tinyNewInputCallCachedTokens = 0;
   let inputTokens = 0;
   let cachedInputTokens = 0;
+  let attributed = 0;
   for (const call of calls) {
     if (call.kind === "tool") {
       const bytes = call.outputBytes ?? 0;
       newBytes += bytes;
       if (bytes >= options.largeOutputBytes) {
-        const entry = { toolName: call.toolName ?? "unknown", outputBytes: bytes, laterCalls: 0 };
+        const entry: ResentToolOutput = {
+          toolName: call.toolName ?? "unknown",
+          outputBytes: bytes,
+          approxTokens: Math.ceil(bytes / APPROX_BYTES_PER_TOKEN),
+          laterCalls: 0,
+          estimatedUpperBoundTokens: 0,
+        };
         large.push(entry);
-        live.push(entry);
+        live.push({ entry, baseInput: previousInput, read: false });
       }
       continue;
     }
     inputTokens += call.inputTokens;
     cachedInputTokens += call.cacheReadInputTokens;
-    if (previousInput !== undefined && call.inputTokens < previousInput * 0.6) {
-      live.length = 0;
+    let cacheLeft = call.cacheReadInputTokens;
+    const still: Tracked[] = [];
+    for (const tracked of live) {
+      if (call.inputTokens < tracked.baseInput + tracked.entry.approxTokens) continue;
+      still.push(tracked);
+      if (!tracked.read) {
+        tracked.read = true;
+        continue;
+      }
+      const share = Math.min(tracked.entry.approxTokens, cacheLeft);
+      cacheLeft -= share;
+      attributed += share;
+      tracked.entry.estimatedUpperBoundTokens += share;
+      if (share > 0) tracked.entry.laterCalls += 1;
     }
-    // The call right after an output is the one that reads it first; every
-    // call after that resends it.
-    for (const entry of live) entry.laterCalls += 1;
+    live = still;
     if (modelIndex > 0 && newBytes < options.tinyNewInputBytes) {
       tinyNewInputCalls += 1;
-      tinyNewInputCallInputTokens += call.inputTokens;
+      tinyNewInputCallCachedTokens += call.cacheReadInputTokens;
     }
     newBytes = 0;
     previousInput = call.inputTokens;
     modelIndex += 1;
   }
-  for (const entry of large) entry.laterCalls = Math.max(0, entry.laterCalls - 1);
-  const resentBytes = large.reduce((total, entry) => total + entry.outputBytes * entry.laterCalls, 0);
   return {
     modelCalls: models.length,
     inputTokens,
     cachedInputTokens,
     largeOutputs: large,
-    resentBytes,
-    resentApproxTokens: Math.round(resentBytes / APPROX_BYTES_PER_TOKEN),
+    estimatedUpperBoundResentCachedTokens: attributed,
     tinyNewInputCalls,
-    tinyNewInputCallInputTokens,
+    tinyNewInputCallCachedTokens,
   };
 }
 

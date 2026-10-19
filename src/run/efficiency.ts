@@ -57,6 +57,10 @@ export interface EfficiencyFinding {
     retryShare?: number;
     retryTokens?: number;
     totalTokens?: number;
+    /** `resent-tool-output`: an upper-bound heuristic estimate, not a measurement. */
+    estimatedUpperBoundResentCachedTokens?: number;
+    /** That upper bound as a share of the attempt's cached input. */
+    estimatedUpperBoundResentCachedShare?: number;
   };
   evidence: {
     runId: string;
@@ -552,9 +556,11 @@ function kib(bytes: number): string {
 }
 
 /**
- * Per-call Codex records (from its rollout) show what an attempt's cached
- * input was made of: large tool outputs read early, then resent on every later
- * model call. This attributes the cached input to those outputs.
+ * Per-call Codex records (from its rollout) bound how much of an attempt's
+ * cached input large tool outputs could account for. The figure is an upper
+ * bound from a heuristic (see summarizeResentToolOutputs), not a measurement
+ * of what the provider cached: the rollout does not say what each call's
+ * cached prefix contained.
  */
 function resentToolOutput(events: StoredRunEvent[]): EfficiencyFinding[] {
   const findings: EfficiencyFinding[] = [];
@@ -565,37 +571,43 @@ function resentToolOutput(events: StoredRunEvent[]): EfficiencyFinding[] {
       tinyNewInputBytes: RESENT_TINY_NEW_INPUT_BYTES,
     });
     if (!summary || summary.largeOutputs.length === 0 || summary.cachedInputTokens <= 0) continue;
-    const share = Math.min(1, summary.resentApproxTokens / summary.cachedInputTokens);
-    if (summary.resentApproxTokens < RESENT_MIN_TOKENS && share < RESENT_MIN_CACHED_SHARE) continue;
+    const upperBound = summary.estimatedUpperBoundResentCachedTokens;
+    if (upperBound <= 0) continue;
+    const share = Math.min(1, upperBound / summary.cachedInputTokens);
+    if (upperBound < RESENT_MIN_TOKENS && share < RESENT_MIN_CACHED_SHARE) continue;
     const largeBytes = summary.largeOutputs.reduce((total, entry) => total + entry.outputBytes, 0);
     const biggest = [...summary.largeOutputs]
-      .sort((left, right) => right.outputBytes * right.laterCalls - left.outputBytes * left.laterCalls)
+      .filter((entry) => entry.estimatedUpperBoundTokens > 0)
+      .sort((left, right) => right.estimatedUpperBoundTokens - left.estimatedUpperBoundTokens)
       .slice(0, 3)
-      .map((entry) => `${entry.toolName} ${kib(entry.outputBytes)} × ${entry.laterCalls}`)
+      .map((entry) => `${entry.toolName} ${kib(entry.outputBytes)} on up to ${entry.laterCalls} later calls`)
       .join(", ");
     const laterCalls = summary.modelCalls > 1 ? summary.modelCalls - 1 : 0;
     const tinyShare = laterCalls > 0 ? summary.tinyNewInputCalls / laterCalls : 0;
     findings.push(finding({
       ruleId: "resent-tool-output",
       severity: share >= 0.3 ? "warn" : "info",
-      confidence: "medium",
-      title: "Large tool outputs were resent on every later model call",
+      confidence: "low",
+      title: "Large tool outputs may have been resent on later model calls (upper-bound estimate)",
       summary:
         `Stage ${event.stageId} attempt ${event.attempt ?? "?"} made ${summary.modelCalls} model calls` +
         ` that read ${summary.cachedInputTokens} cached input tokens.` +
         ` ${summary.largeOutputs.length} tool output${summary.largeOutputs.length === 1 ? "" : "s"}` +
-        ` of at least ${kib(RESENT_LARGE_OUTPUT_BYTES)} (${kib(largeBytes)} in total) account for` +
-        ` about ${summary.resentApproxTokens} resent input tokens (each output's size × the later calls` +
-        ` that resent it, ~4 bytes per token), roughly ${Math.round(share * 100)}% of the cached input.` +
-        ` Largest: ${biggest}.` +
+        ` of at least ${kib(RESENT_LARGE_OUTPUT_BYTES)} (${kib(largeBytes)} in total) account for at most` +
+        ` ${upperBound} of those cached tokens (${Math.round(share * 100)}%).` +
+        ` This is an upper-bound heuristic estimate, not a measurement: each output is taken as ~4 bytes per token` +
+        ` and counted on a later call only while that call's input is at least the input before the output` +
+        ` plus the output's estimated size, and no call is credited with more than its own cache-read tokens.` +
+        ` The outputs may have been dropped or truncated earlier than this assumes.` +
+        (biggest ? ` Largest: ${biggest}.` : "") +
         ` ${summary.tinyNewInputCalls} of ${laterCalls} later calls (${Math.round(tinyShare * 100)}%)` +
-        ` added under ${kib(RESENT_TINY_NEW_INPUT_BYTES)} of new tool output and still read` +
-        ` ${summary.tinyNewInputCallInputTokens} input tokens of resent context.`,
+        ` added under ${kib(RESENT_TINY_NEW_INPUT_BYTES)} of new tool output and read` +
+        ` ${summary.tinyNewInputCallCachedTokens} cached input tokens.`,
       impact: {
         inputTokens: summary.inputTokens,
         cachedInputTokens: summary.cachedInputTokens,
-        contextTokens: summary.resentApproxTokens,
-        ratio: Math.round(share * 1000) / 1000,
+        estimatedUpperBoundResentCachedTokens: upperBound,
+        estimatedUpperBoundResentCachedShare: Math.round(share * 1000) / 1000,
       },
       evidence: {
         runId: event.runId,
@@ -604,7 +616,7 @@ function resentToolOutput(events: StoredRunEvent[]): EfficiencyFinding[] {
         ...(event.attempt !== undefined ? { attempt: event.attempt } : {}),
       },
       remediation:
-        "Bound exploratory reads (rg with -l or --max-count, sed/head line ranges) or hand the agent a focused excerpt in its prompt, so a large output is not carried through every later call (#713, #725).",
+        "Bound exploratory reads (rg with -l or --max-count, sed/head line ranges) or hand the agent a focused excerpt in its prompt, so a large output is less likely to be carried through later calls (#713, #725).",
       relatedIssues: [713, 725],
     }));
   }
