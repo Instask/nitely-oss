@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   codexConfigOverrides,
   codexConfiguredMcpServers,
+  codexMcpServerDisableOverrides,
+  parseCodexFeatureState,
   parseCodexMcpList,
   restrictCodexMcpServers,
   withCodexMcpServersDisabled,
@@ -128,22 +130,56 @@ describe("parseCodexMcpList", () => {
   });
 });
 
+describe("codexMcpServerDisableOverrides", () => {
+  it("turns the Apps connector off through its feature", () => {
+    expect(codexMcpServerDisableOverrides(["github", "codex_apps"])).toEqual([
+      "-c",
+      "mcp_servers.github.enabled=false",
+      "-c",
+      "features.apps=false",
+    ]);
+  });
+
+  it("carries features.apps=false into both exec and exec resume", () => {
+    expect(withCodexMcpServersDisabled(["exec", "--json", "-"], ["codex_apps"])).toEqual([
+      "exec", "-c", "features.apps=false", "--json", "-",
+    ]);
+    expect(withCodexMcpServersDisabled(["exec", "resume", "id", "-"], ["codex_apps"])).toEqual([
+      "exec", "-c", "features.apps=false", "resume", "id", "-",
+    ]);
+  });
+});
+
+describe("parseCodexFeatureState", () => {
+  it("reads the effective state column of codex features list", () => {
+    const stdout = [
+      "apps                                     stable             false",
+      "apps_mcp_path_override                   removed            true",
+      "enable_mcp_apps                          under development  true",
+    ].join("\n");
+    expect(parseCodexFeatureState(stdout, "apps")).toBe(false);
+    expect(parseCodexFeatureState(stdout, "enable_mcp_apps")).toBe(true);
+    expect(parseCodexFeatureState(stdout, "missing")).toBeUndefined();
+  });
+});
+
 describe("restrictCodexMcpServers", () => {
-  it("disables every enabled undeclared server and verifies it", async () => {
+  it("disables every enabled undeclared server and the Apps connector, and verifies both", async () => {
     const lister = fakeCodexMcpList({ context7: true, github: true, playwright: true, off: false });
     const result = await restrictCodexMcpServers({
       request: { mode: "declared-required", declared: ["github", "missing"] },
       stageId: "implement",
       list: lister.list,
+      features: lister.features,
       baseOverrides: ["-c", "model_reasoning_effort=high"],
     });
 
     expect(result).toEqual({
-      disable: ["context7", "playwright"],
+      disable: ["context7", "playwright", "codex_apps"],
       outcome: {
         enforcement: "enforced",
         enabled: ["github"],
-        disabled: ["context7", "playwright"],
+        disabled: ["context7", "playwright", "codex_apps"],
         unconfigured: ["missing"],
       },
     });
@@ -157,19 +193,84 @@ describe("restrictCodexMcpServers", () => {
         "mcp_servers.context7.enabled=false",
         "-c",
         "mcp_servers.playwright.enabled=false",
+        "-c",
+        "features.apps=false",
       ],
     ]);
   });
 
-  it("needs no verification when nothing is enabled beyond the declared servers", async () => {
+  it("turns the Apps connector off even when no configured server is undeclared", async () => {
     const lister = fakeCodexMcpList({ github: true });
     const result = await restrictCodexMcpServers({
       request: { mode: "declared-required", declared: ["github"] },
       stageId: "implement",
       list: lister.list,
+      features: lister.features,
     });
-    expect(result.outcome).toEqual({ enforcement: "enforced", enabled: ["github"], disabled: [] });
-    expect(lister.calls).toHaveLength(1);
+    expect(result).toEqual({
+      disable: ["codex_apps"],
+      outcome: { enforcement: "enforced", enabled: ["github"], disabled: ["codex_apps"] },
+    });
+  });
+
+  it("keeps the Apps connector for a stage that declares codex_apps", async () => {
+    const lister = fakeCodexMcpList({ github: true });
+    const result = await restrictCodexMcpServers({
+      request: { mode: "declared-required", declared: ["codex_apps"] },
+      stageId: "implement",
+      list: lister.list,
+      features: lister.features,
+    });
+    expect(result).toEqual({
+      disable: ["github"],
+      outcome: { enforcement: "enforced", enabled: ["codex_apps"], disabled: ["github"] },
+    });
+
+    // With the feature off in the operator's config there is nothing to keep.
+    const off = fakeCodexMcpList({}, { apps: false });
+    await expect(
+      restrictCodexMcpServers({
+        request: { mode: "declared-if-supported", declared: ["codex_apps"] },
+        stageId: "implement",
+        list: off.list,
+        features: off.features,
+      }),
+    ).resolves.toMatchObject({
+      outcome: { enforcement: "enforced", enabled: [], unconfigured: ["codex_apps"] },
+    });
+  });
+
+  it("is partial when the apps feature cannot be confirmed off, and fails closed when required", async () => {
+    const pinned = fakeCodexMcpList({}, { pinApps: true });
+    const result = await restrictCodexMcpServers({
+      request: { mode: "declared-if-supported", declared: [] },
+      stageId: "reflect",
+      list: pinned.list,
+      features: pinned.features,
+    });
+    expect(result.disable).toEqual(["codex_apps"]);
+    expect(result.outcome).toMatchObject({
+      enforcement: "partial",
+      disabled: [],
+      reason: expect.stringMatching(/apps feature stayed on/),
+    });
+
+    const unreadable = fakeCodexMcpList({});
+    await expect(
+      restrictCodexMcpServers({
+        request: { mode: "declared-required", declared: [] },
+        stageId: "reflect",
+        list: unreadable.list,
+        features: async () => "",
+      }),
+    ).rejects.toThrow(/requires only its declared MCP servers but codex features list did not report the apps feature/);
+    await expect(
+      restrictCodexMcpServers({
+        request: { mode: "declared-required", declared: [] },
+        stageId: "reflect",
+        list: unreadable.list,
+      }),
+    ).rejects.toThrow(/effective Codex apps feature cannot be read/);
   });
 
   it("reports an unaddressable server as partial, and fails closed when required", async () => {
@@ -178,12 +279,13 @@ describe("restrictCodexMcpServers", () => {
       request: { mode: "declared-if-supported", declared: [] },
       stageId: "implement",
       list: lister.list,
+      features: lister.features,
     });
-    expect(result.disable).toEqual(["ok"]);
+    expect(result.disable).toEqual(["ok", "codex_apps"]);
     expect(result.outcome).toMatchObject({
       enforcement: "partial",
       enabled: ["dotted.name"],
-      disabled: ["ok"],
+      disabled: ["ok", "codex_apps"],
       reason: expect.stringMatching(/cannot address MCP server name\(s\) dotted\.name/),
     });
 
@@ -192,6 +294,7 @@ describe("restrictCodexMcpServers", () => {
         request: { mode: "declared-required", declared: [] },
         stageId: "implement",
         list: lister.list,
+        features: lister.features,
       }),
     ).rejects.toThrow(/stage implement requires only its declared MCP servers but codex cannot address/);
   });
@@ -202,10 +305,11 @@ describe("restrictCodexMcpServers", () => {
       request: { mode: "declared-if-supported", declared: [] },
       stageId: "implement",
       list: lister.list,
+      features: lister.features,
     });
     expect(result.outcome).toMatchObject({
       enforcement: "partial",
-      disabled: [],
+      disabled: ["codex_apps"],
       reason: expect.stringMatching(/stubborn stayed enabled/),
     });
   });
@@ -218,10 +322,10 @@ describe("restrictCodexMcpServers", () => {
       list,
       fallbackServers: async () => ["keep", "drop", "dotted.name"],
     });
-    expect(result.disable).toEqual(["drop"]);
+    expect(result.disable).toEqual(["drop", "codex_apps"]);
     expect(result.outcome).toMatchObject({
       enforcement: "partial",
-      disabled: ["drop"],
+      disabled: ["drop", "codex_apps"],
       reason: expect.stringMatching(/did not print a server list/),
     });
 
@@ -236,7 +340,7 @@ describe("restrictCodexMcpServers", () => {
     ).rejects.toThrow(/requires only its declared MCP servers but codex mcp list failed: spawn codex ENOENT/);
   });
 
-  it("drops the overrides when verifying them breaks Codex", async () => {
+  it("keeps only the Apps override when verifying the server overrides breaks Codex", async () => {
     let call = 0;
     const result = await restrictCodexMcpServers({
       request: { mode: "declared-if-supported", declared: [] },
@@ -247,7 +351,7 @@ describe("restrictCodexMcpServers", () => {
         throw new Error("failed to load bootstrap configuration");
       },
     });
-    expect(result.disable).toEqual([]);
+    expect(result.disable).toEqual(["codex_apps"]);
     expect(result.outcome).toMatchObject({
       enforcement: "partial",
       enabled: ["a"],

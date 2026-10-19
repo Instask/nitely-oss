@@ -134,7 +134,27 @@ its stages. No single file names the effective set, so Nitely asks Codex:
    so auth, model provider, and model settings reach Codex unchanged.
 3. Run the list again under those overrides. The restriction is **enforced**
    only if every undeclared server now reports `enabled: false` and the declared
-   ones are still there.
+   ones are still there, and the Apps connector below is confirmed off.
+
+**The ChatGPT Apps connector (`codex_apps`).** Codex also registers a server
+that is in no config layer: when the `apps` feature is on and the session has
+ChatGPT auth, it adds `codex_apps`, which exposes whatever the operator
+connected in ChatGPT Apps (GitHub among them) through `chatgpt.com`.
+`codex mcp list` does not show it, so it cannot be enumerated like the others.
+A production run once reported `enforced` with nothing enabled while its
+reflect stage searched and created GitHub issues through this connector,
+bypassing Nitely's own GitHub credential.
+
+Unless a stage lists `codex_apps` in `required_mcp_servers`, every restricted
+launch (`codex exec` and `codex exec resume`, on both backends) carries
+`-c features.apps=false`. Nitely confirms it with `codex features list` under
+the same flags, environment, `CODEX_HOME`, and working directory, and records
+`codex_apps` as disabled. If the feature cannot be read or stays on, the
+restriction is partial. A stage that needs the connector declares `codex_apps`;
+its `apps` feature is then left as the operator configured it, and `codex_apps`
+is reported enabled when the feature is on. Whether Codex actually registers the
+connector also depends on ChatGPT auth, which `codex features list` cannot show.
+`globalMcpServers: true` leaves the feature alone.
 
 Anything short of that is **partial**: the listing failed or did not parse, the
 verification failed, an override was ignored, or a server name contains a dot,
@@ -143,8 +163,8 @@ when an override names a server it has no configuration for, so Nitely only
 ever disables names Codex itself listed. Under `globalMcpServers: false` a
 partial restriction fails the stage before launch. Under the default the stage
 launches best-effort: if the listing failed it disables the user `config.toml`
-servers it can read, and if verification failed it launches without the
-overrides, since they may be what broke Codex.
+servers it can read, and if verification failed it launches with only the
+Apps override, since the server overrides may be what broke Codex.
 
 Runtime support today:
 
