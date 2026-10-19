@@ -104,9 +104,19 @@ export function codexConfiguredMcpServers(configToml: string): string[] {
   return names;
 }
 
+/**
+ * The ChatGPT Apps connector. Codex registers it at runtime when the `apps`
+ * feature is on and the session has ChatGPT auth; it is in no config layer, so
+ * `codex mcp list` never shows it, and it is turned off through the feature.
+ */
+export const CODEX_APPS_SERVER_NAME = "codex_apps";
+
 /** The `-c` overrides that turn the named Codex MCP servers off. */
 export function codexMcpServerDisableOverrides(names: readonly string[]): string[] {
-  return names.flatMap((name) => ["-c", `mcp_servers.${name}.enabled=false`]);
+  return names.flatMap((name) =>
+    name === CODEX_APPS_SERVER_NAME
+      ? ["-c", "features.apps=false"]
+      : ["-c", `mcp_servers.${name}.enabled=false`]);
 }
 
 /**
@@ -139,6 +149,26 @@ export function codexConfigOverrides(args: readonly string[]): string[] {
 /** Argv for `codex mcp list --json` under the given config overrides. */
 export function codexMcpListArgs(overrides: readonly string[]): string[] {
   return [...overrides, "mcp", "list", "--json"];
+}
+
+/** Argv for `codex features list` under the given config overrides. */
+export function codexFeaturesListArgs(overrides: readonly string[]): string[] {
+  return [...overrides, "features", "list"];
+}
+
+/**
+ * Reads one feature's effective state from `codex features list`, whose rows
+ * are `<name> <stage> <true|false>`. Undefined when the row is missing.
+ */
+export function parseCodexFeatureState(stdout: string, feature: string): boolean | undefined {
+  for (const line of stdout.split(/\r?\n/)) {
+    const columns = line.trim().split(/\s+/);
+    if (columns[0] !== feature || columns.length < 2) continue;
+    const state = columns[columns.length - 1];
+    if (state === "true") return true;
+    if (state === "false") return false;
+  }
+  return undefined;
 }
 
 export interface McpServerListing {
@@ -177,6 +207,23 @@ export function parseCodexMcpList(stdout: string): McpServerListing[] | undefine
  */
 export type CodexMcpLister = (overrides: readonly string[]) => Promise<string>;
 
+async function readCodexAppsFeature(
+  features: CodexMcpLister | undefined,
+  overrides: readonly string[],
+): Promise<{ enabled: boolean } | { problem: string }> {
+  if (!features) return { problem: "the effective Codex apps feature cannot be read" };
+  let stdout: string;
+  try {
+    stdout = await features(overrides);
+  } catch (error) {
+    return { problem: `codex features list failed: ${errorMessage(error)}` };
+  }
+  const enabled = parseCodexFeatureState(stdout, "apps");
+  return enabled === undefined
+    ? { problem: "codex features list did not report the apps feature" }
+    : { enabled };
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message.split("\n")[0]! : String(error);
 }
@@ -204,13 +251,21 @@ async function listCodexMcpServers(
  * itself rather than from any one file. Every enabled server the stage did not
  * declare gets a disable override, and the list is read again under those
  * overrides: the restriction is `enforced` only if that second listing shows
- * every undeclared server off. Anything less is `partial`, which a required
+ * every undeclared server off. The ChatGPT Apps connector is registered at
+ * runtime and never listed, so unless a stage declares `codex_apps` the
+ * launch also carries `features.apps=false`, confirmed off through
+ * `codex features list` under the same overrides. Anything less is `partial`, which a required
  * restriction turns into a failure before launch.
  */
 export async function restrictCodexMcpServers(input: {
   request: Exclude<AgentMcpServersRequest, { mode: "inherited" }>;
   stageId: string;
   list: CodexMcpLister;
+  /**
+   * Runs `codex features list` the same way, to confirm the `apps` feature
+   * behind the runtime-registered `codex_apps` connector.
+   */
+  features?: CodexMcpLister;
   /** The launch's own `-c` overrides, so the probe resolves the same config. */
   baseOverrides?: readonly string[];
   /**
@@ -221,6 +276,10 @@ export async function restrictCodexMcpServers(input: {
 }): Promise<{ disable: string[]; outcome: AgentMcpServersOutcome }> {
   const declared = new Set(input.request.declared);
   const base = input.baseOverrides ?? [];
+  // `codex mcp list` covers config layers and plugins only. The Apps connector
+  // is added at runtime, so it is handled through its feature instead.
+  const keepApps = declared.has(CODEX_APPS_SERVER_NAME);
+  const appsOff = keepApps ? [] : [CODEX_APPS_SERVER_NAME];
   const failClosed = (reason: string): never => {
     throw new Error(
       `stage ${input.stageId} requires only its declared MCP servers but ${reason}`,
@@ -260,9 +319,15 @@ export async function restrictCodexMcpServers(input: {
     } catch {
       fallback = [];
     }
-    const disable = fallback.filter(
-      (name) => !declared.has(name) && CODEX_ADDRESSABLE_SERVER_NAME.test(name),
-    );
+    const disable = [
+      ...fallback.filter(
+        (name) =>
+          !declared.has(name) &&
+          name !== CODEX_APPS_SERVER_NAME &&
+          CODEX_ADDRESSABLE_SERVER_NAME.test(name),
+      ),
+      ...appsOff,
+    ];
     return partial(
       `${listed.problem}, so the effective MCP servers are unknown${
         disable.length > 0 ? "; disabled the user config.toml servers it could read" : ""
@@ -271,35 +336,49 @@ export async function restrictCodexMcpServers(input: {
     );
   }
 
-  const present = new Set(listed.servers.map((server) => server.name));
-  const unconfigured = input.request.declared.filter((name) => !present.has(name));
-  const unwanted = listed.servers
+  const servers = listed.servers.filter((server) => server.name !== CODEX_APPS_SERVER_NAME);
+  const present = new Set(servers.map((server) => server.name));
+  const unconfigured = input.request.declared.filter(
+    (name) => name !== CODEX_APPS_SERVER_NAME && !present.has(name),
+  );
+  const unwanted = servers
     .filter((server) => server.enabled && !declared.has(server.name))
     .map((server) => server.name);
-  const disable = unwanted.filter((name) => CODEX_ADDRESSABLE_SERVER_NAME.test(name));
+  const configDisable = unwanted.filter((name) => CODEX_ADDRESSABLE_SERVER_NAME.test(name));
+  const disable = [...configDisable, ...appsOff];
   const unaddressable = unwanted.filter((name) => !CODEX_ADDRESSABLE_SERVER_NAME.test(name));
-  const keptDeclared = listed.servers
+  const keptDeclared = servers
     .filter((server) => server.enabled && declared.has(server.name))
     .map((server) => server.name);
 
-  let verified = listed.servers;
+  let verified = servers;
   if (disable.length > 0) {
     const check = await listCodexMcpServers(input.list, [
       ...base,
       ...codexMcpServerDisableOverrides(disable),
     ]);
     if ("problem" in check) {
-      // The overrides themselves may be what broke Codex, so the launch does
-      // not carry them.
+      // The server overrides may be what broke Codex, so the launch carries
+      // only the Apps one, a known feature key.
       return partial(`${check.problem} while verifying the disable overrides`, {
+        disable: appsOff,
         enabled: [...keptDeclared, ...unwanted],
         unconfigured,
       });
     }
-    verified = check.servers;
+    verified = check.servers.filter((server) => server.name !== CODEX_APPS_SERVER_NAME);
   }
-  const ignored = disable.filter((name) =>
+  const apps = await readCodexAppsFeature(input.features, [
+    ...base,
+    ...codexMcpServerDisableOverrides(disable),
+  ]);
+  const ignored = configDisable.filter((name) =>
     verified.some((server) => server.name === name && server.enabled));
+  const appsProblem = "problem" in apps
+    ? (keepApps ? undefined : `${apps.problem}, so the Apps connector (codex_apps) may still load`)
+    : !keepApps && apps.enabled
+      ? "the Codex apps feature stayed on under features.apps=false, so the Apps connector (codex_apps) may still load"
+      : undefined;
   const missingDeclared = input.request.declared.filter(
     (name) => present.has(name) && !verified.some((server) => server.name === name),
   );
@@ -313,13 +392,29 @@ export async function restrictCodexMcpServers(input: {
     ...(missingDeclared.length > 0
       ? [`declared MCP server(s) ${missingDeclared.join(", ")} disappeared under the disable overrides`]
       : []),
+    ...(appsProblem ? [appsProblem] : []),
   ];
-  const enabled = verified
-    .filter((server) => server.enabled)
-    .map((server) => server.name);
-  const disabled = disable.filter((name) => !ignored.includes(name));
+  // A declared codex_apps is reported enabled when the feature is on; whether
+  // Codex then registers the connector also depends on ChatGPT auth.
+  const appsEnabled = keepApps && !("problem" in apps) && apps.enabled;
+  const enabled = [
+    ...verified.filter((server) => server.enabled).map((server) => server.name),
+    ...(appsEnabled ? [CODEX_APPS_SERVER_NAME] : []),
+  ];
+  const disabled = [
+    ...configDisable.filter((name) => !ignored.includes(name)),
+    ...(!keepApps && !appsProblem ? [CODEX_APPS_SERVER_NAME] : []),
+  ];
+  const finalUnconfigured = keepApps && !appsEnabled
+    ? [...unconfigured, CODEX_APPS_SERVER_NAME]
+    : unconfigured;
   if (reasons.length > 0) {
-    return partial(reasons.join("; "), { disable, disabled, enabled, unconfigured });
+    return partial(reasons.join("; "), {
+      disable,
+      disabled,
+      enabled,
+      unconfigured: finalUnconfigured,
+    });
   }
   return {
     disable,
@@ -327,7 +422,7 @@ export async function restrictCodexMcpServers(input: {
       enforcement: "enforced",
       enabled,
       disabled,
-      ...(unconfigured.length > 0 ? { unconfigured } : {}),
+      ...(finalUnconfigured.length > 0 ? { unconfigured: finalUnconfigured } : {}),
     },
   };
 }
