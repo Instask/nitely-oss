@@ -1,4 +1,4 @@
-import { fakeCodexMcpListOutput } from "../../helpers/fake-codex-mcp-list.js";
+import { fakeCodexProbeOutput } from "../../helpers/fake-codex-mcp-list.js";
 import {
   access,
   chmod,
@@ -2105,12 +2105,12 @@ describe("OciExecutionBackend", () => {
       image: "nitely-runner:test",
       env: {},
       processRunner: async (input) => {
-        const listAt = input.args.indexOf("mcp");
-        if (input.args[0] === "run" && listAt !== -1 && input.args[listAt + 1] === "list") {
+        const probeAt = Math.max(input.args.indexOf("mcp"), input.args.indexOf("features"));
+        if (input.args[0] === "run" && probeAt !== -1 && input.args[probeAt + 1] === "list") {
           calls.push(input);
           // An image's system config.toml is a layer the probe must see.
           return {
-            stdout: fakeCodexMcpListOutput({ imageone: true, github: true }, input.args),
+            stdout: fakeCodexProbeOutput({ imageone: true, github: true }, input.args),
             stderr: "",
             exitCode: 0,
           };
@@ -2134,22 +2134,21 @@ describe("OciExecutionBackend", () => {
     expect(result.mcpServers).toEqual({
       enforcement: "enforced",
       enabled: ["github"],
-      disabled: ["imageone"],
+      disabled: ["imageone", "codex_apps"],
     });
     const runs = calls.filter((call) => call.args[0] === "run");
-    expect(runs).toHaveLength(3);
+    expect(runs).toHaveLength(4);
     const tail = (args: string[]) => args.slice(args.indexOf("nitely-runner:test") + 1);
-    // Both probes are offline containers of the same image.
+    const overrides = ["-c", "mcp_servers.imageone.enabled=false", "-c", "features.apps=false"];
+    // Every probe is an offline container of the same image.
     expect(runs[0]!.args).toContain("--network=none");
     expect(tail(runs[0]!.args)).toEqual(["codex", "mcp", "list", "--json"]);
-    expect(tail(runs[1]!.args)).toEqual([
-      "codex", "-c", "mcp_servers.imageone.enabled=false", "mcp", "list", "--json",
-    ]);
-    expect(tail(runs[2]!.args)).toEqual([
+    expect(tail(runs[1]!.args)).toEqual(["codex", ...overrides, "mcp", "list", "--json"]);
+    expect(tail(runs[2]!.args)).toEqual(["codex", ...overrides, "features", "list"]);
+    expect(tail(runs[3]!.args)).toEqual([
       "codex",
       "exec",
-      "-c",
-      "mcp_servers.imageone.enabled=false",
+      ...overrides,
       "--skip-git-repo-check",
       "--cd",
       "/workspace",

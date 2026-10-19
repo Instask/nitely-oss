@@ -44,7 +44,7 @@ import { changeMutationDomains, runGuardedMutation } from "../../src/coordinatio
 import { createCodexExecArgs, resumeRun, runFlow, resolveMaxInputTokens, fitPromptToBudget } from "../../src/run/run-flow.js";
 import { createPiJsonCapture, readPiJsonStream } from "../../src/run/execution/pi-json.js";
 import { LocalExecutionBackend } from "../../src/run/execution/local.js";
-import { fakeCodexMcpListOutput } from "../helpers/fake-codex-mcp-list.js";
+import { fakeCodexProbeOutput } from "../helpers/fake-codex-mcp-list.js";
 import { DEFAULT_MAX_RUNTIME_TOKENS } from "../../src/run/budget-defaults.js";
 import { listNotificationDeliveryReceipts } from "../../src/web/notification-delivery.js";
 import { getRunDetail } from "../../src/web/runs.js";
@@ -17823,7 +17823,7 @@ describe("stage MCP servers", () => {
       // Stands in for `codex mcp list --json` over the config above; the
       // real-Codex suite covers what Codex itself reports.
       probeRuntime: async ({ args }) =>
-        fakeCodexMcpListOutput({ context7: true, playwright: true }, args),
+        fakeCodexProbeOutput({ context7: true, playwright: true }, args),
       spawn: (_command, args, options) => {
         const stageId = options.env.NITELY_OUTPUT_DIR?.split("/").at(-2) ?? "unknown";
         launches.set(stageId, [...args]);
@@ -17869,6 +17869,9 @@ describe("stage MCP servers", () => {
     expect(disabledServers(launches.get("reflect"))).toEqual(["context7", "playwright"]);
     // implement declares context7, so only playwright is off.
     expect(disabledServers(launches.get("implement"))).toEqual(["playwright"]);
+    // Neither declares the runtime-registered Apps connector.
+    expect(launches.get("reflect")).toContain("features.apps=false");
+    expect(launches.get("implement")).toContain("features.apps=false");
 
     const store = new EventStore(join(repo, ".nitely", "events.db"));
     const events = store.list(runId);
@@ -17880,21 +17883,21 @@ describe("stage MCP servers", () => {
     expect(payloadFor("reflect")).toEqual({
       enforcement: "enforced",
       enabled: [],
-      disabled: ["context7", "playwright"],
+      disabled: ["context7", "playwright", "codex_apps"],
     });
     expect(payloadFor("implement")).toEqual({
       enforcement: "enforced",
       enabled: ["context7"],
-      disabled: ["playwright"],
+      disabled: ["playwright", "codex_apps"],
     });
 
     const evidence = await readFile(join(runDirectory, "evidence.md"), "utf8");
     expect(evidence).toContain("MCP servers: declared only where the runtime supports it");
     expect(evidence).toContain(
-      "MCP servers, attempt 1: enforced; enabled: none; disabled: context7, playwright",
+      "MCP servers, attempt 1: enforced; enabled: none; disabled: context7, playwright, codex_apps",
     );
     expect(evidence).toContain(
-      "MCP servers, attempt 1: enforced; enabled: context7; disabled: playwright",
+      "MCP servers, attempt 1: enforced; enabled: context7; disabled: playwright, codex_apps",
     );
   });
 
@@ -17903,6 +17906,7 @@ describe("stage MCP servers", () => {
 
     expect(disabledServers(launches.get("reflect"))).toEqual([]);
     expect(disabledServers(launches.get("implement"))).toEqual([]);
+    expect(launches.get("reflect")).not.toContain("features.apps=false");
     const evidence = await readFile(join(runDirectory, "evidence.md"), "utf8");
     expect(evidence).toContain("MCP servers: every configured server");
   });
