@@ -46,6 +46,7 @@ import {
   restrictCodexMcpServers,
   withCodexMcpServersDisabled,
 } from "./mcp-servers.js";
+import { withCodexToolOutputLimit } from "./codex-tool-output.js";
 import {
   captureCallContent,
   createPiJsonCapture,
@@ -1638,12 +1639,22 @@ export class LocalExecutionBackend implements ExecutionBackend {
       allowConfigFallback: true,
       stageId: input.stage.id,
     });
-    const launch = mcpServers.disable.length > 0 && runtime.mcpServerRestriction
+    const restrictedLaunch = mcpServers.disable.length > 0 && runtime.mcpServerRestriction
       ? {
         ...builtLaunch,
         args: runtime.mcpServerRestriction.disable(builtLaunch.args, mcpServers.disable),
       }
       : builtLaunch;
+    // Codex truncates each stored tool output to the stage's read budget.
+    const launch = runtime.id === "codex"
+      ? {
+        ...restrictedLaunch,
+        args: withCodexToolOutputLimit(
+          restrictedLaunch.args,
+          input.readPolicy?.maxToolOutputTokens,
+        ),
+      }
+      : restrictedLaunch;
     const sessionOutcome: AgentSessionOutcome = canResume
       ? { mode: "resumed", sessionId: resumeSessionId }
       : {

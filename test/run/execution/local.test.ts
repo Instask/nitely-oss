@@ -1004,6 +1004,54 @@ describe("LocalExecutionBackend", () => {
     });
   });
 
+  it("caps stored Codex tool output to the stage read budget on cold and resumed launches", async () => {
+    const run = async (session?: { resumeSessionId: string }) => {
+      const calls: SpawnCall[] = [];
+      const backend = new LocalExecutionBackend({
+        env: { CODEX_HOME: "/home/operator/.codex", PATH: "/usr/bin" },
+        spawn: createSuccessfulSpawn(calls),
+        probeRuntime: async (probe) => fakeCodexProbeOutput({}, probe.args),
+      });
+      await backend.runAgent(
+        { runId: "run-agent", path: "/repo/worktree" },
+        {
+          stage: agentStage({ runtime: "codex" }),
+          prompt: "Implement this.",
+          attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
+          ...(session ? { session } : {}),
+          readPolicy: { maxFileBytes: 262_144, deny: [], enforcement: "advisory", maxToolOutputTokens: 2500 },
+        },
+      );
+      return calls[0]?.args ?? [];
+    };
+
+    const cold = await run();
+    expect(cold.slice(0, 3)).toEqual(["exec", "-c", "tool_output_token_limit=2500"]);
+    const resumed = await run({ resumeSessionId: "019bffff-1111-7111-8111-111111111111" });
+    expect(resumed.slice(0, 3)).toEqual(["exec", "-c", "tool_output_token_limit=2500"]);
+    expect(resumed).toContain("resume");
+    expect(resumed.indexOf("tool_output_token_limit=2500")).toBeLessThan(resumed.indexOf("resume"));
+  });
+
+  it("does not add a Codex tool output override without a budget", async () => {
+    const calls: SpawnCall[] = [];
+    const backend = new LocalExecutionBackend({
+      env: { CODEX_HOME: "/home/operator/.codex", PATH: "/usr/bin" },
+      spawn: createSuccessfulSpawn(calls),
+      probeRuntime: async (probe) => fakeCodexProbeOutput({}, probe.args),
+    });
+    await backend.runAgent(
+      { runId: "run-agent", path: "/repo/worktree" },
+      {
+        stage: agentStage({ runtime: "codex" }),
+        prompt: "Implement this.",
+        attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
+        readPolicy: { maxFileBytes: 262_144, deny: [], enforcement: "advisory" },
+      },
+    );
+    expect(calls[0]?.args.some((arg) => arg.startsWith("tool_output_token_limit="))).toBe(false);
+  });
+
   it("keeps the Apps connector on for a stage that declares codex_apps", async () => {
     const { calls, result } = await runCodexWithMcpServers({
       declared: ["codex_apps"],

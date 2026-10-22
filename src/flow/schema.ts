@@ -89,6 +89,14 @@ export const readPolicySchema = z.object({
   /** Repo-relative globs the stage must not read in bulk. */
   deny: z.array(z.string().min(1)).optional(),
   /**
+   * Largest single tool output, in tokens, the runtime keeps in the model's
+   * context. Every later model call in the turn resends what earlier tool
+   * calls returned, so one broad search or long file read is paid for again on
+   * each call after it. Codex enforces this with `tool_output_token_limit`;
+   * other runtimes only see it in the prompt. Unset keeps the runtime default.
+   */
+  maxToolOutputTokens: z.number().int().positive().optional(),
+  /**
    * `advisory` states the bound in the prompt and records it in evidence.
    * `required` demands byte-level enforcement from the execution backend and
    * fails the stage when no backend can provide it.
