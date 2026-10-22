@@ -29,6 +29,7 @@ import {
   type RuntimeEnv,
 } from "./local.js";
 import { createCodexExecCapture } from "./codex-activity.js";
+import { withCodexToolOutputLimit } from "./codex-tool-output.js";
 import { applyCodexRolloutCalls } from "./codex-rollout.js";
 import {
   captureCallContent,
@@ -1481,6 +1482,10 @@ export class OciExecutionBackend implements ExecutionBackend {
       });
       if (mcpServers.disable.length > 0 && runtime.mcpServerRestriction) {
         runtimeArgs = runtime.mcpServerRestriction.disable(runtimeArgs, mcpServers.disable);
+      }
+      // Codex truncates each stored tool output to the stage's read budget.
+      if (launch.runtime === "codex") {
+        runtimeArgs = withCodexToolOutputLimit(runtimeArgs, input.readPolicy?.maxToolOutputTokens);
       }
       if (launch.runtime === "claude") {
         // A rootless engine maps the operator to uid 0 inside the container,

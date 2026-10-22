@@ -1016,6 +1016,7 @@ const DEFAULT_READ_DENY_GLOBS = [
 interface ResolvedStageReadPolicy {
   maxFileBytes: number;
   deny: string[];
+  maxToolOutputTokens?: number;
   enforcement: "advisory" | "required";
 }
 
@@ -1030,6 +1031,8 @@ function resolveStageReadPolicy(
 ): ResolvedStageReadPolicy {
   const stageReads = "reads" in stage ? stage.reads : undefined;
   const isReviewGate = stage.type === "gate" && stage.mode === "review";
+  const maxToolOutputTokens =
+    stageReads?.maxToolOutputTokens ?? flowReads?.maxToolOutputTokens;
   return {
     maxFileBytes:
       stageReads?.maxFileBytes ??
@@ -1038,6 +1041,7 @@ function resolveStageReadPolicy(
         ? DEFAULT_REVIEW_MAX_READ_FILE_BYTES
         : DEFAULT_AGENT_MAX_READ_FILE_BYTES),
     deny: [...(stageReads?.deny ?? flowReads?.deny ?? DEFAULT_READ_DENY_GLOBS)],
+    ...(maxToolOutputTokens !== undefined ? { maxToolOutputTokens } : {}),
     enforcement:
       stageReads?.enforcement ?? flowReads?.enforcement ?? "advisory",
   };
@@ -6970,6 +6974,11 @@ function renderReadPolicy(policy: ResolvedStageReadPolicy | undefined): string[]
         `Do not read these paths in bulk: ${policy.deny.join(", ")}.`,
       ]
       : []),
+    ...(policy.maxToolOutputTokens !== undefined
+      ? [
+        `Each tool output is kept to about ${policy.maxToolOutputTokens} tokens of context; anything longer is truncated. Narrow a search or read a smaller range instead of relying on a long output.`,
+      ]
+      : []),
     "Prefer targeted searches with bounded output over whole-file or whole-tree reads.",
     "",
   ];
@@ -11682,6 +11691,9 @@ async function writeEvidence(input: {
             [
               `- ${redactRuntimeText(policy.stageId, input.context) ?? ""} (${policy.kind})`,
               `  Max file bytes: ${policy.maxFileBytes}`,
+              ...(policy.maxToolOutputTokens !== undefined
+                ? [`  Max tool output tokens: ${policy.maxToolOutputTokens}`]
+                : []),
               `  Enforcement: ${policy.enforcement}`,
               `  Deny: ${policy.deny.length > 0 ? policy.deny.join(", ") : "none"}`,
             ].join("\n"),

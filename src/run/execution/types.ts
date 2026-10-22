@@ -161,6 +161,8 @@ export interface AgentResult {
 export interface AgentReadPolicy {
   maxFileBytes: number;
   deny: string[];
+  /** Token cap on a single tool output kept in context; unset keeps the runtime default. */
+  maxToolOutputTokens?: number;
   enforcement: "advisory" | "required";
 }
 

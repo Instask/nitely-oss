@@ -2208,6 +2208,33 @@ describe("OciExecutionBackend", () => {
     ]);
   });
 
+  it("caps stored Codex tool output inside the sandbox to the stage read budget", async () => {
+    const fixture = await createFixture();
+    const calls: SandboxProcessInput[] = [];
+    const backend = new OciExecutionBackend({
+      image: "nitely-runner:test",
+      env: {},
+      processRunner: successfulRunner(calls),
+      containerName: () => "nitely-agent",
+      runtimeRegistry: offlineRuntimeRegistry(),
+    });
+
+    await backend.runAgent(
+      { runId: "agent", path: fixture.worktree },
+      {
+        stage: agentStage(sandboxCapabilities()),
+        prompt: "Implement.",
+        attemptDirectory: fixture.attempt,
+        readPolicy: { maxFileBytes: 262_144, deny: [], enforcement: "advisory", maxToolOutputTokens: 2500 },
+      },
+    );
+
+    const runs = calls.filter((call) => call.args[0] === "run");
+    const launch = runs.at(-1)!.args;
+    const tail = launch.slice(launch.indexOf("nitely-runner:test") + 1);
+    expect(tail.slice(0, 4)).toEqual(["codex", "exec", "-c", "tool_output_token_limit=2500"]);
+  });
+
   it("runs an agent inside the sandbox and translates the persisted output path", async () => {
     const fixture = await createFixture();
     const calls: SandboxProcessInput[] = [];

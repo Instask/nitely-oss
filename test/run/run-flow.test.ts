@@ -18003,6 +18003,25 @@ describe("stage read policies", () => {
     expect(evidence).toContain("Max file bytes: 4096");
   });
 
+  it("states the tool output budget in the prompt and records it per stage", async () => {
+    const { prompt, evidence } = await runWithReads({
+      flow: { maxToolOutputTokens: 4000 },
+      stage: { maxToolOutputTokens: 2500 },
+    });
+
+    expect(prompt).toContain("Each tool output is kept to about 2500 tokens of context");
+    expect(evidence).toContain("Max tool output tokens: 2500");
+    // The review gate falls back to the flow value.
+    expect(evidence).toContain("Max tool output tokens: 4000");
+  });
+
+  it("leaves the tool output budget out when no flow or stage sets it", async () => {
+    const { prompt, evidence } = await runWithReads();
+
+    expect(prompt).not.toContain("Each tool output is kept to about");
+    expect(evidence).not.toContain("Max tool output tokens:");
+  });
+
   it("fails closed when a stage demands enforcement the injected executor lacks", async () => {
     await expect(
       runWithReads({ stage: { enforcement: "required" } }),
