@@ -74,6 +74,14 @@ export interface AgentRuntimeUsage {
   callLog?: AgentRuntimeCall[];
   /** Calls left out of `callLog` once it reached its cap. */
   callLogDropped?: number;
+  /**
+   * Where `callLog` came from when a runtime has more than one source. Codex
+   * records come from `codex exec --json` turn totals (`codex.exec.json`) or,
+   * per model call, from its rollout file (`codex.rollout.token_count`).
+   */
+  callLogSource?: string;
+  /** Why a finer-grained call source was not used. No paths or content. */
+  callLogFallback?: { reason: string; detail: string };
 }
 
 /**
@@ -87,7 +95,11 @@ export interface AgentRuntimeUsage {
  * `granularity` says what the runtime actually emitted. Pi omits it and means
  * one model call. Codex exec reports a cumulative total per turn, so each
  * record is a turn and its tokens are the increase since the previous
- * snapshot (`accounting: "delta"`). Claude's JSON result is the whole attempt.
+ * snapshot (`accounting: "delta"`). When Codex's rollout file is readable,
+ * those turn records are replaced with one record per model call
+ * (`granularity: "call"`, `accounting: "delta"`), and tool records carry
+ * `outputBytes`, the size of what the tool returned to the model. Claude's
+ * JSON result is the whole attempt.
  */
 export type AgentRuntimeCall =
   | {
@@ -126,6 +138,13 @@ export type AgentRuntimeCall =
       startedAt?: string;
       endedAt?: string;
       isError?: boolean;
+      /**
+       * UTF-8 bytes the tool returned to the model. Every later model call in
+       * the same context resends them.
+       */
+      outputBytes?: number;
+      /** `outputBytes` is the size of the whole rollout line, an upper bound. */
+      outputBytesEstimated?: true;
     };
 
 export interface AgentResult {

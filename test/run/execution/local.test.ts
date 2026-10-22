@@ -31,7 +31,9 @@ import {
   runInputsDirectoryFromAttempt,
 } from "../../../src/run/execution/local.js";
 import type { RuntimeProbeRunner } from "../../../src/run/execution/local.js";
+import type { AgentRuntimeUsage } from "../../../src/run/execution/types.js";
 import { fakeCodexProbeOutput } from "../../helpers/fake-codex-mcp-list.js";
+import { CONTENT_MARKER, outputOf, ROLLOUT_THREAD, RolloutBuilder } from "../../fixtures/codex-rollout.js";
 import { createOpenRouterAgentArgs } from "../../../src/run/execution/openrouter.js";
 import { createTogetherAgentArgs } from "../../../src/run/execution/together.js";
 import { classifyAgentRuntimeBlocker } from "../../../src/run/blockers.js";
@@ -1285,6 +1287,76 @@ describe("LocalExecutionBackend", () => {
       "a\nb\n",
     );
     await rm(attemptDirectory, { recursive: true, force: true });
+  });
+
+  it("reads per-call Codex usage from the attempt's rollout after a passing and a failing exit", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "nitely-local-rollout-"));
+    // A fake codex that writes its rollout under CODEX_HOME while it runs.
+    const rolloutSpawn = (exitCode: number) => () => {
+      const child = new EventEmitter() as EventEmitter & {
+        stdin: Writable;
+        stdout: PassThrough;
+        stderr: PassThrough;
+      };
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.stdin = new Writable({
+        write(_chunk, _encoding, callback) {
+          callback();
+        },
+        final(callback) {
+          const rollout = new RolloutBuilder(Date.now() + 5)
+            .meta()
+            .turn()
+            .call({ input: 12_000, cached: 1_000, output: 40 })
+            .tool("call_rg", outputOf(20_000))
+            .call({ input: 17_100, cached: 12_000, output: 30 });
+          const total = rollout.runningTotal;
+          void rollout.write(codexHome).then(() => {
+            child.stdout.write([
+              { type: "thread.started", thread_id: ROLLOUT_THREAD },
+              { type: "turn.started" },
+              { type: "turn.completed", usage: { input_tokens: total.input, cached_input_tokens: total.cached, output_tokens: total.output } },
+            ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+            child.stdout.end();
+            child.stderr.end();
+            child.emit("close", exitCode);
+          });
+          callback();
+        },
+      });
+      return child;
+    };
+    try {
+      for (const exitCode of [0, 1]) {
+        await rm(join(codexHome, "sessions"), { recursive: true, force: true });
+        const backend = new LocalExecutionBackend({
+          spawn: rolloutSpawn(exitCode),
+          env: { PATH: process.env.PATH, CODEX_HOME: codexHome },
+        });
+        const run = backend.runAgent(
+          { runId: "run-agent", path: "/repo/worktree" },
+          {
+            stage: agentStage({ runtime: "codex" }),
+            prompt: "Run.",
+            attemptDirectory: join(codexHome, "attempt"),
+          },
+        );
+        const usage = exitCode === 0
+          ? (await run).usage
+          : await run.then(
+            () => { throw new Error("expected the attempt to fail"); },
+            (error: { usage?: AgentRuntimeUsage }) => error.usage,
+          );
+        expect(usage?.callLogSource).toBe("codex.rollout.token_count");
+        expect(usage?.inputTokens).toBe(29_100);
+        expect(usage?.callLog?.map((call) => call.kind === "llm" ? call.inputTokens : call.outputBytes))
+          .toEqual([12_000, 20_000, 17_100]);
+        expect(JSON.stringify(usage)).not.toContain(CONTENT_MARKER);
+      }
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
   });
 
   it("derives provider-reported Codex token usage from a completed JSONL turn", async () => {
