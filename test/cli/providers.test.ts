@@ -67,7 +67,7 @@ describe("nitely provider", () => {
     });
     const ok = await cli(["provider", "validate", "openrouter", "--server", "http://server.test"], valid.fetchImpl);
     expect(ok.code).toBe(0);
-    expect(ok.stdout).toEqual(["PROVIDER openrouter connection conn-or valid (checked provider)"]);
+    expect(ok.stdout).toEqual(["PROVIDER openrouter connection conn-or valid"]);
     expect(valid.calls.map((call) => `${call.method} ${call.url}`)).toEqual([
       "GET http://server.test/api/providers",
       "POST http://server.test/api/providers/openrouter/connections/conn-or/validate",
@@ -91,6 +91,57 @@ describe("nitely provider", () => {
       reason: "rejected by OpenRouter (401)",
     });
     expect(rejected.calls).toHaveLength(1);
+  });
+
+  it("does not report a stored-only check as valid unless asked to accept it", async () => {
+    // The server checks only OpenRouter API keys live; others answer `stored`,
+    // which a key revoked at the provider would still pass.
+    const stored = () =>
+      server({
+        "/api/providers/github/connections/conn-gh/validate": { ok: true, checked: "stored" },
+      });
+
+    const strict = await cli(
+      ["provider", "validate", "github", "--connection", "conn-gh", "--server", "http://server.test"],
+      stored().fetchImpl,
+    );
+    expect(strict.code).toBe(1);
+    expect(strict.stdout).toEqual(["PROVIDER github connection conn-gh unverified"]);
+
+    const strictJson = await cli(
+      ["provider", "validate", "github", "--connection", "conn-gh", "--server", "http://server.test", "--json"],
+      stored().fetchImpl,
+    );
+    expect(strictJson.code).toBe(1);
+    expect(JSON.parse(strictJson.stdout.join(""))).toEqual({ ok: true, checked: "stored" });
+
+    const lenient = await cli(
+      [
+        "provider", "validate", "github", "--connection", "conn-gh",
+        "--allow-stored-only", "--server", "http://server.test",
+      ],
+      stored().fetchImpl,
+    );
+    expect(lenient.code).toBe(0);
+    expect(lenient.stdout).toEqual(["PROVIDER github connection conn-gh unverified"]);
+
+    const failedStored = await cli(
+      [
+        "provider", "validate", "github", "--connection", "conn-gh",
+        "--allow-stored-only", "--server", "http://server.test",
+      ],
+      server({
+        "/api/providers/github/connections/conn-gh/validate": {
+          ok: false,
+          checked: "stored",
+          reason: "reconnect required",
+        },
+      }).fetchImpl,
+    );
+    expect(failedStored.code).toBe(1);
+    expect(failedStored.stdout).toEqual([
+      "PROVIDER github connection conn-gh invalid: reconnect required",
+    ]);
   });
 
   it("refuses a provider without a connection and redacts the token from errors", async () => {

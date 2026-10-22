@@ -11,7 +11,7 @@ import {
 
 export const PROVIDER_LIST_USAGE = "Usage: nitely provider list [--server <url>] [--json]";
 export const PROVIDER_VALIDATE_USAGE =
-  "Usage: nitely provider validate <provider-id> [--connection <id>] [--server <url>] [--json]";
+  "Usage: nitely provider validate <provider-id> [--connection <id>] [--allow-stored-only] [--server <url>] [--json]";
 
 interface RemoteTarget {
   serverUrl: string;
@@ -88,6 +88,17 @@ async function validateRemoteConnection(
 }
 
 /**
+ * `valid` only when the provider itself accepted the key. A `stored` check
+ * proves only that a usable credential is saved (the server checks OpenRouter
+ * API keys live and nothing else yet), so a revoked key would still pass it;
+ * it is `unverified` and fails unless the caller opts in.
+ */
+function validationVerdict(result: Record<string, unknown>): "valid" | "unverified" | "invalid" {
+  if (result.ok !== true) return "invalid";
+  return result.checked === "provider" ? "valid" : "unverified";
+}
+
+/**
  * `nitely provider list|validate`: the Console's provider status and
  * **Validate** button. Setting or clearing a key stays in the Console, so this
  * command never sends or prints a provider secret.
@@ -119,6 +130,7 @@ export async function runProviderCommand(input: {
   let serverFlag = "";
   let connectionId = "";
   let asJson = false;
+  let allowStoredOnly = false;
   let resolvedApiToken: string | undefined;
   try {
     for (let index = startIndex; index < argv.length; index += 1) {
@@ -131,6 +143,10 @@ export async function runProviderCommand(input: {
       if (action === "validate" && arg === "--connection") {
         connectionId = argv[++index] ?? "";
         if (!connectionId) throw new Error("Missing value for --connection");
+        continue;
+      }
+      if (action === "validate" && arg === "--allow-stored-only") {
+        allowStoredOnly = true;
         continue;
       }
       if (arg === "--json") {
@@ -165,16 +181,14 @@ export async function runProviderCommand(input: {
 
     const connection = connectionId || await defaultConnectionId(target, providerId, fetchImpl);
     const result = await validateRemoteConnection(target, providerId, connection, fetchImpl);
+    const verdict = validationVerdict(result);
     if (asJson) {
       io.stdout(JSON.stringify(result));
     } else {
-      const checked = typeof result.checked === "string" ? ` (checked ${result.checked})` : "";
       const reason = typeof result.reason === "string" && result.reason ? `: ${result.reason}` : "";
-      io.stdout(
-        `PROVIDER ${providerId} connection ${connection} ${result.ok ? "valid" : "invalid"}${checked}${reason}`,
-      );
+      io.stdout(`PROVIDER ${providerId} connection ${connection} ${verdict}${reason}`);
     }
-    return result.ok ? 0 : 1;
+    return verdict === "valid" || (verdict === "unverified" && allowStoredOnly) ? 0 : 1;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     io.stderr(redactSecret(message, resolvedApiToken, env.NITELY_API_TOKEN));
