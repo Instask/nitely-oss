@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { loadFactoryQueue } from "../../src/factory-queue.js";
 import { runSchedulerOnce } from "../../src/scheduler/run.js";
 import { createSchedule, listScheduleOccurrences } from "../../src/schedules/store.js";
-import { listTasks } from "../../src/web/tasks.js";
+import { listTasks } from "../../src/work-items/adapters/dev-pr-store.js";
 import type { RunFlowResult } from "../../src/run/run-flow.js";
 
 async function createRepo() {

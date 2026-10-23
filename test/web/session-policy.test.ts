@@ -8,7 +8,7 @@ import { addOrganizationMember, changeOrganizationMember, createOrganization, DE
 import { startWebServer } from "../../src/web/server.js";
 import { listSecurityAuditEvents, securityAuditPath } from "../../src/web/security-audit.js";
 import { FileProviderConnectionStore } from "../../src/providers/file-store.js";
-import { createTask } from "../../src/web/tasks.js";
+import { createTask } from "../../src/work-items/adapters/dev-pr-store.js";
 
 const repos: string[] = [];
 afterEach(async () => { await Promise.all(repos.splice(0).map((repo) => rm(repo, { recursive: true, force: true }))); });

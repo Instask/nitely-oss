@@ -15,7 +15,7 @@ import type {
   ScheduleRecord,
   ScheduleTrigger,
 } from "../../src/schedules/types.js";
-import { listTasks, updateTaskRunState } from "../../src/web/tasks.js";
+import { listTasks, updateTaskRunState } from "../../src/work-items/adapters/dev-pr-store.js";
 
 async function createRepo() {
   const repo = await mkdtemp(join(tmpdir(), "nitely-schedule-cli-"));

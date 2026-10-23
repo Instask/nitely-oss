@@ -1,4 +1,4 @@
-import type { TaskPriority, TaskRecord } from "../web/tasks.js";
+import type { TaskPriority, TaskRecord } from "../work-items/adapters/dev-pr-store.js";
 
 export type BlockedReasonKind =
   | "missing"

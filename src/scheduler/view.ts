@@ -1,5 +1,5 @@
 import type { WorkItemRecord, WorkItemStatus } from "../work-items/types.js";
-import type { TaskPriority } from "../web/tasks.js";
+import type { TaskPriority } from "../work-items/adapters/dev-pr-store.js";
 import type {
   RunEligibilityDecision,
   RunEligibilityReason,

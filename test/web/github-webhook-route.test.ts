@@ -10,7 +10,7 @@ import {
   type GitHubWebhookConfiguration,
 } from "../../src/github-webhooks/intake.js";
 import { startWebServer, type WebServer } from "../../src/web/server.js";
-import { listTasks } from "../../src/web/tasks.js";
+import { listTasks } from "../../src/work-items/adapters/dev-pr-store.js";
 
 const servers: WebServer[] = [];
 

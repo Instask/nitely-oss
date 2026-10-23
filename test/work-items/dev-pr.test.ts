@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { createTask } from "../../src/web/tasks.js";
+import { createTask } from "../../src/work-items/adapters/dev-pr-store.js";
 import { createWorkItem } from "../../src/work-items/store.js";
 import {
   finalizeWorkItemRunCandidate,

@@ -6,7 +6,7 @@ import {
   mergeDependencySuggestions,
   type DependencySuggestionRecord,
 } from "../../src/scheduler/suggestions.js";
-import type { SuggestedDependency } from "../../src/web/tasks.js";
+import type { SuggestedDependency } from "../../src/work-items/adapters/dev-pr-store.js";
 
 function item(
   id: string,

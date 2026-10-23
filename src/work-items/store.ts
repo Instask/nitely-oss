@@ -12,7 +12,7 @@ import type {
   WorkItemCandidateVersion,
   WorkItemRecord,
 } from "./types.js";
-import type { SuggestedDependency, TaskPriority } from "../web/tasks.js";
+import type { SuggestedDependency, TaskPriority } from "./adapters/dev-pr-store.js";
 import { validatePlanningApprovalStatus } from "./planning.js";
 import { workItemCandidateFingerprint } from "./candidate-version.js";
 
