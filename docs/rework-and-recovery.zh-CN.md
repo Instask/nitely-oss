@@ -164,3 +164,10 @@ Nitely 仍兼容旧约定，按每个 output 的 `<id>.md`、再 `<id>.txt` 发�
 成功 attempt 中写入合成 manifest。失败后的 agent retry prompt 会包含前一次失败的
 上下文，并明确要求不要重复失败方案。当 budget 耗尽时，run 会以清晰的 attempts
 exhausted 信息失败。
+
+Rework 请求还会让从目标 stage 到发起 rework 的 stage 之间的每个 stage 重新运行。
+这些 stage 的 prompt 都会在前次失败上下文里看到这次 rework，不只是目标 stage；本身没有
+失败的 stage 会被标为「因 rework 重跑」。Nitely 在两次 attempt 之间不会重置 worktree，
+所以这些 prompt 也会说明上一轮的改动仍在 worktree 中，应先检查（`git status`、
+`git diff`）并在其基础上修改，而不是从头重新实现。没有这条说明时，一次生产环境的
+rework 用原始 prompt 重跑了 `implement`，重新探索仓库花掉的 token 比第一次还多。
