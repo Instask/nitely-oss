@@ -1,39 +1,7 @@
-import type { TaskPriority, TaskRecord } from "../work-items/adapters/dev-pr-store.js";
-
-export type BlockedReasonKind =
-  | "missing"
-  | "failed"
-  | "incomplete";
-
-export interface BlockedReason {
-  kind: BlockedReasonKind;
-  upstreamId?: string;
-  changedFields?: string[];
-  message?: string;
-}
-
-export interface GraphNode {
-  task: TaskRecord;
-  blockedReasons: BlockedReason[];
-}
-
-export interface EvaluateTaskGraphInput {
-  isTaskComplete: (taskId: string) => boolean;
-}
-
-const priorityRank: Record<TaskPriority, number> = {
-  P0: 0,
-  P1: 1,
-  P2: 2,
-  P3: 3,
-};
+import type { TaskRecord } from "../work-items/adapters/dev-pr-store.js";
 
 function dependenciesOf(task: TaskRecord): string[] {
   return [...new Set(task.dependsOn ?? [])].filter((id) => id && id !== task.id);
-}
-
-function priorityOf(task: TaskRecord): TaskPriority {
-  return task.priority ?? "P2";
 }
 
 function taskMap(tasks: TaskRecord[]): Map<string, TaskRecord> {
@@ -87,45 +55,4 @@ export function wouldCreateCycle(
       : task,
   );
   return detectCycle(updated) !== undefined;
-}
-
-export function evaluateTaskGraph(
-  tasks: TaskRecord[],
-  input: EvaluateTaskGraphInput,
-): Map<string, GraphNode> {
-  const byId = taskMap(tasks);
-  const graph = new Map<string, GraphNode>();
-  for (const task of tasks) {
-    const blockedReasons: BlockedReason[] = [];
-    for (const upstreamId of dependenciesOf(task)) {
-      const upstream = byId.get(upstreamId);
-      if (!upstream) {
-        blockedReasons.push({ kind: "missing", upstreamId });
-        continue;
-      }
-      if (upstream.status === "failed") {
-        blockedReasons.push({ kind: "failed", upstreamId });
-        continue;
-      }
-      if (!input.isTaskComplete(upstreamId)) {
-        blockedReasons.push({ kind: "incomplete", upstreamId });
-      }
-    }
-    graph.set(task.id, { task, blockedReasons });
-  }
-  return graph;
-}
-
-export function selectRunnableTasks(
-  tasks: TaskRecord[],
-  input: EvaluateTaskGraphInput,
-): GraphNode[] {
-  return [...evaluateTaskGraph(tasks, input).values()]
-    .filter((node) => node.task.status === "ready" && node.blockedReasons.length === 0)
-    .sort((left, right) => {
-      const priorityDelta =
-        priorityRank[priorityOf(left.task)] - priorityRank[priorityOf(right.task)];
-      if (priorityDelta !== 0) return priorityDelta;
-      return left.task.createdAt.localeCompare(right.task.createdAt);
-    });
 }

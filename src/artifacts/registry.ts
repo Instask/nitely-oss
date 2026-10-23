@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { relative, resolve, sep } from "node:path";
 
 import { redactUnknown } from "../context/redaction.js";
 import {
@@ -10,6 +10,7 @@ import {
   writeRunOwnedFileAtomically,
 } from "../run/owned-file.js";
 import type { ArtifactRegistry, RunArtifact } from "./types.js";
+import { isPathInside } from "../path-containment.js";
 
 const PRIVATE_ARTIFACT_PATH_REF_PATTERN = /^[a-f0-9]{32}$/u;
 const PRIVATE_ARTIFACT_PATH_FILENAME_PATTERN =
@@ -148,14 +149,6 @@ function assertUniqueArtifactIdentities(
   }
 }
 
-function isPathInside(parent: string, candidate: string): boolean {
-  const relativePath = relative(parent, candidate);
-  return !(
-    relativePath === ".." ||
-    relativePath.startsWith(`..${sep}`) ||
-    isAbsolute(relativePath)
-  );
-}
 
 function runOwnedReference(input: {
   runDirectory: string;

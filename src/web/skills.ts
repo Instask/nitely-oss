@@ -1,8 +1,9 @@
 import { lstat, readFile, readdir } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 
 import { IDENTIFIER_PATTERN } from "../flow/schema.js";
 import type { WebRepository } from "./repositories.js";
+import { isPathInside } from "../path-containment.js";
 
 export interface WebSkillView {
   id: string;
@@ -29,13 +30,6 @@ function repoRelativePath(repoPath: string, path: string): string {
   return toPosixPath(relative(repoPath, path));
 }
 
-function isPathInside(parent: string, candidate: string): boolean {
-  const relativePath = relative(parent, candidate);
-  return (
-    relativePath === "" ||
-    (!relativePath.startsWith("..") && !isAbsolute(relativePath))
-  );
-}
 
 function parseList(value: string | undefined): string[] {
   if (!value) return [];

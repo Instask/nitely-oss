@@ -74,6 +74,7 @@ import {
   type NetworkAllowlistGateway,
   type OciNetworkPolicy,
 } from "./network-gateway.js";
+import { isPathInside } from "../../path-containment.js";
 
 export interface SandboxProcessInput {
   command: string;
@@ -469,10 +470,6 @@ async function verifyLocalEngineSocket(socketPath: string): Promise<void> {
   }
 }
 
-function isContained(parent: string, child: string): boolean {
-  const path = relative(parent, child);
-  return path === "" || (!path.startsWith(`..${sep}`) && path !== "..");
-}
 
 function containerAlreadyRemoved(
   result: SandboxProcessResult,
@@ -1107,7 +1104,7 @@ export class OciExecutionBackend implements ExecutionBackend {
     const workspace = await realpath(ws.path);
     const runRoot = options?.isolatedWorkspace ? workspace : await realpath(dirname(workspace));
     const output = await realpath(outputPath);
-    if (!isContained(runRoot, output)) {
+    if (!isPathInside(runRoot, output)) {
       throw new Error(`OCI output directory escapes the task run directory: ${outputPath}`);
     }
     for (const path of [workspace, runRoot, output]) assertDockerMountPath(path);
@@ -1957,7 +1954,7 @@ export class OciExecutionBackend implements ExecutionBackend {
       throw new Error("OCI capability paths cannot expose Git metadata");
     }
     const source = await realpath(join(workspace, ...segments));
-    if (!isContained(workspace, source)) {
+    if (!isPathInside(workspace, source)) {
       throw new Error(`OCI capability path escapes the task worktree: ${declaredPath}`);
     }
     assertDockerMountPath(source);
@@ -1990,7 +1987,7 @@ export class OciExecutionBackend implements ExecutionBackend {
           `OCI required stage artifact cannot be mounted: ${inputPath}`,
         );
       }
-      if (!isContained(runRoot, source)) {
+      if (!isPathInside(runRoot, source)) {
         throw new Error(
           `OCI stage artifact escapes the task run directory: ${inputPath}`,
         );

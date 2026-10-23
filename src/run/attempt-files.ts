@@ -1,18 +1,12 @@
 import { lstat } from "node:fs/promises";
-import { basename, isAbsolute, relative, resolve } from "node:path";
+import { basename, relative, resolve } from "node:path";
 
 import {
   requireRunOwnedDirectory,
   writeRunOwnedFileAtomically,
 } from "./owned-file.js";
+import { isPathInside } from "../path-containment.js";
 
-function isPathInside(parent: string, candidate: string): boolean {
-  const relativePath = relative(parent, candidate);
-  return (
-    relativePath === "" ||
-    (!relativePath.startsWith("..") && !isAbsolute(relativePath))
-  );
-}
 
 export async function requireContainedAttemptDirectory(input: {
   runDirectory: string;

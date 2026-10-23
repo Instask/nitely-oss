@@ -370,6 +370,7 @@ import {
   stageWithRuntimeCandidate,
   type ReworkEdge,
 } from "./stage-execution.js";
+import { isPathInside } from "../path-containment.js";
 
 export { createCodexExecArgs } from "./execution/local.js";
 
@@ -1548,13 +1549,6 @@ function assertSafePathSegment(kind: string, value: string): void {
   }
 }
 
-function isPathInside(parent: string, candidate: string): boolean {
-  const relativePath = relative(parent, candidate);
-  return (
-    relativePath === "" ||
-    (!relativePath.startsWith("..") && !isAbsolute(relativePath))
-  );
-}
 
 function requirePathInside(parent: string, candidate: string, label: string): void {
   if (!isPathInside(resolve(parent), resolve(candidate))) {

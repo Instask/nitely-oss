@@ -11,14 +11,8 @@ import {
   stat,
   type FileHandle,
 } from "node:fs/promises";
-import {
-  basename,
-  isAbsolute,
-  join,
-  relative,
-  resolve,
-  sep,
-} from "node:path";
+import { basename, join, relative, resolve, sep } from "node:path";
+import { isPathInside } from "../path-containment.js";
 
 export interface RunOwnedFileReference {
   runDirectory: string;
@@ -200,14 +194,6 @@ function assertExpectedIntegrity(
   }
 }
 
-function isPathInside(parent: string, candidate: string): boolean {
-  const relativePath = relative(parent, candidate);
-  return !(
-    relativePath === ".." ||
-    relativePath.startsWith(`..${sep}`) ||
-    isAbsolute(relativePath)
-  );
-}
 
 function portablePath(path: string): string {
   return path.split(sep).join("/");

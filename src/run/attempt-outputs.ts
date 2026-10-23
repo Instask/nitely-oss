@@ -1,13 +1,5 @@
 import { lstat } from "node:fs/promises";
-import {
-  basename,
-  extname,
-  isAbsolute,
-  join,
-  relative,
-  resolve,
-  sep,
-} from "node:path";
+import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 
 import type { ArtifactContract } from "../artifacts/types.js";
 import { validateAgainstSchema } from "../artifacts/validate.js";
@@ -16,6 +8,7 @@ import {
   readRunOwnedFile,
   writeRunOwnedFileAtomically,
 } from "./owned-file.js";
+import { isPathInside } from "../path-containment.js";
 
 export interface AttemptOutputManifest {
   version: 1;
@@ -61,17 +54,6 @@ export interface ValidateAttemptOutputsResult {
   outputs: ValidatedAttemptOutput[];
 }
 
-function isPathInside(parent: string, candidate: string): boolean {
-  const relativePath = relative(parent, candidate);
-  return (
-    relativePath === "" ||
-    !(
-      relativePath === ".." ||
-      relativePath.startsWith(`..${sep}`) ||
-      isAbsolute(relativePath)
-    )
-  );
-}
 
 function requireAttemptPath(input: {
   attemptDirectory: string;
