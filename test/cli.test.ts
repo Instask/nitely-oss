@@ -10,6 +10,9 @@ import { EventStore } from "../src/events/store.js";
 import { eventStorePath } from "../src/run/project.js";
 import { projectRun } from "../src/run/project.js";
 import { WEB_RUN_STATUSES } from "../src/web/runs.js";
+import { admitWorkItemRun } from "../src/run/admission.js";
+import { ResumeClaimStore, resumeClaimStorePath } from "../src/scheduler/resume-claim.js";
+import { createWorkItem, getWorkItem, getWorkItemSnapshot } from "../src/work-items/store.js";
 import { createTokenOwner } from "./helpers/token-owner.js";
 
 async function writeCliFlow(flow: unknown): Promise<string> {
@@ -4576,6 +4579,103 @@ None.
       "-- stderr --",
       "warn\n",
     ]);
+  });
+
+  it("fails the Run and settles its Work item when an approval is denied", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "nitely-cli-deny-"));
+    await mkdir(join(repo, "flows"), { recursive: true });
+    await writeFile(join(repo, "flows", "generic.json"), "{}\n", "utf8");
+    const created = await createWorkItem(
+      repo,
+      { title: "Publish", workItemType: "autofarm.site", flowPath: "flows/generic.json", inputs: {} },
+      { createId: () => "site" },
+    );
+    const candidate = await getWorkItemSnapshot(repo, created.id);
+    const admission = await admitWorkItemRun({
+      repoPath: repo,
+      candidate: { workItem: candidate.record, version: candidate.version },
+      runInput: { repoPath: repo, flowPath: created.flowPath, inputs: {}, workItemId: created.id },
+      createRunId: () => "run-deny",
+    });
+    expect(admission.decision).toBe("admitted");
+    const store = new EventStore(eventStorePath(repo));
+    try {
+      store.append({ runId: "run-deny", type: "run.created", payload: { flowName: "approval-flow" } });
+      store.append({ runId: "run-deny", stageId: "approve", attempt: 1, type: "stage.started", payload: { type: "approval" } });
+      store.append({
+        runId: "run-deny",
+        stageId: "approve",
+        attempt: 1,
+        type: "approval.requested",
+        payload: { approvalId: "approve-1", prompt: "Approve" },
+      });
+    } finally {
+      store.close();
+    }
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const code = await runCli(
+      ["deny", "run-deny", "approve-1", "--repo", repo, "--actor", "human:test"],
+      { stdout: (line) => stdout.push(line), stderr: (line) => stderr.push(line) },
+    );
+
+    expect(stderr).toEqual([]);
+    expect(code).toBe(0);
+    expect(stdout).toEqual(["APPROVAL approve-1 denied"]);
+    const verify = new EventStore(eventStorePath(repo));
+    try {
+      expect(projectRun(verify.list("run-deny")).status).toBe("failed");
+    } finally {
+      verify.close();
+    }
+    await expect(getWorkItem(repo, "site")).resolves.toMatchObject({
+      status: "failed",
+      latestRunId: "run-deny",
+    });
+  });
+
+  it("refuses to resume a Run whose continuation claim another owner holds", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "nitely-cli-resume-claim-"));
+    await mkdir(join(repo, ".nitely"), { recursive: true });
+    const claims = new ResumeClaimStore(resumeClaimStorePath(repo));
+    try {
+      expect(claims.claim({ runId: "run-held", token: "other-owner", now: new Date() })).toBe(true);
+    } finally {
+      claims.close();
+    }
+    let resumed = 0;
+    const stderr: string[] = [];
+    const code = await runCli(
+      ["resume", "run-held", "--repo", repo],
+      { stdout: () => {}, stderr: (line) => stderr.push(line) },
+      { resumeRun: async () => { resumed += 1; throw new Error("resume should not run"); } },
+    );
+
+    expect(code).toBe(1);
+    expect(resumed).toBe(0);
+    expect(stderr.join("\n")).toContain("run is already being resumed: run-held");
+  });
+
+  it("releases the continuation claim after a CLI resume finishes", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "nitely-cli-resume-release-"));
+    let heldDuringResume: string | undefined;
+    const code = await runCli(
+      ["resume", "run-free", "--repo", repo],
+      { stdout: () => {}, stderr: () => {} },
+      {
+        resumeRun: async (input) => {
+          const claims = new ResumeClaimStore(resumeClaimStorePath(repo));
+          try { heldDuringResume = claims.get(input.runId)?.runId; } finally { claims.close(); }
+          return { runId: input.runId, branchName: "nitely/run-free", worktreePath: join(repo, "worktree") };
+        },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(heldDuringResume).toBe("run-free");
+    const claims = new ResumeClaimStore(resumeClaimStorePath(repo));
+    try { expect(claims.get("run-free")).toBeUndefined(); } finally { claims.close(); }
   });
 
   it("lists and resolves approval requests", async () => {
