@@ -5021,11 +5021,14 @@ None.
   });
 
   it("resumes interrupted runs through the injected runner", async () => {
+    // Resuming takes the Run continuation claim in the repository, so the
+    // repository has to exist.
+    const repo = await mkdtemp(join(tmpdir(), "nitely-cli-resume-"));
     const stdout: string[] = [];
     const stderr: string[] = [];
 
     const code = await runCli(
-      ["resume", "run-1", "--repo", "/repo", "--checkpoint", "stage-attempt:2"],
+      ["resume", "run-1", "--repo", repo, "--checkpoint", "stage-attempt:2"],
       {
         stdout: (line) => stdout.push(line),
         stderr: (line) => stderr.push(line),
@@ -5033,14 +5036,14 @@ None.
       {
         resumeRun: async (input) => {
           expect(input).toEqual({
-            repoPath: "/repo",
+            repoPath: repo,
             runId: "run-1",
             checkpointId: "stage-attempt:2",
           });
           return {
             runId: "run-1",
             branchName: "nitely/run-1",
-            worktreePath: "/repo/.nitely/runs/run-1/worktree",
+            worktreePath: join(repo, ".nitely", "runs", "run-1", "worktree"),
           };
         },
       },
@@ -5051,9 +5054,9 @@ None.
     expect(stdout).toEqual([
       "RUN run-1 resumed",
       "Branch: nitely/run-1",
-      "Worktree: /repo/.nitely/runs/run-1/worktree",
-      `Status command: nitely status run-1 --repo ${resolve("/repo")}`,
-      `Run directory: ${join(resolve("/repo"), ".nitely", "runs", "run-1")}`,
+      `Worktree: ${join(repo, ".nitely", "runs", "run-1", "worktree")}`,
+      `Status command: nitely status run-1 --repo ${resolve(repo)}`,
+      `Run directory: ${join(resolve(repo), ".nitely", "runs", "run-1")}`,
     ]);
   });
 
