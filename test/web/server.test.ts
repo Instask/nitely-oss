@@ -50,7 +50,7 @@ import {
   updateTaskRunState,
   updateTaskSpecApproval,
   type TaskSourceSnapshot,
-} from "../../src/web/tasks.js";
+} from "../../src/work-items/adapters/dev-pr-store.js";
 import { createUser } from "../../src/web/users.js";
 import {
   changeOrganizationMember, listOrganizationMembers, createOrganizationInvitation, resolveOrganizationInvitation,

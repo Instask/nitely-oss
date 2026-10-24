@@ -23,7 +23,7 @@ import {
   getTaskSnapshot,
   taskWorkflowMetadataInputUri,
   updateTaskRunState,
-} from "../../src/web/tasks.js";
+} from "../../src/work-items/adapters/dev-pr-store.js";
 import {
   createWorkItem,
   getWorkItem,

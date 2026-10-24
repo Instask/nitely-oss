@@ -12,7 +12,7 @@ import { describe, expect, it } from "vitest";
 
 import { EventStore } from "../../src/events/store.js";
 import { startWebServer } from "../../src/web/server.js";
-import { createTask, updateTaskRunState } from "../../src/web/tasks.js";
+import { createTask, updateTaskRunState } from "../../src/work-items/adapters/dev-pr-store.js";
 import { chromeExecutablePath } from "../helpers/chrome.js";
 
 const TASK_ID = "task-mobile-populated-regression";

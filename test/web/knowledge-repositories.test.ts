@@ -16,7 +16,7 @@ import {
   type WebServer,
 } from "../../src/web/server.js";
 import { createApiToken } from "../../src/web/api-tokens.js";
-import { updateTaskSpecApproval } from "../../src/web/tasks.js";
+import { updateTaskSpecApproval } from "../../src/work-items/adapters/dev-pr-store.js";
 import { createUser } from "../../src/web/users.js";
 import { createWorkItem } from "../../src/work-items/store.js";
 import { createTokenOwner } from "../helpers/token-owner.js";

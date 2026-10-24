@@ -12,7 +12,7 @@ import type {
   TaskPriority,
   TaskSourceDriftOverride,
   TaskSourceRecord,
-} from "../web/tasks.js";
+} from "./adapters/dev-pr-store.js";
 
 export type WorkItemStatus =
   | "draft"

@@ -19,7 +19,7 @@ import {
   createTask,
   getTask,
   updateTaskRunState,
-} from "../../src/web/tasks.js";
+} from "../../src/work-items/adapters/dev-pr-store.js";
 import { createWorkItem, getWorkItem } from "../../src/work-items/store.js";
 import type { ChangeRequestStatusFetcher } from "../../src/scheduler/completion.js";
 import type {
@@ -397,7 +397,7 @@ describe("scheduler runner", () => {
     );
     await updateTaskRunState(repoPath, "b", { status: "ready" });
 
-    const b = await import("../../src/web/tasks.js").then((module) =>
+    const b = await import("../../src/work-items/adapters/dev-pr-store.js").then((module) =>
       module.getTask(repoPath, "b"),
     );
     await writeFile(
@@ -1606,7 +1606,7 @@ describe("scheduler runner", () => {
     });
 
     expect(resumed).toEqual([]);
-    await expect(import("../../src/web/tasks.js").then((module) =>
+    await expect(import("../../src/work-items/adapters/dev-pr-store.js").then((module) =>
       module.getTask(repoPath, "quota-wait"),
     )).resolves.toMatchObject({
       status: "failed",
@@ -1652,7 +1652,7 @@ describe("scheduler runner", () => {
 
     expect(resumed).toEqual(["run-quota-resume"]);
     expect(summary.completedTaskIds).toEqual(["quota-resume"]);
-    await expect(import("../../src/web/tasks.js").then((module) =>
+    await expect(import("../../src/work-items/adapters/dev-pr-store.js").then((module) =>
       module.getTask(repoPath, "quota-resume"),
     )).resolves.toMatchObject({
       status: "completed",

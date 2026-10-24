@@ -6,7 +6,7 @@ import { z } from "zod";
 import { assertTimezone, parseCronExpression } from "./cron.js";
 import { nextTriggerOccurrence } from "./trigger.js";
 import { loadFactoryQueue } from "../factory-queue.js";
-import { getTask } from "../web/tasks.js";
+import { getTask } from "../work-items/adapters/dev-pr-store.js";
 import type {
   CreateScheduleInput,
   ScheduleMisfirePolicy,

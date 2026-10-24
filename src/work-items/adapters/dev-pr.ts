@@ -1,4 +1,4 @@
-import type { TaskRecord } from "../../web/tasks.js";
+import type { TaskRecord } from "./dev-pr-store.js";
 import {
   freezeTaskPlanningBaseline,
   admitTaskRunState,
@@ -13,7 +13,7 @@ import {
   updateTaskRunState,
   type TaskPlanningBaseline,
   type TaskExecutionInputSnapshot,
-} from "../../web/tasks.js";
+} from "./dev-pr-store.js";
 import { WebNotFoundError } from "../../web/errors.js";
 import {
   getWorkItem,

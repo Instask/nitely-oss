@@ -8,7 +8,7 @@ import { materializeDueSchedules } from "../../src/schedules/materialize.js";
 import { listScheduleOccurrences, listSchedules } from "../../src/schedules/store.js";
 import { listSecurityAuditEvents } from "../../src/web/security-audit.js";
 import { startWebServer, type StartWebServerInput, type WebServer } from "../../src/web/server.js";
-import { listTasks, updateTaskRunState } from "../../src/web/tasks.js";
+import { listTasks, updateTaskRunState } from "../../src/work-items/adapters/dev-pr-store.js";
 
 const servers: WebServer[] = [];
 

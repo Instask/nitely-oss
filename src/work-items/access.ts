@@ -20,7 +20,7 @@ import {
 import type {
   TaskExecutionInputSnapshot,
   TaskRecord,
-} from "../web/tasks.js";
+} from "./adapters/dev-pr-store.js";
 import type {
   WorkItemCandidateVersion,
   WorkItemRecord,
