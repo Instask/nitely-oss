@@ -13542,14 +13542,16 @@ describe("runFlow", () => {
         ],
       },
     });
-    await runGuardedMutation({
+    // Another run publishes the same branch while this run is implementing,
+    // so after this run read the world.
+    const publishFromAnotherRun = () => runGuardedMutation({
       repoPath: repo,
       domains: changeMutationDomains({
         action: "publish",
         branch: "nitely/run-stale",
         worktreePath: join(repo, "other-worktree"),
       }),
-      observedHead: "none",
+      observedAt: new Date().toISOString(),
       runId: "run-earlier",
       idempotencyKey: "publish:run-earlier:publish:nitely/run-stale",
       effect: async () => ({ url: "https://github.com/acme/widgets/pull/4" }),
@@ -13578,6 +13580,7 @@ describe("runFlow", () => {
       {
         createRunId: () => "run-stale",
         executeAgent: async ({ attemptDirectory, worktreePath }) => {
+          await expect(publishFromAnotherRun()).resolves.toMatchObject({ decision: "proceed" });
           await writeFile(join(worktreePath, "feature.txt"), "implemented\n", "utf8");
           await writeFile(join(attemptDirectory, "implementation.md"), "implemented\n", "utf8");
         },
@@ -13595,6 +13598,93 @@ describe("runFlow", () => {
     const events = new EventStore(join(repo, ".nitely", "events.db"));
     expect(events.list("run-stale").some((event) => event.type === "coordination.held")).toBe(true);
     events.close();
+  });
+
+  it("publishes when another run's mutation of the same work finished before this run was created", async () => {
+    const repo = await createRepo();
+    await mkdir(join(repo, "specs"), { recursive: true });
+    await writeFile(join(repo, "specs", "change.md"), "Create feature.txt", "utf8");
+    const flowPath = join(repo, "flows", "fresh-publish.json");
+    await writeJson(flowPath, {
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "fresh-publish" },
+      spec: {
+        stages: [
+          {
+            id: "implement",
+            type: "agent",
+            runtime: "codex",
+            prompt: "Implement the change.",
+            inputs: ["spec"],
+            outputs: ["implementation"],
+          },
+          {
+            id: "publish",
+            type: "publish-change",
+            provider: "github",
+            inputs: ["implementation"],
+            outputs: ["change-request"],
+          },
+        ],
+      },
+    });
+    // Recorded before this run exists, so the run already observed it. The
+    // old gate compared a fixed "none" against this head and held forever.
+    await expect(runGuardedMutation({
+      repoPath: repo,
+      domains: changeMutationDomains({
+        action: "publish",
+        branch: "nitely/run-fresh",
+        worktreePath: join(repo, "other-worktree"),
+      }),
+      observedAt: new Date().toISOString(),
+      runId: "run-earlier",
+      idempotencyKey: "publish:run-earlier:publish:nitely/run-fresh",
+      effect: async () => ({ url: "https://github.com/acme/widgets/pull/4" }),
+      resultOf: () => ({
+        url: "https://github.com/acme/widgets/pull/4",
+        head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      }),
+    })).resolves.toMatchObject({ decision: "proceed" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    let publishCalls = 0;
+
+    const result = await runFlow(
+      {
+        flowPath,
+        repoPath: repo,
+        inputs: {
+          spec: { connector: "local-file", uri: "specs/change.md" },
+        },
+      },
+      {
+        createRunId: () => "run-fresh",
+        executeAgent: async ({ attemptDirectory, worktreePath }) => {
+          await writeFile(join(worktreePath, "feature.txt"), "implemented\n", "utf8");
+          await writeFile(join(attemptDirectory, "implementation.md"), "implemented\n", "utf8");
+        },
+        scmProvider: {
+          type: "github",
+          publishChange: async ({ headBranch, baseBranch }) => {
+            publishCalls += 1;
+            return {
+              provider: "github",
+              url: "https://github.com/acme/widgets/pull/5",
+              number: 5,
+              owner: "acme",
+              repository: "widgets",
+              baseBranch,
+              headBranch,
+              draft: false,
+            };
+          },
+        },
+      },
+    );
+
+    expect(publishCalls).toBe(1);
+    expect(result.changeRequestUrl).toBe("https://github.com/acme/widgets/pull/5");
   });
 
   it("uses an agent-produced title artifact when publishing a change request", async () => {

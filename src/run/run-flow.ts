@@ -3862,9 +3862,19 @@ async function executeSyncChangeStage(input: {
   return metadata;
 }
 
-function coordinationStopMessage(decision: GuardedMutation<unknown>): string {
+function coordinationStopMessage(
+  decision: GuardedMutation<unknown>,
+  idempotencyKey?: string,
+): string {
+  const resolve = (key: string) =>
+    `; check GitHub, then run \`nitely coordination resolve ${key} --applied|--not-applied\``;
   if (decision.decision === "conflict") {
-    return `work coordination conflict: ${decision.ownerRunId}`;
+    return `work coordination conflict: ${decision.ownerRunId}${
+      decision.ownerKey ? ` started an effect that never finished${resolve(decision.ownerKey)}` : ""
+    }`;
+  }
+  if (decision.decision === "unknown" && idempotencyKey) {
+    return `work coordination unknown: ${decision.reason}${resolve(idempotencyKey)}`;
   }
   if (decision.decision === "hold" || decision.decision === "unknown" || decision.decision === "reevaluation-limit") {
     return `work coordination ${decision.decision}: ${decision.reason}`;
@@ -3903,7 +3913,6 @@ function appendCoordinationStop(input: {
 async function guardedChangeResult<T>(input: {
   repoPath: string;
   domains: readonly string[];
-  observedHead: string;
   runId: string;
   stageId: string;
   attempt: number;
@@ -3915,10 +3924,20 @@ async function guardedChangeResult<T>(input: {
   resultOf: (result: T) => StoredEffectRecord;
   fromReplay: (record: StoredEffectRecord) => T;
 }): Promise<T> {
+  // The run read its issue, branch, and change request target when it was
+  // created. Another run's mutation of the same work after that is newer
+  // state; one before it is history this run already saw. A resumed run keeps
+  // its original creation time, so it is held by anything it did not see.
+  const created = input.eventStore
+    .list(input.runId)
+    .find((event) => event.type === "run.created");
+  if (!created) {
+    throw new Error(`work coordination: run ${input.runId} has no run.created event`);
+  }
   const guarded = await runGuardedMutation({
     repoPath: input.repoPath,
     domains: input.domains,
-    observedHead: input.observedHead,
+    observedAt: created.createdAt,
     runId: input.runId,
     idempotencyKey: input.idempotencyKey,
     attemptDirectory: input.attemptDirectory,
@@ -3935,7 +3954,7 @@ async function guardedChangeResult<T>(input: {
     return input.fromReplay(guarded.record);
   }
   appendCoordinationStop({ ...input, decision: guarded });
-  throw new Error(coordinationStopMessage(guarded));
+  throw new Error(coordinationStopMessage(guarded, input.idempotencyKey));
 }
 
 function changeDomainsForStage(input: {
@@ -4043,7 +4062,6 @@ async function executePublishChangeStage(input: {
       worktreePath: input.worktreePath,
       inputs: input.inputArtifacts,
     }),
-    observedHead: "none",
     runId: input.runId,
     stageId: input.stage.id,
     attempt: input.attempt,
@@ -4185,7 +4203,6 @@ async function executeUpdateChangeStage(input: {
         number: target.number,
       },
     }),
-    observedHead: target.headSha,
     runId: input.runId,
     stageId: input.stage.id,
     attempt: input.attempt,
