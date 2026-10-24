@@ -131,6 +131,17 @@ does not grant host root authority. Advanced images can override them with
 `NITELY_OCI_TMPFS_BYTES`, `NITELY_OCI_MAX_FILE_BYTES`,
 `NITELY_OCI_MAX_CAPTURED_OUTPUT_BYTES`, and `NITELY_OCI_TIMEOUT_MS`.
 
+`/tmp` inside a workload is a memory-backed tmpfs capped by
+`NITELY_OCI_TMPFS_BYTES` (256 MiB by default). It is too small for a full test
+suite: one agent attempt exhausted a 1 GiB `/tmp` with `ENOSPC` and could not
+finish verifying. Every workload that mounts the run's worktree therefore also
+gets a disk-backed scratch directory at `/nitely/scratch`, with `TMPDIR`
+pointing at it. On the host it lives at `.nitely/runs/.oci-scratch/<container>`,
+on the same disk as the worktrees, and Nitely removes it with the container.
+Read-only isolated workspaces keep only the tmpfs. Verification also treats
+`ENOSPC` / `no space left on device` as an environment failure, so it is
+retried or escalated rather than sent back to the implementation.
+
 Codex writes a per-thread rollout under `CODEX_HOME/sessions`, which Nitely
 reads after the attempt for per-model-call usage. Inside a container it is lost
 with the container unless `CODEX_HOME` is a bind-mounted host directory. Set

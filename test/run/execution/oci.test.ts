@@ -5,10 +5,12 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -268,6 +270,41 @@ function directSocketRuntimeRegistry(): AgentRuntimeRegistry {
 }
 
 describe("OciExecutionBackend", () => {
+  it("gives the workload a disk-backed TMPDIR and removes it with the container", async () => {
+    const fixture = await createFixture();
+    const calls: SandboxProcessInput[] = [];
+    let scratchSeenDuringRun: boolean | undefined;
+    const runner = successfulRunner(calls);
+    const backend = new OciExecutionBackend({
+      image: "nitely-runner:test",
+      processRunner: async (input) => {
+        if (input.args[0] === "run") {
+          const mount = input.args.find((arg) => arg.endsWith(",dst=/nitely/scratch"));
+          const source = mount?.match(/src=([^,]+)/)?.[1];
+          scratchSeenDuringRun = source ? existsSync(source) : false;
+        }
+        return await runner(input);
+      },
+      containerName: () => "nitely-scratch",
+    });
+
+    await backend.runCommand(
+      { runId: "run-scratch", path: fixture.worktree },
+      "true",
+      { runId: "run-scratch", stageId: "verify", outputDirectory: fixture.attempt },
+    );
+
+    const launch = calls.find((call) => call.args[0] === "run")!;
+    const scratchMount = launch.args.find((arg) => arg.endsWith(",dst=/nitely/scratch"));
+    const scratchSource = scratchMount?.match(/src=([^,]+)/)?.[1];
+    expect(scratchSource).toBe(join(await realpath(dirname(fixture.runRoot)), ".oci-scratch", "nitely-scratch"));
+    expect(launch.args).toEqual(expect.arrayContaining(["--env", "TMPDIR=/nitely/scratch"]));
+    // The small memory-backed /tmp stays as it was.
+    expect(launch.args.some((arg) => arg.startsWith("/tmp:rw,"))).toBe(true);
+    expect(scratchSeenDuringRun).toBe(true);
+    expect(existsSync(scratchSource!)).toBe(false);
+  });
+
   it("labels workloads with ownership and bounded expiry metadata", async () => {
     const fixture = await createFixture();
     const calls: SandboxProcessInput[] = [];
