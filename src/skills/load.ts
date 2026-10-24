@@ -6,9 +6,10 @@ import {
   readFile,
   readdir,
 } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 
 import { IDENTIFIER_PATTERN } from "../flow/schema.js";
+import { isPathInside } from "../path-containment.js";
 
 export interface SkillResource {
   path: string;
@@ -65,13 +66,6 @@ function repoRelativePath(repoPath: string, path: string): string {
   return toPosixPath(relative(repoPath, path));
 }
 
-function isPathInside(parent: string, candidate: string): boolean {
-  const relativePath = relative(parent, candidate);
-  return (
-    relativePath === "" ||
-    (!relativePath.startsWith("..") && !isAbsolute(relativePath))
-  );
-}
 
 function requirePathInside(parent: string, candidate: string, label: string): void {
   if (!isPathInside(resolve(parent), resolve(candidate))) {
