@@ -10,7 +10,7 @@ import {
   listTaskReworkRequests,
   materializeTaskReworkRequestInputs,
 } from "../../src/web/task-rework-requests.js";
-import { createTask, updateTaskRunState } from "../../src/web/tasks.js";
+import { createTask, updateTaskRunState } from "../../src/work-items/adapters/dev-pr-store.js";
 
 async function createRepo() {
   const repoPath = await mkdtemp(join(tmpdir(), "nitely-task-rework-"));

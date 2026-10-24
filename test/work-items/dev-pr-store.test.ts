@@ -10,7 +10,7 @@ import {
   getTask,
   listTasks,
   validateTaskId,
-} from "../../src/web/tasks.js";
+} from "../../src/work-items/adapters/dev-pr-store.js";
 
 async function createRepo() {
   const repo = await mkdtemp(join(tmpdir(), "nitely-web-tasks-"));

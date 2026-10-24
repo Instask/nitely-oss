@@ -16,7 +16,7 @@ import {
   validateTaskId,
   type TaskPlanningBaseline,
   type TaskRecord,
-} from "./tasks.js";
+} from "../work-items/adapters/dev-pr-store.js";
 import { WebInputError, WebNotFoundError } from "./errors.js";
 
 export type TaskReworkRequestStatus =

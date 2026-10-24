@@ -15,7 +15,7 @@ import {
   listScheduleOccurrencesWithLineage,
   setScheduleEnabled,
 } from "../../src/schedules/store.js";
-import { createTask, getTask, listTasks, updateTaskRunState } from "../../src/web/tasks.js";
+import { createTask, getTask, listTasks, updateTaskRunState } from "../../src/work-items/adapters/dev-pr-store.js";
 
 async function repo(): Promise<string> {
   const repoPath = await mkdtemp(join(tmpdir(), "nitely-schedule-reliability-"));

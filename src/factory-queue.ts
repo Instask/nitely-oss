@@ -6,7 +6,7 @@ import { z } from "zod";
 import { EventStore } from "./events/store.js";
 import type { RunEventType } from "./events/types.js";
 import { eventStorePath } from "./run/project.js";
-import type { TaskSourceSnapshot } from "./web/tasks.js";
+import type { TaskSourceSnapshot } from "./work-items/adapters/dev-pr-store.js";
 import type { WorkItemRecord } from "./work-items/types.js";
 
 export type FactoryCandidateStatus =

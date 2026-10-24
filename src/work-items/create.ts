@@ -27,7 +27,7 @@ import { loadProjectInstructions } from "../run/project-instructions.js";
 import { WebInputError } from "../web/errors.js";
 import { assertWorkItemTypeAllowed } from "./governance.js";
 import { createWorkItem } from "./store.js";
-import type { SuggestedDependency, TaskPriority } from "../web/tasks.js";
+import type { SuggestedDependency, TaskPriority } from "./adapters/dev-pr-store.js";
 import type { CreateWorkItemOptions, WorkItemRecord } from "./types.js";
 
 export interface CreateFlowWorkItemInput {

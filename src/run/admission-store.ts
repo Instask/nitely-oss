@@ -8,7 +8,7 @@ import type {
   TaskPlanningBaseline,
   TaskSourceDriftOverride,
   TaskSpecReadinessOverride,
-} from "../web/tasks.js";
+} from "../work-items/adapters/dev-pr-store.js";
 import type { RunFlowInput } from "./run-flow.js";
 
 export type StoredRunAdmissionState = "active" | "settled" | "rejected";
