@@ -9936,6 +9936,96 @@ describe("runFlow", () => {
     },
   );
 
+  it("tells every stage a rework cycle re-runs why it runs and that its changes are still there", async () => {
+    const repo = await createRepo();
+    const flowPath = join(repo, "flows", "downstream-rework.json");
+    await writeJson(flowPath, {
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "downstream-rework" },
+      spec: {
+        stages: [
+          {
+            id: "write-tests",
+            type: "agent",
+            runtime: "codex",
+            prompt: "Write the tests.",
+            inputs: [],
+            outputs: ["tests"],
+            maxAttempts: 2,
+          },
+          {
+            id: "implement",
+            type: "agent",
+            runtime: "codex",
+            prompt: "Implement the change.",
+            inputs: ["tests"],
+            outputs: ["implementation"],
+            maxAttempts: 2,
+          },
+          {
+            id: "test",
+            type: "command",
+            command: "grep fixed feature.txt",
+            inputs: ["tests", "implementation"],
+            outputs: ["test-report"],
+            maxAttempts: 2,
+          },
+        ],
+      },
+    });
+    const prompts = new Map<string, string[]>();
+
+    await runFlow(
+      { flowPath, repoPath: repo, inputs: {} },
+      {
+        createRunId: () => "run-downstream-rework",
+        executeAgent: async ({ stage, prompt, attemptDirectory, worktreePath }) => {
+          const stagePrompts = prompts.get(stage.id) ?? [];
+          stagePrompts.push(prompt);
+          prompts.set(stage.id, stagePrompts);
+          if (stage.id === "write-tests") {
+            await writeFile(join(attemptDirectory, "tests.md"), "tests\n", "utf8");
+            return;
+          }
+          const fixed = stagePrompts.length > 1;
+          await writeFile(join(worktreePath, "feature.txt"), fixed ? "fixed\n" : "broken\n", "utf8");
+          await writeFile(join(attemptDirectory, "implementation.md"), "done\n", "utf8");
+        },
+        recommendOrchestration: ({ stage }) =>
+          stage.id === "test"
+            ? {
+                action: "rework",
+                targetStage: "write-tests",
+                targetArtifact: "tests",
+                reason: "the tests miss the required case",
+                instructions: "Cover the fixed feature case.",
+              }
+            : undefined,
+      },
+    );
+
+    const writeTests = prompts.get("write-tests") ?? [];
+    const implement = prompts.get("implement") ?? [];
+    expect(writeTests).toHaveLength(2);
+    expect(implement).toHaveLength(2);
+    expect(implement[0]).not.toContain("## Previous Failure Context");
+
+    // The target learns why, and that its earlier changes are still there.
+    expect(writeTests[1]).toContain("- attempt 1 failed: downstream stage test requested rework of stage write-tests");
+    expect(writeTests[1]).toContain("your previous attempt's changes are still in the worktree");
+
+    // A stage re-run only because it depends on the target is told so too,
+    // instead of starting blind with the original prompt.
+    expect(implement[1]).toContain("## Previous Failure Context");
+    expect(implement[1]).toContain(
+      "- attempt 1 did not fail; a rework cycle re-runs it: downstream stage test requested rework of stage write-tests",
+    );
+    expect(implement[1]).toContain("Cover the fixed feature case.");
+    expect(implement[1]).toContain("this stage depends on write-tests");
+    expect(implement[1]).toContain("git status, git diff");
+  });
+
   it("diagnoses verification failures and routes high-confidence implementation rework", async () => {
     const repo = await createRepo();
     const flowPath = join(repo, "flows", "verification-diagnosis-implementation.json");
