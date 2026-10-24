@@ -12,6 +12,7 @@ import {
   type RunFlowResult,
 } from "./run-flow.js";
 import { buildRunTrace, type RunCheckpoint } from "./trace.js";
+import { withRunContinuationClaim } from "./control.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -482,11 +483,13 @@ async function routeRollbackChangeRequest(input: {
     return;
   }
   try {
-    const result = await (input.resumeRun ?? resumeRunFlow)({
-      repoPath: input.repoPath,
-      runId: input.runId,
-      checkpointId,
-    });
+    const result = await withRunContinuationClaim(input.repoPath, input.runId, async () =>
+      await (input.resumeRun ?? resumeRunFlow)({
+        repoPath: input.repoPath,
+        runId: input.runId,
+        checkpointId,
+      }),
+    );
     input.application.change.resume = {
       runId: result.runId,
       checkpointId,

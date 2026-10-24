@@ -6514,6 +6514,56 @@ describe("runFlow", () => {
     expect(payload.reviewedArtifactIds).toEqual(["site-plan"]);
   });
 
+  it("reports and honours cancellation for stages a resumed run starts", async () => {
+    const repo = await createRepo();
+    const flowPath = join(repo, "flows", "resume-cancellation.json");
+    await writeJson(flowPath, {
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "resume-cancellation" },
+      spec: {
+        stages: [
+          { id: "build", type: "command", command: "printf plan", inputs: [], outputs: ["site-plan"] },
+          { id: "approve-plan", type: "approval", prompt: "Approve the plan", inputs: ["site-plan"], outputs: [] },
+          { id: "publish", type: "command", command: "printf published", inputs: ["site-plan"], outputs: ["test-report"] },
+        ],
+      },
+    });
+    await runFlow({ flowPath, repoPath: repo, inputs: {} }, { createRunId: () => "run-resume-cancel" });
+    await resolveApproval({
+      repoPath: repo,
+      runId: "run-resume-cancel",
+      approvalId: "approve-plan-1",
+      decision: "approved",
+    });
+
+    const controller = new AbortController();
+    const stages: string[] = [];
+    await expect(resumeRun(
+      { repoPath: repo, runId: "run-resume-cancel" },
+      {
+        cancellation: {
+          signal: controller.signal,
+          getRequest: () => ({ actor: "operator", reason: "stop", source: "web" }),
+          onStageChange: (stage) => {
+            if (!stage) return;
+            stages.push(stage.stageId);
+            // An operator cancels as soon as the resumed run reaches publish.
+            if (stage.stageId === "publish") controller.abort();
+          },
+        },
+      },
+    )).rejects.toThrow(/cancelled/);
+
+    expect(stages).toContain("publish");
+    const store = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      const events = store.list("run-resume-cancel");
+      expect(projectRun(events).status).toBe("cancelled");
+      expect(events.some((event) => event.type === "stage.completed" && event.stageId === "publish")).toBe(false);
+    } finally { store.close(); }
+  });
+
   it("pauses at an approval stage and does not start downstream stages", async () => {
     const repo = await createRepo();
     const flowPath = join(repo, "flows", "approval-pause.json");
