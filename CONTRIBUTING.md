@@ -19,7 +19,12 @@ pnpm install
 pnpm run check
 pnpm run test:run
 pnpm run build
+pnpm run package:smoke
 ```
+
+`package:smoke` packs the published tarball, installs it in a clean project,
+and runs the mocked golden path. It is the CI check for the artifact users
+install.
 
 Run the suite on Linux before asking for review. Part of it asserts Linux
 descriptor-relative path handling and cannot pass on macOS; a macOS run that

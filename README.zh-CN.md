@@ -122,7 +122,10 @@ CI 会在 Linux 上对每个 pull request 运行以下命令，见 [AGENTS.md](A
 pnpm run check
 pnpm run test:run
 pnpm run build
+pnpm run package:smoke
 ```
+
+`package:smoke` 会把发布用的 tarball 装进一个干净项目，并从那次安装运行 mocked golden path。
 
 ## License
 

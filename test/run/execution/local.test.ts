@@ -30,6 +30,10 @@ import {
   createPiAgentArgs,
   runInputsDirectoryFromAttempt,
 } from "../../../src/run/execution/local.js";
+import type { RuntimeProbeRunner } from "../../../src/run/execution/local.js";
+import type { AgentRuntimeUsage } from "../../../src/run/execution/types.js";
+import { fakeCodexProbeOutput } from "../../helpers/fake-codex-mcp-list.js";
+import { CONTENT_MARKER, outputOf, ROLLOUT_THREAD, RolloutBuilder } from "../../fixtures/codex-rollout.js";
 import { createOpenRouterAgentArgs } from "../../../src/run/execution/openrouter.js";
 import { createTogetherAgentArgs } from "../../../src/run/execution/together.js";
 import { classifyAgentRuntimeBlocker } from "../../../src/run/blockers.js";
@@ -885,6 +889,252 @@ describe("LocalExecutionBackend", () => {
     expect(calls).toHaveLength(1);
   });
 
+  async function runCodexWithMcpServers(input: {
+    declared: string[];
+    mode?: "declared-if-supported" | "declared-required";
+    servers?: Record<string, boolean>;
+    probe?: RuntimeProbeRunner;
+  }): Promise<{
+    calls: SpawnCall[];
+    probes: Array<{ command: string; args: string[]; cwd: string; env: Record<string, string | undefined> }>;
+    result: Awaited<ReturnType<LocalExecutionBackend["runAgent"]>>;
+  }> {
+    const calls: SpawnCall[] = [];
+    const probes: Array<{ command: string; args: string[]; cwd: string; env: Record<string, string | undefined> }> = [];
+    const servers = input.servers ?? { context7: true, github: true, playwright: true };
+    const backend = new LocalExecutionBackend({
+      env: { CODEX_HOME: "/home/operator/.codex", PATH: "/usr/bin" },
+      spawn: createSuccessfulSpawn(calls),
+      probeRuntime: async (probe) => {
+        probes.push({ ...probe, env: { ...probe.env } });
+        return input.probe
+          ? await input.probe(probe)
+          : fakeCodexProbeOutput(servers, probe.args);
+      },
+    });
+    const result = await backend.runAgent(
+      { runId: "run-agent", path: "/repo/worktree" },
+      {
+        stage: agentStage({ runtime: "codex" }),
+        prompt: "Implement this.",
+        attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
+        mcpServers: { mode: input.mode ?? "declared-if-supported", declared: input.declared },
+      },
+    );
+    return { calls, probes, result };
+  }
+
+  it("launches Codex with every effective MCP server off when the stage declares none", async () => {
+    const { calls, probes, result } = await runCodexWithMcpServers({ declared: [] });
+
+    const disableOverrides = [
+      "-c",
+      "mcp_servers.context7.enabled=false",
+      "-c",
+      "mcp_servers.github.enabled=false",
+      "-c",
+      "mcp_servers.playwright.enabled=false",
+      "-c",
+      "features.apps=false",
+    ];
+    expect(calls[0]?.args.slice(0, 9)).toEqual(["exec", ...disableOverrides]);
+    expect(result.mcpServers).toEqual({
+      enforcement: "enforced",
+      enabled: [],
+      disabled: ["context7", "github", "playwright", "codex_apps"],
+    });
+    // The probe runs the launch command in the worktree with its environment,
+    // then verifies the overrides: the server list, and the apps feature
+    // behind the runtime-registered codex_apps connector.
+    expect(probes.map((probe) => probe.args)).toEqual([
+      ["mcp", "list", "--json"],
+      [...disableOverrides, "mcp", "list", "--json"],
+      [...disableOverrides, "features", "list"],
+    ]);
+    expect(probes[0]).toMatchObject({
+      command: "codex",
+      cwd: "/repo/worktree",
+      env: { CODEX_HOME: "/home/operator/.codex" },
+    });
+  });
+
+  it("keeps only the MCP server a stage declares", async () => {
+    const { calls, result } = await runCodexWithMcpServers({ declared: ["github"] });
+
+    const args = calls[0]?.args ?? [];
+    expect(args).toContain("mcp_servers.context7.enabled=false");
+    expect(args).toContain("mcp_servers.playwright.enabled=false");
+    expect(args.some((arg) => arg.startsWith("mcp_servers.github."))).toBe(false);
+    expect(args).toContain("features.apps=false");
+    expect(result.mcpServers).toEqual({
+      enforcement: "enforced",
+      enabled: ["github"],
+      disabled: ["context7", "playwright", "codex_apps"],
+    });
+  });
+
+  it("turns the Apps connector off on a resumed Codex session too", async () => {
+    const calls: SpawnCall[] = [];
+    const backend = new LocalExecutionBackend({
+      env: { CODEX_HOME: "/home/operator/.codex", PATH: "/usr/bin" },
+      spawn: createSuccessfulSpawn(calls),
+      probeRuntime: async (probe) => fakeCodexProbeOutput({}, probe.args),
+    });
+    const result = await backend.runAgent(
+      { runId: "run-agent", path: "/repo/worktree" },
+      {
+        stage: agentStage({ runtime: "codex" }),
+        prompt: "Continue.",
+        attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/2",
+        session: { resumeSessionId: "019bffff-1111-7111-8111-111111111111" },
+        mcpServers: { mode: "declared-required", declared: [] },
+      },
+    );
+    expect(calls[0]?.args.slice(0, 5)).toEqual([
+      "exec",
+      "-c",
+      "features.apps=false",
+      "resume",
+      "019bffff-1111-7111-8111-111111111111",
+    ]);
+    expect(result.mcpServers).toEqual({
+      enforcement: "enforced",
+      enabled: [],
+      disabled: ["codex_apps"],
+    });
+  });
+
+  it("caps stored Codex tool output to the stage read budget on cold and resumed launches", async () => {
+    const run = async (session?: { resumeSessionId: string }) => {
+      const calls: SpawnCall[] = [];
+      const backend = new LocalExecutionBackend({
+        env: { CODEX_HOME: "/home/operator/.codex", PATH: "/usr/bin" },
+        spawn: createSuccessfulSpawn(calls),
+        probeRuntime: async (probe) => fakeCodexProbeOutput({}, probe.args),
+      });
+      await backend.runAgent(
+        { runId: "run-agent", path: "/repo/worktree" },
+        {
+          stage: agentStage({ runtime: "codex" }),
+          prompt: "Implement this.",
+          attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
+          ...(session ? { session } : {}),
+          readPolicy: { maxFileBytes: 262_144, deny: [], enforcement: "advisory", maxToolOutputTokens: 2500 },
+        },
+      );
+      return calls[0]?.args ?? [];
+    };
+
+    const cold = await run();
+    expect(cold.slice(0, 3)).toEqual(["exec", "-c", "tool_output_token_limit=2500"]);
+    const resumed = await run({ resumeSessionId: "019bffff-1111-7111-8111-111111111111" });
+    expect(resumed.slice(0, 3)).toEqual(["exec", "-c", "tool_output_token_limit=2500"]);
+    expect(resumed).toContain("resume");
+    expect(resumed.indexOf("tool_output_token_limit=2500")).toBeLessThan(resumed.indexOf("resume"));
+  });
+
+  it("does not add a Codex tool output override without a budget", async () => {
+    const calls: SpawnCall[] = [];
+    const backend = new LocalExecutionBackend({
+      env: { CODEX_HOME: "/home/operator/.codex", PATH: "/usr/bin" },
+      spawn: createSuccessfulSpawn(calls),
+      probeRuntime: async (probe) => fakeCodexProbeOutput({}, probe.args),
+    });
+    await backend.runAgent(
+      { runId: "run-agent", path: "/repo/worktree" },
+      {
+        stage: agentStage({ runtime: "codex" }),
+        prompt: "Implement this.",
+        attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
+        readPolicy: { maxFileBytes: 262_144, deny: [], enforcement: "advisory" },
+      },
+    );
+    expect(calls[0]?.args.some((arg) => arg.startsWith("tool_output_token_limit="))).toBe(false);
+  });
+
+  it("keeps the Apps connector on for a stage that declares codex_apps", async () => {
+    const { calls, result } = await runCodexWithMcpServers({
+      declared: ["codex_apps"],
+      mode: "declared-required",
+    });
+    expect(calls[0]?.args).not.toContain("features.apps=false");
+    expect(result.mcpServers).toEqual({
+      enforcement: "enforced",
+      enabled: ["codex_apps"],
+      disabled: ["context7", "github", "playwright"],
+    });
+  });
+
+  it("records a restriction it cannot confirm as partial, and fails closed when required", async () => {
+    const failing: RuntimeProbeRunner = async () => {
+      throw new Error("spawn codex ENOENT");
+    };
+    const { calls, result } = await runCodexWithMcpServers({ declared: [], probe: failing });
+    expect(calls).toHaveLength(1);
+    expect(result.mcpServers).toMatchObject({
+      enforcement: "partial",
+      reason: expect.stringMatching(/codex mcp list failed: spawn codex ENOENT/),
+    });
+
+    await expect(
+      runCodexWithMcpServers({ declared: [], probe: failing, mode: "declared-required" }),
+    ).rejects.toThrow(/requires only its declared MCP servers but codex mcp list failed/);
+  });
+
+  it("leaves MCP servers alone when the flow inherits them", async () => {
+    const calls: SpawnCall[] = [];
+    const backend = new LocalExecutionBackend({
+      env: { CODEX_HOME: "/home/operator/.codex", PATH: "/usr/bin" },
+      spawn: createSuccessfulSpawn(calls),
+      probeRuntime: async () => {
+        throw new Error("no probe for an inherited set");
+      },
+    });
+    const result = await backend.runAgent(
+      { runId: "run-agent", path: "/repo/worktree" },
+      {
+        stage: agentStage({ runtime: "codex" }),
+        prompt: "Implement this.",
+        attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
+        mcpServers: { mode: "inherited" },
+      },
+    );
+
+    expect(calls[0]?.args.some((arg) => arg.startsWith("mcp_servers."))).toBe(false);
+    expect(calls[0]?.args).not.toContain("features.apps=false");
+    expect(result.mcpServers).toEqual({
+      enforcement: "inherited",
+      reason: "flow opted into every configured MCP server",
+    });
+  });
+
+  it("fails closed when a runtime without MCP restriction must restrict", async () => {
+    const backend = new LocalExecutionBackend({
+      env: { ANTHROPIC_API_KEY: "key", PATH: "/usr/bin" },
+      spawn: createSuccessfulSpawn([]),
+    });
+    const run = (mode: "declared-if-supported" | "declared-required") =>
+      backend.runAgent(
+        { runId: "run-agent", path: "/repo/worktree" },
+        {
+          stage: agentStage({ runtime: "claude" }),
+          prompt: "Implement this.",
+          attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
+          mcpServers: { mode, declared: [] },
+        },
+      );
+
+    await expect(run("declared-required")).rejects.toThrow(
+      /requires only its declared MCP servers but agent runtime claude has no MCP server restriction mechanism/,
+    );
+    await expect(run("declared-if-supported")).resolves.toMatchObject({
+      mcpServers: {
+        enforcement: "unsupported",
+        reason: "agent runtime claude has no MCP server restriction mechanism",
+      },
+    });
+  });
+
   it("reports the Codex session id so the next execution can continue it", async () => {
     const threadId = "019bffff-1111-7111-8111-111111111111";
     const backend = new LocalExecutionBackend({
@@ -1087,6 +1337,76 @@ describe("LocalExecutionBackend", () => {
     await rm(attemptDirectory, { recursive: true, force: true });
   });
 
+  it("reads per-call Codex usage from the attempt's rollout after a passing and a failing exit", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "nitely-local-rollout-"));
+    // A fake codex that writes its rollout under CODEX_HOME while it runs.
+    const rolloutSpawn = (exitCode: number) => () => {
+      const child = new EventEmitter() as EventEmitter & {
+        stdin: Writable;
+        stdout: PassThrough;
+        stderr: PassThrough;
+      };
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.stdin = new Writable({
+        write(_chunk, _encoding, callback) {
+          callback();
+        },
+        final(callback) {
+          const rollout = new RolloutBuilder(Date.now() + 5)
+            .meta()
+            .turn()
+            .call({ input: 12_000, cached: 1_000, output: 40 })
+            .tool("call_rg", outputOf(20_000))
+            .call({ input: 17_100, cached: 12_000, output: 30 });
+          const total = rollout.runningTotal;
+          void rollout.write(codexHome).then(() => {
+            child.stdout.write([
+              { type: "thread.started", thread_id: ROLLOUT_THREAD },
+              { type: "turn.started" },
+              { type: "turn.completed", usage: { input_tokens: total.input, cached_input_tokens: total.cached, output_tokens: total.output } },
+            ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+            child.stdout.end();
+            child.stderr.end();
+            child.emit("close", exitCode);
+          });
+          callback();
+        },
+      });
+      return child;
+    };
+    try {
+      for (const exitCode of [0, 1]) {
+        await rm(join(codexHome, "sessions"), { recursive: true, force: true });
+        const backend = new LocalExecutionBackend({
+          spawn: rolloutSpawn(exitCode),
+          env: { PATH: process.env.PATH, CODEX_HOME: codexHome },
+        });
+        const run = backend.runAgent(
+          { runId: "run-agent", path: "/repo/worktree" },
+          {
+            stage: agentStage({ runtime: "codex" }),
+            prompt: "Run.",
+            attemptDirectory: join(codexHome, "attempt"),
+          },
+        );
+        const usage = exitCode === 0
+          ? (await run).usage
+          : await run.then(
+            () => { throw new Error("expected the attempt to fail"); },
+            (error: { usage?: AgentRuntimeUsage }) => error.usage,
+          );
+        expect(usage?.callLogSource).toBe("codex.rollout.token_count");
+        expect(usage?.inputTokens).toBe(29_100);
+        expect(usage?.callLog?.map((call) => call.kind === "llm" ? call.inputTokens : call.outputBytes))
+          .toEqual([12_000, 20_000, 17_100]);
+        expect(JSON.stringify(usage)).not.toContain(CONTENT_MARKER);
+      }
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
+  });
+
   it("derives provider-reported Codex token usage from a completed JSONL turn", async () => {
     const stdout = [
       { type: "thread.started", thread_id: "019bffff-1111-7111-8111-111111111111" },
@@ -1124,7 +1444,9 @@ describe("LocalExecutionBackend", () => {
       },
     );
 
-    expect(result.stdout).toBe(stdout);
+    expect(result.stdout).toContain("019bffff-1111-7111-8111-111111111111");
+    expect(result.stdout).not.toContain("ignored_secret");
+    expect(result.stdout).not.toContain("999999");
     expect(result.stderr).toBe("codex diagnostic\n");
     expect(result.usage).toMatchObject({
       inputTokens: 120,
@@ -1190,7 +1512,6 @@ describe("LocalExecutionBackend", () => {
       );
 
       expect(result.usage).toBeUndefined();
-      expect(result.stdout).toBe(`${stdout}\n`);
     }
   });
 

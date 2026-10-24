@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { Writable } from "node:stream";
 
 import { describe, expect, it } from "vitest";
 
@@ -38,9 +40,11 @@ import {
   queryRepoIndex,
   recordRepoIndexQuery,
 } from "../../src/repo-index/index.js";
+import { changeMutationDomains, runGuardedMutation } from "../../src/coordination/claims.js";
 import { createCodexExecArgs, resumeRun, runFlow, resolveMaxInputTokens, fitPromptToBudget } from "../../src/run/run-flow.js";
 import { createPiJsonCapture, readPiJsonStream } from "../../src/run/execution/pi-json.js";
 import { LocalExecutionBackend } from "../../src/run/execution/local.js";
+import { fakeCodexProbeOutput } from "../helpers/fake-codex-mcp-list.js";
 import { DEFAULT_MAX_RUNTIME_TOKENS } from "../../src/run/budget-defaults.js";
 import { listNotificationDeliveryReceipts } from "../../src/web/notification-delivery.js";
 import { getRunDetail } from "../../src/web/runs.js";
@@ -303,6 +307,41 @@ describe("runFlow", () => {
             "implemented\n",
             "utf8",
           );
+          await writeFile(
+            join(attemptDirectory, "command-mediation.jsonl"),
+            [
+              JSON.stringify({
+                event: "effective",
+                mechanism: "oci-ptrace-seccomp",
+                mode: "allow-list",
+                policyId: "commands/v1:allow-list:enforced:allow(git):deny(none)",
+                advisory: false,
+              }),
+              JSON.stringify({
+                event: "decision",
+                decision: "deny",
+                program: "curl",
+                argc: 2,
+                rule: "curl",
+                reason: "denied by deny rule curl",
+              }),
+              JSON.stringify({
+                event: "decision",
+                decision: "deny",
+                program: "curl",
+                argc: 2,
+                rule: "curl",
+                reason: "denied by deny rule curl",
+                argv: ["curl", "https://user:super-secret-value@example.test"],
+              }),
+              JSON.stringify({
+                event: "supervisor-exit",
+                decisions: 1,
+                denials: 1,
+              }),
+            ].join("\n"),
+            "utf8",
+          );
           return { stdout: "done\n" };
         }),
         describeExecution: () => ({
@@ -356,6 +395,8 @@ describe("runFlow", () => {
       expect(evidence).toContain(
         "Secret names: OPENAI_API_KEY (values omitted)",
       );
+      expect(evidence).toContain("denied curl rule curl argc 2");
+      expect(evidence).toContain("supervisor exit recorded");
       expect(evidence).not.toContain("super-secret-value");
     },
   );
@@ -6090,7 +6131,7 @@ describe("runFlow", () => {
                 "const { writeFileSync } = require('node:fs');",
                 "const { join } = require('node:path');",
                 "writeFileSync(join(process.env.NITELY_ATTEMPT_DIR, 'command-started'), 'started');",
-                "setTimeout(() => {}, 5000);",
+                "setTimeout(() => {}, 30000);",
               ].join(" "),
             ),
             maxAttempts: 1,
@@ -6128,7 +6169,39 @@ describe("runFlow", () => {
       "command-started",
     );
 
-    await waitForFile(startedPath);
+    // Creating the worktree and spawning the command can take longer than a
+    // couple of seconds when the suite is contending for CPU. The marker file
+    // is written before the command sleeps, so this wait is only for startup.
+    let runEnded:
+      | { status: "completed" }
+      | { status: "failed"; error: unknown }
+      | undefined;
+    const watchRun = execution.then(
+      () => {
+        runEnded = { status: "completed" };
+      },
+      (error: unknown) => {
+        runEnded = { status: "failed", error };
+      },
+    );
+    try {
+      await Promise.race([waitForFile(startedPath, 20_000), watchRun]);
+    } catch (error) {
+      controller.abort(request);
+      throw error;
+    }
+    if (runEnded?.status === "failed") {
+      const message =
+        runEnded.error instanceof Error ? runEnded.error.message : String(runEnded.error);
+      throw new Error(
+        `run failed before the command wrote command-started: ${message}`,
+        { cause: runEnded.error },
+      );
+    }
+    if (runEnded?.status === "completed") {
+      throw new Error("run completed before the command wrote command-started");
+    }
+
     controller.abort(request);
 
     await expect(execution).rejects.toThrow(/operator requested stop|run cancelled/);
@@ -6172,6 +6245,7 @@ describe("runFlow", () => {
       ]),
     );
     },
+    45_000,
   );
 
   it("records command environment repairs in events, preflight, and evidence", async () => {
@@ -9812,6 +9886,96 @@ describe("runFlow", () => {
     },
   );
 
+  it("tells every stage a rework cycle re-runs why it runs and that its changes are still there", async () => {
+    const repo = await createRepo();
+    const flowPath = join(repo, "flows", "downstream-rework.json");
+    await writeJson(flowPath, {
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "downstream-rework" },
+      spec: {
+        stages: [
+          {
+            id: "write-tests",
+            type: "agent",
+            runtime: "codex",
+            prompt: "Write the tests.",
+            inputs: [],
+            outputs: ["tests"],
+            maxAttempts: 2,
+          },
+          {
+            id: "implement",
+            type: "agent",
+            runtime: "codex",
+            prompt: "Implement the change.",
+            inputs: ["tests"],
+            outputs: ["implementation"],
+            maxAttempts: 2,
+          },
+          {
+            id: "test",
+            type: "command",
+            command: "grep fixed feature.txt",
+            inputs: ["tests", "implementation"],
+            outputs: ["test-report"],
+            maxAttempts: 2,
+          },
+        ],
+      },
+    });
+    const prompts = new Map<string, string[]>();
+
+    await runFlow(
+      { flowPath, repoPath: repo, inputs: {} },
+      {
+        createRunId: () => "run-downstream-rework",
+        executeAgent: async ({ stage, prompt, attemptDirectory, worktreePath }) => {
+          const stagePrompts = prompts.get(stage.id) ?? [];
+          stagePrompts.push(prompt);
+          prompts.set(stage.id, stagePrompts);
+          if (stage.id === "write-tests") {
+            await writeFile(join(attemptDirectory, "tests.md"), "tests\n", "utf8");
+            return;
+          }
+          const fixed = stagePrompts.length > 1;
+          await writeFile(join(worktreePath, "feature.txt"), fixed ? "fixed\n" : "broken\n", "utf8");
+          await writeFile(join(attemptDirectory, "implementation.md"), "done\n", "utf8");
+        },
+        recommendOrchestration: ({ stage }) =>
+          stage.id === "test"
+            ? {
+                action: "rework",
+                targetStage: "write-tests",
+                targetArtifact: "tests",
+                reason: "the tests miss the required case",
+                instructions: "Cover the fixed feature case.",
+              }
+            : undefined,
+      },
+    );
+
+    const writeTests = prompts.get("write-tests") ?? [];
+    const implement = prompts.get("implement") ?? [];
+    expect(writeTests).toHaveLength(2);
+    expect(implement).toHaveLength(2);
+    expect(implement[0]).not.toContain("## Previous Failure Context");
+
+    // The target learns why, and that its earlier changes are still there.
+    expect(writeTests[1]).toContain("- attempt 1 failed: downstream stage test requested rework of stage write-tests");
+    expect(writeTests[1]).toContain("your previous attempt's changes are still in the worktree");
+
+    // A stage re-run only because it depends on the target is told so too,
+    // instead of starting blind with the original prompt.
+    expect(implement[1]).toContain("## Previous Failure Context");
+    expect(implement[1]).toContain(
+      "- attempt 1 did not fail; a rework cycle re-runs it: downstream stage test requested rework of stage write-tests",
+    );
+    expect(implement[1]).toContain("Cover the fixed feature case.");
+    expect(implement[1]).toContain("this stage depends on write-tests");
+    expect(implement[1]).toContain("git status, git diff");
+  });
+
   it("diagnoses verification failures and routes high-confidence implementation rework", async () => {
     const repo = await createRepo();
     const flowPath = join(repo, "flows", "verification-diagnosis-implementation.json");
@@ -11843,7 +12007,7 @@ describe("runFlow", () => {
           return {
             stdout: "resumed\n",
             stderr: "",
-            usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+            usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15, cachedInputTokens: 6 },
           };
         }),
       },
@@ -11856,6 +12020,15 @@ describe("runFlow", () => {
     expect(evidence).not.toContain("- Unknown attempts:");
     expect(evidence).toContain("- Attempts with runtime usage data: 1");
     expect(evidence).toContain("- Runtime attempts without usage data: 3");
+    expect(evidence).toContain("- Cached input tokens: 6");
+    expect(evidence).toContain("- Fresh input tokens: 4");
+    expect(evidence).toContain("Input by attempt (harness prompt vs. runtime-reported input):");
+    expect(evidence).toMatch(
+      /- implement attempt 4 \(codex\): harness prompt ~\d+ · fresh input 4 · cached input 6 · cumulative input 10 · output 5\n/,
+    );
+    expect(evidence).toMatch(
+      /- implement attempt 1 \(claude\): harness prompt [^\n]*runtime usage not reported \(no final usage snapshot; not counted as zero\)\n/,
+    );
     expect(evidence).not.toContain("attempt 4/2");
     expect(evidence).toContain(
       "- implement attempt 4 (max policy attempts 2): complete - agent completed on attempt 4",
@@ -13338,6 +13511,90 @@ describe("runFlow", () => {
     expect(evidence).toContain("Outcome: reused");
     expect(evidence).toContain("Metadata update: updated");
     expect(evidence).toContain("Metadata transport: github-rest-api");
+  });
+
+  it("holds a publish when the branch was already published from another run", async () => {
+    const repo = await createRepo();
+    await mkdir(join(repo, "specs"), { recursive: true });
+    await writeFile(join(repo, "specs", "change.md"), "Create feature.txt", "utf8");
+    const flowPath = join(repo, "flows", "stale-publish.json");
+    await writeJson(flowPath, {
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "stale-publish" },
+      spec: {
+        stages: [
+          {
+            id: "implement",
+            type: "agent",
+            runtime: "codex",
+            prompt: "Implement the change.",
+            inputs: ["spec"],
+            outputs: ["implementation"],
+          },
+          {
+            id: "publish",
+            type: "publish-change",
+            provider: "github",
+            inputs: ["implementation"],
+            outputs: ["change-request"],
+          },
+        ],
+      },
+    });
+    await runGuardedMutation({
+      repoPath: repo,
+      domains: changeMutationDomains({
+        action: "publish",
+        branch: "nitely/run-stale",
+        worktreePath: join(repo, "other-worktree"),
+      }),
+      observedHead: "none",
+      runId: "run-earlier",
+      idempotencyKey: "publish:run-earlier:publish:nitely/run-stale",
+      effect: async () => ({ url: "https://github.com/acme/widgets/pull/4" }),
+      resultOf: () => ({
+        url: "https://github.com/acme/widgets/pull/4",
+        head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      }),
+    });
+    let publishCalls = 0;
+    const scmProvider: ScmProvider = {
+      type: "github",
+      publishChange: async () => {
+        publishCalls += 1;
+        throw new Error("stale publish must not reach the provider");
+      },
+    };
+
+    await expect(runFlow(
+      {
+        flowPath,
+        repoPath: repo,
+        inputs: {
+          spec: { connector: "local-file", uri: "specs/change.md" },
+        },
+      },
+      {
+        createRunId: () => "run-stale",
+        executeAgent: async ({ attemptDirectory, worktreePath }) => {
+          await writeFile(join(worktreePath, "feature.txt"), "implemented\n", "utf8");
+          await writeFile(join(attemptDirectory, "implementation.md"), "implemented\n", "utf8");
+        },
+        scmProvider,
+      },
+    )).rejects.toThrow(/work coordination hold: stale-cursor/);
+
+    expect(publishCalls).toBe(0);
+    const evidence = await readFile(
+      join(repo, ".nitely", "runs", "run-stale", "evidence.md"),
+      "utf8",
+    );
+    expect(evidence).toContain("HOLD");
+    expect(evidence).toContain("stale-cursor");
+    const events = new EventStore(join(repo, ".nitely", "events.db"));
+    expect(events.list("run-stale").some((event) => event.type === "coordination.held")).toBe(true);
+    events.close();
   });
 
   it("uses an agent-produced title artifact when publishing a change request", async () => {
@@ -17598,6 +17855,153 @@ describe("global runtime skills", () => {
   });
 });
 
+describe("stage MCP servers", () => {
+  async function runCodexStages(context?: Record<string, unknown>): Promise<{
+    launches: Map<string, string[]>;
+    repo: string;
+    runId: string;
+    runDirectory: string;
+  }> {
+    const repo = await createRepo();
+    const codexHome = await mkdtemp(join(tmpdir(), "nitely-codex-home-"));
+    await writeFile(join(codexHome, "auth.json"), "{}\n", "utf8");
+    await writeFile(
+      join(codexHome, "config.toml"),
+      [
+        'model_provider = "openai"',
+        "[mcp_servers.context7]",
+        'command = "npx"',
+        "[mcp_servers.playwright]",
+        'command = "npx"',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const flowPath = join(repo, "flows", "mcp-servers.json");
+    await writeJson(flowPath, {
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "mcp-servers" },
+      spec: {
+        ...(context ? { context } : {}),
+        stages: [
+          {
+            id: "reflect",
+            type: "agent",
+            runtime: "codex",
+            prompt: "reflect",
+            inputs: [],
+            outputs: ["notes"],
+          },
+          {
+            id: "implement",
+            type: "agent",
+            runtime: "codex",
+            prompt: "implement",
+            inputs: [],
+            required_mcp_servers: ["context7"],
+            outputs: ["implementation"],
+          },
+        ],
+      },
+    });
+
+    const runId = "run-mcp-" + Math.random().toString(36).slice(2, 8);
+    const launches = new Map<string, string[]>();
+    const backend = new LocalExecutionBackend({
+      env: { PATH: process.env.PATH, CODEX_HOME: codexHome },
+      // Stands in for `codex mcp list --json` over the config above; the
+      // real-Codex suite covers what Codex itself reports.
+      probeRuntime: async ({ args }) =>
+        fakeCodexProbeOutput({ context7: true, playwright: true }, args),
+      spawn: (_command, args, options) => {
+        const stageId = options.env.NITELY_OUTPUT_DIR?.split("/").at(-2) ?? "unknown";
+        launches.set(stageId, [...args]);
+        const child = new EventEmitter() as EventEmitter & { stdin: Writable };
+        child.stdin = new Writable({
+          write(_chunk, _encoding, callback) {
+            callback();
+          },
+          final(callback) {
+            const output = stageId === "reflect" ? "notes.md" : "implementation.md";
+            writeFile(join(options.env.NITELY_OUTPUT_DIR!, output), "done\n", "utf8")
+              .then(() => child.emit("close", 0), (error) => child.emit("error", error));
+            callback();
+          },
+        });
+        return child;
+      },
+    });
+
+    await runFlow(
+      { flowPath, repoPath: repo, inputs: {} },
+      { createRunId: () => runId, backend },
+    );
+    return {
+      launches,
+      repo,
+      runId,
+      runDirectory: join(repo, ".nitely", "runs", runId),
+    };
+  }
+
+  function disabledServers(args: readonly string[] | undefined): string[] {
+    return (args ?? []).flatMap((arg) => {
+      const match = /^mcp_servers\.([^.]+)\.enabled=false$/.exec(arg);
+      return match ? [match[1]!] : [];
+    });
+  }
+
+  it("launches Codex with only the MCP servers each stage declares", async () => {
+    const { launches, repo, runId, runDirectory } = await runCodexStages();
+
+    // reflect declares none, so every configured server is off.
+    expect(disabledServers(launches.get("reflect"))).toEqual(["context7", "playwright"]);
+    // implement declares context7, so only playwright is off.
+    expect(disabledServers(launches.get("implement"))).toEqual(["playwright"]);
+    // Neither declares the runtime-registered Apps connector.
+    expect(launches.get("reflect")).toContain("features.apps=false");
+    expect(launches.get("implement")).toContain("features.apps=false");
+
+    const store = new EventStore(join(repo, ".nitely", "events.db"));
+    const events = store.list(runId);
+    store.close();
+    const payloadFor = (stageId: string) =>
+      events.find(
+        (event) => event.type === "stage.runtime.mcp-servers" && event.stageId === stageId,
+      )?.payload;
+    expect(payloadFor("reflect")).toEqual({
+      enforcement: "enforced",
+      enabled: [],
+      disabled: ["context7", "playwright", "codex_apps"],
+    });
+    expect(payloadFor("implement")).toEqual({
+      enforcement: "enforced",
+      enabled: ["context7"],
+      disabled: ["playwright", "codex_apps"],
+    });
+
+    const evidence = await readFile(join(runDirectory, "evidence.md"), "utf8");
+    expect(evidence).toContain("MCP servers: declared only where the runtime supports it");
+    expect(evidence).toContain(
+      "MCP servers, attempt 1: enforced; enabled: none; disabled: context7, playwright, codex_apps",
+    );
+    expect(evidence).toContain(
+      "MCP servers, attempt 1: enforced; enabled: context7; disabled: playwright, codex_apps",
+    );
+  });
+
+  it("loads every configured MCP server when the flow sets globalMcpServers to true", async () => {
+    const { launches, runDirectory } = await runCodexStages({ globalMcpServers: true });
+
+    expect(disabledServers(launches.get("reflect"))).toEqual([]);
+    expect(disabledServers(launches.get("implement"))).toEqual([]);
+    expect(launches.get("reflect")).not.toContain("features.apps=false");
+    const evidence = await readFile(join(runDirectory, "evidence.md"), "utf8");
+    expect(evidence).toContain("MCP servers: every configured server");
+  });
+});
+
 describe("stage read policies", () => {
   async function runWithReads(reads?: {
     flow?: Record<string, unknown>;
@@ -17687,6 +18091,25 @@ describe("stage read policies", () => {
     expect(evidence).toContain("Max file bytes: 8192");
     // The review gate falls back to the flow value, not the stage override.
     expect(evidence).toContain("Max file bytes: 4096");
+  });
+
+  it("states the tool output budget in the prompt and records it per stage", async () => {
+    const { prompt, evidence } = await runWithReads({
+      flow: { maxToolOutputTokens: 4000 },
+      stage: { maxToolOutputTokens: 2500 },
+    });
+
+    expect(prompt).toContain("Each tool output is kept to about 2500 tokens of context");
+    expect(evidence).toContain("Max tool output tokens: 2500");
+    // The review gate falls back to the flow value.
+    expect(evidence).toContain("Max tool output tokens: 4000");
+  });
+
+  it("leaves the tool output budget out when no flow or stage sets it", async () => {
+    const { prompt, evidence } = await runWithReads();
+
+    expect(prompt).not.toContain("Each tool output is kept to about");
+    expect(evidence).not.toContain("Max tool output tokens:");
   });
 
   it("fails closed when a stage demands enforcement the injected executor lacks", async () => {

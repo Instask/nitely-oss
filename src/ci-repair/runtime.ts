@@ -16,6 +16,7 @@ import {
   type CiRepairCycleDependencies,
   type CiRepairCycleResult,
 } from "../ci-repair.js";
+import { changeMutationDomains, runGuardedMutation } from "../coordination/claims.js";
 import { redactText } from "../context/redaction.js";
 import { EventStore } from "../events/store.js";
 import { eventStorePath } from "../run/project.js";
@@ -202,7 +203,48 @@ export async function submitCiRepair(input: {
     const dependencies: CiRepairCycleDependencies = {
       applySamePullRequestRepair: async (repairInput) => {
         if (samePullRequestUpdate) return { updatedHeadSha: samePullRequestUpdate.updatedHeadSha };
-        const updated = await input.dependencies.applySamePullRequestRepair(repairInput);
+        const parts = input.observation.repository.split("/");
+        const owner = parts[0];
+        const repository = parts[1];
+        if (parts.length !== 2 || !owner || !repository) {
+          throw new Error("work coordination repair: repository is invalid");
+        }
+        const guarded = await runGuardedMutation({
+          repoPath: input.repoPath,
+          domains: changeMutationDomains({
+            action: "repair",
+            pull: {
+              owner,
+              repository,
+              number: input.observation.pullRequest,
+            },
+          }),
+          observedHead: admissionCurrentHeadSha,
+          runId: `ci-repair:${idempotencyKey}`,
+          idempotencyKey,
+          effect: () => input.dependencies.applySamePullRequestRepair(repairInput),
+          resultOf: (updated) => ({ head: updated.updatedHeadSha }),
+        });
+        if (guarded.decision === "replay") {
+          samePullRequestUpdate = {
+            updatedHeadSha: guarded.record.head,
+            receipt: `${sourceIdentity}:${guarded.record.head}`,
+          };
+          evidence = {
+            ...evidence,
+            samePullRequestUpdate,
+            updatedAt: new Date().toISOString(),
+          };
+          store.save(evidence);
+          return { updatedHeadSha: guarded.record.head };
+        }
+        if (guarded.decision !== "proceed") {
+          const detail = guarded.decision === "conflict"
+            ? guarded.ownerRunId
+            : guarded.reason;
+          throw new Error(`work coordination ${guarded.decision}: ${detail}`);
+        }
+        const updated = guarded.result;
         samePullRequestUpdate = {
           updatedHeadSha: updated.updatedHeadSha,
           receipt: `${sourceIdentity}:${updated.updatedHeadSha}`,

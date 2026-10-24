@@ -90,6 +90,17 @@ describe("diagnoseVerificationFailure", () => {
     expect(diagnose(log, 2)).toMatchObject({ classification: "environment", recommendedAction: "escalate" });
   });
 
+  it("treats a disk-full failure as environmental instead of reworking the implementation", () => {
+    const log = [
+      " ✓ test/a.test.ts (3 tests) 12ms",
+      " FAIL  test/b.test.ts > writes the fixture",
+      "Error: ENOSPC: no space left on device, write",
+      " Test Files  1 failed | 1 passed (2)",
+    ].join("\n");
+    expect(diagnose(log)).toMatchObject({ classification: "environment", recommendedAction: "retry" });
+    expect(diagnose(log, 2)).toMatchObject({ classification: "environment", recommendedAction: "escalate" });
+  });
+
   it("reworks implementation when one failing block is environmental and another is a code failure", () => {
     const log = [
       " FAIL  test/web/mobile-viewport.test.ts > renders without overflow",

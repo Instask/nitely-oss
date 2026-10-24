@@ -22,7 +22,7 @@ describe("nitely runner image", () => {
     expect(dockerfile).toContain("ARG AGENT_CLIS=\"\"");
     // A command stage is executed as `sh -c <command>`, so sh has to be there.
     expect(dockerfile).toContain('CMD ["sh"]');
-    for (const tool of ["bash", "ca-certificates", "git"]) {
+    for (const tool of ["bash", "ca-certificates", "gcc", "libc6-dev", "git"]) {
       expect(dockerfile).toContain(tool);
     }
   });

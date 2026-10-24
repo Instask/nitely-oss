@@ -3137,6 +3137,57 @@ describe("runCli", () => {
     ]);
   });
 
+  it("prints the run's runtime usage once when a remote watch ends", async () => {
+    const stdout: string[] = [];
+    const responses = [
+      {
+        run: {
+          runId: "run-usage",
+          status: "running",
+          currentStage: "implement",
+          runtimeUsage: { totalTokens: 10, knownAttempts: 1, unknownAttempts: 0 },
+        },
+      },
+      {
+        run: {
+          runId: "run-usage",
+          status: "failed",
+          currentStage: "implement",
+          runtimeUsage: {
+            totalTokens: 4_000_000,
+            inputTokens: 3_990_000,
+            freshInputTokens: 60_000,
+            cachedInputTokens: 3_930_000,
+            outputTokens: 10_000,
+            estimatedCostUsd: 1.5,
+            knownAttempts: 2,
+            unknownAttempts: 1,
+            ignored: "not a number",
+          },
+        },
+      },
+    ];
+
+    const code = await runCli(
+      ["run", "watch", "run-usage", "--server", "http://server.test", "--interval-ms", "1"],
+      { stdout: (line) => stdout.push(line), stderr: () => {} },
+      {
+        fetch: async () =>
+          new Response(JSON.stringify(responses.shift() ?? responses.at(-1)), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      },
+    );
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([
+      "RUN run-usage running stage=implement",
+      "RUN run-usage failed stage=implement",
+      "USAGE run-usage 4000000 total tokens · 3990000 input · 60000 fresh input · 3930000 cached input · 10000 output · $1.5000 estimated · 2 known attempts · 1 unknown attempt",
+    ]);
+  });
+
   it.each(["failed", "blocked", "interrupted"] as const)(
     "exits non-zero when a remote run reaches %s",
     async (terminalStatus) => {
@@ -3803,6 +3854,89 @@ None.
       "Stages:",
       "  implement\tinterrupted\tattempts: 1",
     ]);
+  });
+
+  it("prints runtime usage and each attempt's input in status, and as --json", async () => {
+    const run = {
+      runId: "run-usage",
+      status: "completed" as const,
+      flowName: "flow",
+      completedStages: ["implement"],
+      stages: [
+        {
+          stageId: "implement",
+          status: "completed" as const,
+          attempts: [{ attempt: 1, status: "completed" as const }],
+        },
+      ],
+      logs: [{ stageId: "implement", message: "secret-ish log line" }],
+      approvals: [],
+      artifacts: [],
+      gates: [],
+      orchestratorDecisions: [],
+      verificationDiagnoses: [],
+      runtimeUsage: {
+        totalTokens: 1_210,
+        inputTokens: 1_200,
+        freshInputTokens: 200,
+        cachedInputTokens: 1_000,
+        outputTokens: 10,
+        actualCostUsd: 0.0123,
+        knownAttempts: 1,
+        unknownAttempts: 0,
+      },
+      runtimeInputBreakdown: [
+        {
+          stageId: "implement",
+          attempt: 1,
+          runtime: "codex",
+          harnessPromptApproxTokens: 900,
+          usageReported: true,
+          cumulativeInputTokens: 1_200,
+          freshInputTokens: 200,
+          cachedInputTokens: 1_000,
+          outputTokens: 10,
+          usageSource: "codex.exec.turn.completed.usage",
+        },
+      ],
+    };
+    const dependencies = { getRunStatus: async () => run } as unknown as Parameters<typeof runCli>[2];
+
+    const stdout: string[] = [];
+    expect(
+      await runCli(["status", "run-usage", "--repo", "/repo"], {
+        stdout: (line) => stdout.push(line),
+        stderr: () => {},
+      }, dependencies),
+    ).toBe(0);
+    expect(stdout).toEqual([
+      "Run: run-usage",
+      "Status: completed",
+      "Flow: flow",
+      "Stages:",
+      "  implement\tcompleted\tattempts: 1",
+      "Runtime usage: 1210 total tokens · 1200 input · 200 fresh input · 1000 cached input · 10 output · $0.0123 actual · 1 known attempt",
+      "Input by attempt:",
+      "  implement attempt 1 (codex): harness prompt ~900 · fresh input 200 · cached input 1000 · cumulative input 1200 · output 10 [codex.exec.turn.completed.usage]",
+    ]);
+
+    const jsonOut: string[] = [];
+    expect(
+      await runCli(["status", "run-usage", "--repo", "/repo", "--json"], {
+        stdout: (line) => jsonOut.push(line),
+        stderr: () => {},
+      }, dependencies),
+    ).toBe(0);
+    const parsed = JSON.parse(jsonOut.join("\n"));
+    expect(parsed).toEqual({
+      runId: "run-usage",
+      status: "completed",
+      flowName: "flow",
+      stages: [{ stageId: "implement", status: "completed", attempts: 1 }],
+      runtimeUsage: run.runtimeUsage,
+      runtimeInputBreakdown: run.runtimeInputBreakdown,
+    });
+    expect(jsonOut.join("\n")).not.toContain("secret-ish log line");
   });
 
   it("prints reproducibility diagnostics in projected status output", async () => {

@@ -31,10 +31,9 @@ export interface CommandDecision {
 
 /**
  * A backend-supplied way to enforce the policy on the commands an agent spawns
- * for itself. Nothing in the first slice provides one: container isolation
- * bounds the filesystem and the network, not which binaries run inside the
- * image. A mechanism registered here is what flips a demanded policy from
- * fail-closed to enforced.
+ * for itself. The OCI backend registers `oci-ptrace-seccomp` for this. A
+ * mechanism that cannot actually supervise those commands must not report
+ * support: the backend refuses to launch rather than downgrade to a prompt.
  */
 export interface CommandMediationMechanism {
   readonly id: string;
@@ -131,6 +130,109 @@ export function commandRuleMatches(
   }
   const expression = globToRegExp(trimmed);
   return commandLines(argv).some((line) => expression.test(line));
+}
+
+export interface MediatedExec {
+  /** Path string passed to execve or execveat. Empty when the kernel gave none. */
+  readonly requestedPath: string;
+  /**
+   * Canonical path in the tracee's mount namespace. Null when the path cannot
+   * be resolved, including memfd, AT_EMPTY_PATH, and a symlink loop.
+   */
+  readonly canonicalPath: string | null;
+  /** Arguments after the program slot. The tracee's argv[0] is ignored. */
+  readonly args: readonly string[];
+  /**
+   * Canonical interpreter of a shebang, when the file is a script. An empty
+   * string means a shebang was present and its interpreter could not be
+   * trusted. Omit it when the file has no shebang.
+   */
+  readonly interpreterPath?: string | null;
+}
+
+/**
+ * Decide an exec the mediator actually observed. Allow-list matches only the
+ * resolved file, so a symlink whose basename is allowed and whose target is
+ * not stays denied. Deny matches either the requested path or the resolved
+ * file. A shebang runs its interpreter inside that same exec, so the
+ * interpreter has to pass the same policy.
+ */
+export function decideMediatedExec(
+  policy: CommandMediationPolicy,
+  exec: MediatedExec,
+): CommandDecision {
+  if (policy.mode === "unrestricted") {
+    return { decision: "allow", reason: "command mode unrestricted" };
+  }
+  if (
+    exec.canonicalPath === null ||
+    !exec.canonicalPath.startsWith("/") ||
+    exec.canonicalPath.trim() === ""
+  ) {
+    return { decision: "deny", reason: "executable path could not be resolved" };
+  }
+  if (exec.interpreterPath === "") {
+    return { decision: "deny", reason: "shebang interpreter denied" };
+  }
+  const canonicalArgv = [exec.canonicalPath, ...exec.args];
+  const requestedArgv =
+    exec.requestedPath === ""
+      ? canonicalArgv
+      : [exec.requestedPath, ...exec.args];
+  const views =
+    requestedArgv[0] === canonicalArgv[0]
+      ? [canonicalArgv]
+      : [canonicalArgv, requestedArgv];
+  for (const argv of views) {
+    const denyRule = policy.deny.find((rule) => commandRuleMatches(rule, argv));
+    if (denyRule) {
+      return {
+        decision: "deny",
+        rule: denyRule,
+        reason: `denied by deny rule ${denyRule}`,
+      };
+    }
+  }
+  if (policy.mode === "none") {
+    return { decision: "deny", reason: "command mode none forbids every command" };
+  }
+  const interpreterDenial = (): CommandDecision | undefined => {
+    if (exec.interpreterPath === undefined || exec.interpreterPath === null) {
+      return undefined;
+    }
+    const interpreter = decideMediatedExec(policy, {
+      requestedPath: exec.interpreterPath,
+      canonicalPath: exec.interpreterPath,
+      args: [],
+    });
+    if (interpreter.decision === "allow") return undefined;
+    return interpreter.rule
+      ? {
+          decision: "deny",
+          rule: interpreter.rule,
+          reason: `shebang interpreter denied by rule ${interpreter.rule}`,
+        }
+      : { decision: "deny", reason: "shebang interpreter denied" };
+  };
+  if (policy.mode === "deny-list") {
+    return interpreterDenial() ?? { decision: "allow", reason: "no deny rule matched" };
+  }
+  const allowRule = policy.allow.find((rule) =>
+    commandRuleMatches(rule, canonicalArgv),
+  );
+  if (!allowRule) {
+    return {
+      decision: "deny",
+      reason: "no allow rule matched the resolved executable",
+    };
+  }
+  return (
+    interpreterDenial() ?? {
+      decision: "allow",
+      rule: allowRule,
+      reason: `allowed by allow rule ${allowRule}`,
+    }
+  );
 }
 
 export function decideCommand(
@@ -245,4 +347,109 @@ export function describeCommandMediation(
     case "unenforceable":
       return `${policy.mode} demanded enforcement that is unavailable; ${rules}`;
   }
+}
+
+const MEDIATION_LOG_KEYS = new Set([
+  "advisory",
+  "argc",
+  "decision",
+  "decisions",
+  "denials",
+  "event",
+  "mechanism",
+  "mode",
+  "policyId",
+  "program",
+  "reason",
+  "rule",
+]);
+
+/**
+ * Redacted lines from one mediator log. Records that carry anything beyond the
+ * fixed fields are dropped, so an argv or a secret written into the file cannot
+ * ride into evidence. Program names are basenames only.
+ */
+export function summarizeCommandMediationLog(text: string): string[] {
+  const decisions: Array<{
+    decision: string;
+    program: string;
+    rule?: string;
+    argc?: number;
+    reason: string;
+  }> = [];
+  let effective: string | undefined;
+  let sawExit = false;
+  for (const raw of text.split("\n")) {
+    const trimmed = raw.trim();
+    if (trimmed === "") continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed) as unknown;
+    } catch {
+      continue;
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      continue;
+    }
+    const record = parsed as Record<string, unknown>;
+    if (Object.keys(record).some((key) => !MEDIATION_LOG_KEYS.has(key))) continue;
+    const strings = Object.values(record).filter(
+      (value): value is string => typeof value === "string",
+    );
+    if (strings.some((value) => value.length > 300 || value.includes("\n"))) {
+      continue;
+    }
+    const event = record.event;
+    if (event === "effective") {
+      const mechanism = stringField(record.mechanism) ?? "unknown";
+      const mode = stringField(record.mode) ?? "unknown";
+      const policyId = stringField(record.policyId) ?? "unknown";
+      effective = `effective ${mechanism} ${mode} ${policyId}`;
+      continue;
+    }
+    if (event === "supervisor-exit") {
+      sawExit = true;
+      continue;
+    }
+    if (event !== "decision" && event !== "launch" && event !== "error") continue;
+    const decision = event === "error" ? "error" : stringField(record.decision);
+    if (decision !== "allow" && decision !== "deny" && decision !== "error") {
+      continue;
+    }
+    const program = programField(record.program);
+    const reason = stringField(record.reason) ?? "unspecified";
+    const rule = stringField(record.rule);
+    const argc = typeof record.argc === "number" && Number.isSafeInteger(record.argc)
+      ? record.argc
+      : undefined;
+    decisions.push({
+      decision,
+      program,
+      reason,
+      ...(rule ? { rule } : {}),
+      ...(argc !== undefined ? { argc } : {}),
+    });
+  }
+  if (effective === undefined && decisions.length === 0 && !sawExit) return [];
+  const denials = decisions.filter((item) => item.decision === "deny");
+  return [
+    effective ?? "effective record missing",
+    `decisions ${decisions.length}; denials ${denials.length}`,
+    ...denials.slice(0, 20).map((item) => {
+      const rule = item.rule ? ` rule ${item.rule}` : "";
+      const argc = item.argc === undefined ? "unknown" : String(item.argc);
+      return `denied ${item.program}${rule} argc ${argc} (${item.reason})`;
+    }),
+    sawExit ? "supervisor exit recorded" : "supervisor exit missing",
+  ];
+}
+
+function stringField(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+function programField(value: unknown): string {
+  if (typeof value !== "string") return "unresolved";
+  if (value === "unresolved") return value;
+  return /^[A-Za-z0-9._+-]{1,128}$/u.test(value) ? value : "unresolved";
 }

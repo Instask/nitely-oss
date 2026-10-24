@@ -350,6 +350,27 @@ attempt in `stage.runtime.calls`. With an OTLP endpoint configured, each run is
 exported as an OpenTelemetry trace built from these events; see
 [Run Traces](tracing.md).
 
+A runtime's reported input is not the prompt Nitely packed. It covers the
+runtime's own session prefix and every reread inside its tool loop, and most of
+it is served from the provider's cache. Codex reports one cumulative
+`turn.completed` usage per turn, so an implement turn that runs many commands
+can report millions of input tokens against a prompt of a few thousand. The
+Console stage details (`Input by attempt`) and the evidence `## Runtime Usage`
+section therefore show each attempt's input three ways, side by side: the harness prompt
+(`stage.context.usage`), fresh input, and cached input, with the cumulative
+input kept next to them. The runtime figures are the attempt's final usage
+snapshot. Nitely does not split them into per-call numbers, and an attempt
+that never produced a snapshot is listed as not reported rather than counted
+as zero.
+
+The CLI shows the same figures. `nitely status <run-id>` prints the run's
+`Runtime usage` total and an `Input by attempt` line per attempt, and
+`nitely status <run-id> --json` returns both as `runtimeUsage` and
+`runtimeInputBreakdown`. `nitely run watch` prints one `USAGE` line with the
+run's total when the run ends. Cost appears only when every attempt reported
+the same kind of cost: `actual` (provider-reported) or `estimated`
+(calculated).
+
 ## Operator Question Policy
 
 Agent stages may write `question.json` to ask a human for a decision. A
