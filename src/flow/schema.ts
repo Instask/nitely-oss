@@ -68,6 +68,11 @@ export const contextControlsSchema = z.object({
   // stage. Unset means isolate wherever the runtime supports it; false demands
   // isolation and fails closed when it is not available; true opts back in.
   globalSkills: z.boolean().optional(),
+  // Whether every MCP server the operator configured may load into this stage.
+  // Unset means load only the stage's required_mcp_servers wherever the
+  // runtime can restrict them; false demands that restriction and fails closed
+  // when it is not available; true opts back into every configured server.
+  globalMcpServers: z.boolean().optional(),
   // Whether a repeated execution of this stage in the same worktree continues
   // the runtime's previous session. Defaults to on for task-plan loop stages.
   sessionReuse: z.boolean().optional(),
@@ -83,6 +88,14 @@ export const readPolicySchema = z.object({
   maxFileBytes: z.number().int().positive().optional(),
   /** Repo-relative globs the stage must not read in bulk. */
   deny: z.array(z.string().min(1)).optional(),
+  /**
+   * Largest single tool output, in tokens, the runtime keeps in the model's
+   * context. Every later model call in the turn resends what earlier tool
+   * calls returned, so one broad search or long file read is paid for again on
+   * each call after it. Codex enforces this with `tool_output_token_limit`;
+   * other runtimes only see it in the prompt. Unset keeps the runtime default.
+   */
+  maxToolOutputTokens: z.number().int().positive().optional(),
   /**
    * `advisory` states the bound in the prompt and records it in evidence.
    * `required` demands byte-level enforcement from the execution backend and

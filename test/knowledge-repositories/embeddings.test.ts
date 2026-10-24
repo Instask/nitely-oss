@@ -1,12 +1,23 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  FrozenSemanticEmbeddingProvider,
   LocalHashEmbeddingProvider,
   OllamaEmbeddingProvider,
   OpenAICompatibleEmbeddingProvider,
 } from "../../src/knowledge-repositories/embeddings.js";
 
 describe("knowledge embedding providers", () => {
+  it("replays frozen semantic vectors and fails closed for unknown text", async () => {
+    const provider = new FrozenSemanticEmbeddingProvider();
+    expect(provider.identity).toMatchObject({ id: "frozen-semantic", model: "nomic-embed-text", semantic: true, dimensions: 768 });
+    expect(provider.identity.configurationDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
+    const vector = await provider.embedQuery(provider.knownText());
+    expect(vector).toHaveLength(768);
+    expect(Math.hypot(...vector)).toBeGreaterThan(0);
+    await expect(provider.embedQuery("this text was not frozen")).rejects.toThrow(/no vector/);
+  });
+
   it("marks local hash vectors as deterministic but non-semantic", async () => {
     const provider = new LocalHashEmbeddingProvider({ dimensions: 32 });
     const [first, second] = await provider.embedDocuments([

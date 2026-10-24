@@ -1,12 +1,13 @@
 import { resolveRuntimeEffort } from "./effort.js";
 import { randomUUID } from "node:crypto";
-import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type {
   AgentResult,
+  AgentMcpServersRequest,
   AgentReadPolicy,
   AgentRuntimePreflightResult,
   CommandResult,
@@ -22,11 +23,16 @@ import {
   createDefaultAgentRuntimeRegistry,
   LocalExecutionBackend,
   parseRuntimeUsage,
+  resolveMcpServerRestriction,
   type AgentRuntimeRegistry,
   type ClaudePermissionMode,
   type RuntimeEnv,
 } from "./local.js";
+import { createCodexExecCapture } from "./codex-activity.js";
+import { withCodexToolOutputLimit } from "./codex-tool-output.js";
+import { applyCodexRolloutCalls } from "./codex-rollout.js";
 import {
+  captureCallContent,
   createPiJsonCapture,
   isPiJsonRuntime,
   normalizePiJsonResult,
@@ -47,7 +53,18 @@ import {
   resolveCommandMediation,
   type CommandMediationMechanism,
   type CommandMediationOutcome,
+  type CommandMediationPolicy,
 } from "./command-mediation.js";
+import {
+  commandMediatorContainerArgs,
+  commandMediatorMountSpec,
+  commandMediatorScriptPath,
+  commandPolicyDocument,
+  createOciCommandMediationMechanism,
+  OCI_COMMAND_MEDIATION_LIMITATION,
+  OCI_COMMAND_MEDIATOR_ID,
+  ociCommandMediationSupported,
+} from "./command-mediator.js";
 import {
   ContainerNetworkAllowlistGateway,
   formatNetworkPolicyDescription,
@@ -69,7 +86,8 @@ export interface SandboxProcessInput {
   signal?: AbortSignal;
   /**
    * Receives stdout instead of a raw buffer; `maxOutputBytes` then counts
-   * what it holds. Used to keep Pi's JSON event stream in bounded memory.
+   * what it holds. Used to keep Pi and Codex JSON event streams in bounded
+   * memory.
    */
   stdoutCapture?: PiJsonCapture;
 }
@@ -130,6 +148,9 @@ export interface SandboxPolicyV1 {
   readonly tmpfsExec: boolean;
 }
 
+/** Disk-backed temp directory inside OCI containers; TMPDIR points here. */
+const OCI_SCRATCH_PATH = "/nitely/scratch";
+
 const DEFAULT_RESOURCES: OciResourcePolicy = {
   cpus: 1,
   memoryBytes: 1024 * 1024 * 1024,
@@ -170,10 +191,10 @@ export interface OciExecutionBackendOptions {
   engineSocketVerifier?: EngineSocketVerifier;
   /**
    * Mediates the commands an agent spawns for itself inside the sandbox.
-   * Absent by default: container isolation bounds the filesystem and the
-   * network, not which binaries run inside the image.
+   * Omitted: use oci-ptrace-seccomp when this host can run it. `null`: no
+   * mechanism, so a stage that demands enforcement fails closed.
    */
-  commandMediation?: CommandMediationMechanism;
+  commandMediation?: CommandMediationMechanism | null;
   /** Test seam for the HTTP CONNECT allowlist gateway. */
   networkGatewayFactory?: (
     domains: readonly string[],
@@ -212,6 +233,12 @@ const OCI_LIFECYCLE_LABELS = [
   "com.nitely.expires-at",
   "com.nitely.instance-id",
 ] as const;
+
+const OCI_RUNTIME_PROBE_TIMEOUT_MS = 60_000;
+
+function unsupervisedCommandMediation(stageId: string, mechanism: string): string {
+  return `stage ${stageId}: command mediation mechanism ${mechanism} cannot supervise agent-spawned commands; refusing to launch an unmediated workload`;
+}
 
 function assertEnvironmentName(name: string): void {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
@@ -493,6 +520,7 @@ function withPartialAgentOutput(
       stderr,
       exitCode: 1,
       ...(input.model ? { model: input.model } : {}),
+      ...(captureCallContent() ? { captureContent: true } : {}),
     });
     Object.assign(carrier, { stdout: normalized.stdout, stderr: normalized.stderr });
     if (carrier !== source) Object.assign(source, { stdout: normalized.stdout, stderr: normalized.stderr });
@@ -671,7 +699,13 @@ export class OciExecutionBackend implements ExecutionBackend {
       allowlistRaw: networkDomains.join(","),
     });
     this.networkGatewayFactory = options.networkGatewayFactory;
-    this.commandMediation = options.commandMediation;
+    this.commandMediation =
+      options.commandMediation === null
+        ? undefined
+        : options.commandMediation ??
+          (ociCommandMediationSupported()
+            ? createOciCommandMediationMechanism()
+            : undefined);
     this.image = image;
     if (options.imageIdentity) {
       this.resolvedImage = options.imageIdentity;
@@ -811,9 +845,11 @@ export class OciExecutionBackend implements ExecutionBackend {
         this.networkPolicy.mode === "allowlist"
           ? "agent egress uses an internal-only workload network and an HTTP CONNECT allowlist gateway; direct sockets have no external route and non-allowlisted CONNECT is denied"
           : "without NITELY_OCI_NETWORK_ALLOWLIST, agent runtimes must be offline or fail preflight; built-in Codex/Claude/GLM/Grok/OpenRouter/Pi/Together require the allowlist gateway",
-        this.commandMediation
-          ? `agent-spawned commands are mediated by ${this.commandMediation.id}`
-          : "agent-spawned commands are not mediated inside the image; a stage that sets capabilities.commands.advisory false fails closed instead of running unmediated",
+        this.commandMediation?.id === OCI_COMMAND_MEDIATOR_ID
+          ? OCI_COMMAND_MEDIATION_LIMITATION
+          : this.commandMediation
+            ? `agent-spawned commands are mediated by ${this.commandMediation.id}`
+            : "agent-spawned commands are not mediated inside the image; a stage that sets capabilities.commands.advisory false fails closed instead of running unmediated",
         "aggregate bind-mount disk quota (NITELY_OCI_DISK_BYTES) is not supported and will not be; setting it fails closed. Use per-file NITELY_OCI_MAX_FILE_BYTES and captured-output NITELY_OCI_MAX_CAPTURED_OUTPUT_BYTES",
       ],
     };
@@ -985,6 +1021,20 @@ export class OciExecutionBackend implements ExecutionBackend {
   private async executePlan(plan: {
     containerName: string;
     launch: SandboxProcessInput;
+    scratchDirectory?: string;
+  }): Promise<SandboxProcessResult> {
+    try {
+      return await this.executeContainerPlan(plan);
+    } finally {
+      if (plan.scratchDirectory) {
+        await rm(plan.scratchDirectory, { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
+  }
+
+  private async executeContainerPlan(plan: {
+    containerName: string;
+    launch: SandboxProcessInput;
   }): Promise<SandboxProcessResult> {
     await this.verifyRootlessEngine();
     let result: SandboxProcessResult | undefined;
@@ -1062,7 +1112,7 @@ export class OciExecutionBackend implements ExecutionBackend {
     networkPlan?: ContainerNetworkPlan,
     visibleInputPaths?: readonly string[],
     secretNames?: readonly string[],
-  ): Promise<{ containerName: string; launch: SandboxProcessInput }> {
+  ): Promise<{ containerName: string; launch: SandboxProcessInput; scratchDirectory?: string }> {
     if (!ws.path) {
       throw new Error("OCI execution backend requires a host worktree path");
     }
@@ -1086,6 +1136,17 @@ export class OciExecutionBackend implements ExecutionBackend {
     }
     const containerName = this.containerName();
     assertContainerName(containerName);
+    // The /tmp tmpfs counts against memory and is small; a full test suite in
+    // an agent container exhausted a 1 GiB one in production (ENOSPC), so the
+    // agent could not finish verifying. A disk-backed scratch directory beside
+    // the run, removed with the container, takes TMPDIR instead.
+    const scratchDirectory = options?.isolatedWorkspace
+      ? undefined
+      : join(dirname(runRoot), ".oci-scratch", containerName);
+    if (scratchDirectory) {
+      assertDockerMountPath(scratchDirectory);
+      await mkdir(scratchDirectory, { recursive: true });
+    }
     const timeoutMs = options?.timeoutMs ?? this.resources.timeoutMs;
     const labels = lifecycleLabels({
       runId: options?.runId ?? ws.runId,
@@ -1137,6 +1198,14 @@ export class OciExecutionBackend implements ExecutionBackend {
         `type=bind,src=${workspace},dst=/workspace${options?.isolatedWorkspace ? ",readonly" : ""}`,
       ]),
       ...(options?.isolatedWorkspace ? [] : ["--mount", "type=bind,src=/dev/null,dst=/workspace/.git,readonly"]),
+      ...(scratchDirectory
+        ? [
+          "--mount",
+          `type=bind,src=${scratchDirectory},dst=${OCI_SCRATCH_PATH}`,
+          "--env",
+          `TMPDIR=${OCI_SCRATCH_PATH}`,
+        ]
+        : []),
       ...runArtifactMountArgs,
       ...(options?.isolatedWorkspace
         ? ["--tmpfs", `/nitely/output:rw,nosuid,nodev,noexec,mode=1777,size=${this.resources.tmpfsBytes}`]
@@ -1163,6 +1232,7 @@ export class OciExecutionBackend implements ExecutionBackend {
         maxOutputBytes: this.resources.maxCapturedOutputBytes,
         signal: options?.signal,
       },
+      ...(scratchDirectory ? { scratchDirectory } : {}),
     };
   }
 
@@ -1247,6 +1317,7 @@ export class OciExecutionBackend implements ExecutionBackend {
       attemptDirectory: string;
       timeoutMs?: number;
       signal?: AbortSignal;
+      mcpServers?: AgentMcpServersRequest;
       visibleInputPaths?: string[];
       readPolicy?: AgentReadPolicy;
     },
@@ -1265,6 +1336,9 @@ export class OciExecutionBackend implements ExecutionBackend {
     if (mediation.status === "unenforceable") {
       throw commandMediationError(input.stage.id, mediation);
     }
+    if (mediation.status === "enforced" && !this.commandSupervisorReady()) {
+      throw new Error(unsupervisedCommandMediation(input.stage.id, mediation.mechanism));
+    }
     const runtimeId = input.stage.runtime;
     if (!runtimeId) {
       throw new Error(`agent runtime for stage ${input.stage.id} is not configured`);
@@ -1278,6 +1352,8 @@ export class OciExecutionBackend implements ExecutionBackend {
     let internalNetwork: InternalNetwork | undefined;
     let boundedWorkspace: { path: string; cleanup: string } | undefined;
     let networkPlan: ContainerNetworkPlan | undefined;
+    let mediatorDir: string | undefined;
+    let mcpServers: Awaited<ReturnType<typeof resolveMcpServerRestriction>> | undefined;
     try {
       if (networkDecision.mode === "allowlist") {
         if (!this.networkGatewayFactory) {
@@ -1407,9 +1483,46 @@ export class OciExecutionBackend implements ExecutionBackend {
         input.visibleInputPaths ?? [],
         secretNames,
       );
-      const runtimeArgs = [...launch.args];
+      let runtimeArgs = [...launch.args];
       if (launch.runtime === "codex" && runtimeArgs[0] === "exec") {
         runtimeArgs.splice(1, 0, "--skip-git-repo-check");
+      }
+      // The probe runs the runtime CLI in its own offline container with the
+      // same image, mounts, and environment, so it sees exactly the config
+      // layers the launch will (an image's system config included).
+      mcpServers = await resolveMcpServerRestriction({
+        runtime,
+        request: input.mcpServers,
+        launch: { ...launch, args: runtimeArgs },
+        probe: async (args) => {
+          const probePlan = await this.commandPlan(
+            ws,
+            "",
+            { ...options, timeoutMs: OCI_RUNTIME_PROBE_TIMEOUT_MS, signal: input.signal },
+            workspaceMountArgs,
+            undefined,
+            input.visibleInputPaths ?? [],
+            secretNames,
+          );
+          probePlan.launch.args.splice(-3, 3, launch.command, ...args);
+          probePlan.launch.stdin = undefined;
+          const probed = await this.executePlan(probePlan);
+          if (probed.exitCode !== 0) {
+            throw new Error(`${launch.command} ${args.join(" ")} exited with code ${probed.exitCode}`);
+          }
+          return probed.stdout;
+        },
+        env: runtimeEnv,
+        // The container has no user config of its own to fall back on.
+        allowConfigFallback: false,
+        stageId: input.stage.id,
+      });
+      if (mcpServers.disable.length > 0 && runtime.mcpServerRestriction) {
+        runtimeArgs = runtime.mcpServerRestriction.disable(runtimeArgs, mcpServers.disable);
+      }
+      // Codex truncates each stored tool output to the stage's read budget.
+      if (launch.runtime === "codex") {
+        runtimeArgs = withCodexToolOutputLimit(runtimeArgs, input.readPolicy?.maxToolOutputTokens);
       }
       if (launch.runtime === "claude") {
         // A rootless engine maps the operator to uid 0 inside the container,
@@ -1430,8 +1543,15 @@ export class OciExecutionBackend implements ExecutionBackend {
         plan.launch.stdin = undefined;
       }
       const piJson = isPiJsonRuntime(launch.runtime);
-      if (piJson) plan.launch.stdoutCapture = createPiJsonCapture();
+      if (piJson) plan.launch.stdoutCapture = createPiJsonCapture({ captureContent: captureCallContent() });
+      else if (launch.runtime === "codex") plan.launch.stdoutCapture = createCodexExecCapture();
+      if (mediation.status === "enforced") {
+        await this.assertCommandMediatorPython();
+        mediatorDir = await this.prepareCommandMediator(mediation.policy);
+        this.installCommandMediator(plan.launch.args, mediatorDir);
+      }
       let executed: SandboxProcessResult;
+      const attemptStartedAtMs = Date.now();
       try {
         executed = await this.executePlan(plan);
       } catch (error) {
@@ -1451,12 +1571,19 @@ export class OciExecutionBackend implements ExecutionBackend {
           stderr: executed.stderr,
           exitCode: executed.exitCode,
           ...(input.stage.model ? { model: input.stage.model } : {}),
+          ...(captureCallContent() ? { captureContent: true } : {}),
         })
         : {
           ...executed,
           usage: parseRuntimeUsage(launch.runtime, executed.stdout),
         };
-      const usage = result.usage ? { usage: result.usage } : {};
+      const resultUsage = launch.runtime === "codex"
+        ? await applyCodexRolloutCalls(result.usage, {
+          ...this.codexRolloutHome(),
+          attemptStartedAtMs,
+        })
+        : result.usage;
+      const usage = resultUsage ? { usage: resultUsage } : {};
       if (result.exitCode !== 0) {
         if (
           input.timeoutMs !== undefined &&
@@ -1493,6 +1620,7 @@ export class OciExecutionBackend implements ExecutionBackend {
         // The container never mounts the operator's home; HOME is a throwaway
         // path inside the sandbox, so no user-global skill pack can load.
         globalSkills: { isolated: true },
+        ...(mcpServers?.outcome ? { mcpServers: mcpServers.outcome } : {}),
       };
     } finally {
       await gateway?.dispose().catch(() => undefined);
@@ -1504,14 +1632,111 @@ export class OciExecutionBackend implements ExecutionBackend {
           () => undefined,
         );
       }
+      if (mediatorDir) {
+        await rm(mediatorDir, { recursive: true, force: true }).catch(() => undefined);
+      }
     }
   }
 
   /**
    * The stage's command policy governs what the agent spawns for itself. The
-   * runtime CLI Nitely launches is the agent, not one of its commands, so it is
-   * never matched against the policy.
+   * runtime CLI Nitely launches is the agent, not one of its commands, so the
+   * mediator exempts that first exec and decides every later one.
    */
+  private commandSupervisorReady(): boolean {
+    return (
+      this.commandMediation?.id === OCI_COMMAND_MEDIATOR_ID &&
+      ociCommandMediationSupported()
+    );
+  }
+
+  private async assertCommandMediatorPython(): Promise<void> {
+    const probeName = this.containerName();
+    try {
+      const result = await this.processRunner({
+        command: this.engineCommand,
+        args: [
+          "run",
+          "--rm",
+          "--name",
+          probeName,
+          "--pull=never",
+          "--network=none",
+          "--read-only",
+          "--cap-drop=ALL",
+          "--security-opt=no-new-privileges:true",
+          "--entrypoint",
+          "python3",
+          this.resolvedImage ?? this.image,
+          "-c",
+          "import ctypes, os, sys; sys.exit(0 if os.uname().machine == 'x86_64' else 1)",
+        ],
+        env: this.engineEnv,
+        timeoutMs: 10_000,
+        maxOutputBytes: 4096,
+      });
+      if (result.exitCode !== 0) {
+        throw new Error(
+          "OCI command mediation requires python3 on Linux x86_64 inside the image; refusing to launch an unmediated workload",
+        );
+      }
+    } finally {
+      await this.processRunner({
+        command: this.engineCommand,
+        args: ["rm", "--force", probeName],
+        env: this.engineEnv,
+        timeoutMs: 3_000,
+        maxOutputBytes: 4096,
+      }).catch(() => undefined);
+    }
+  }
+
+  private async prepareCommandMediator(
+    policy: CommandMediationPolicy,
+  ): Promise<string> {
+    const script = commandMediatorScriptPath();
+    if (!script) {
+      throw new Error(
+        "OCI command mediator program is not installed; refusing to launch an unmediated workload",
+      );
+    }
+    const dir = await mkdtemp(join(tmpdir(), "nitely-command-mediator-"));
+    await cp(script, join(dir, "command-mediator.py"));
+    await writeFile(
+      join(dir, "command-policy.json"),
+      `${commandPolicyDocument(policy)}\n`,
+      { mode: 0o444 },
+    );
+    return dir;
+  }
+
+  private installCommandMediator(args: string[], hostDir: string): void {
+    const image = this.resolvedImage ?? this.image;
+    const imageIndex = args.lastIndexOf(image);
+    if (imageIndex < 0 || imageIndex >= args.length - 1) {
+      throw new Error("OCI command mediation could not find the workload command");
+    }
+    assertDockerMountPath(hostDir);
+    const runtime = args.slice(imageIndex + 1);
+    const command = runtime[0];
+    if (!command) {
+      throw new Error("OCI command mediation could not find the workload command");
+    }
+    args.splice(
+      imageIndex,
+      0,
+      "--mount",
+      commandMediatorMountSpec(hostDir),
+      "--env",
+      "PYTHONDONTWRITEBYTECODE=1",
+    );
+    args.splice(
+      imageIndex + 5,
+      runtime.length,
+      ...commandMediatorContainerArgs({ command, args: runtime.slice(1) }),
+    );
+  }
+
   private resolveCommandMediation(
     policy: ReturnType<typeof effectiveCapabilityPolicy>["policy"],
   ): CommandMediationOutcome {
@@ -1835,6 +2060,24 @@ export class OciExecutionBackend implements ExecutionBackend {
     return args;
   }
 
+  /**
+   * Where the host sees the container's CODEX_HOME, so a Codex attempt's
+   * rollout can be read after the container exits. Without a host-backed
+   * CODEX_HOME the rollout lives in the container's throwaway home.
+   */
+  private codexRolloutHome(): { codexHome?: string; unavailableReason?: string } {
+    const configured = this.env.NITELY_OCI_CODEX_HOME_HOST_PATH?.trim();
+    if (configured) return { codexHome: configured };
+    const passed = this.environmentAllowlist.includes("CODEX_HOME")
+      ? this.env.CODEX_HOME?.trim()
+      : undefined;
+    if (passed) return { codexHome: passed };
+    return {
+      unavailableReason:
+        "the container's CODEX_HOME is not a host path Nitely knows (allowlist CODEX_HOME bind-mounted at the same path, or set NITELY_OCI_CODEX_HOME_HOST_PATH), so the rollout does not outlive the container",
+    };
+  }
+
   private runtimeSecretNames(runtime: {
     id: string;
     requiredEnv?: string[][];
@@ -1916,6 +2159,12 @@ export class OciExecutionBackend implements ExecutionBackend {
     if (mediation.status === "unenforceable") {
       return { available: false, reason: mediation.reason };
     }
+    if (mediation.status === "enforced" && !this.commandSupervisorReady()) {
+      return {
+        available: false,
+        reason: unsupervisedCommandMediation(input.stage.id, mediation.mechanism),
+      };
+    }
     let gateway: NetworkAllowlistGateway | undefined;
     let internalNetwork: InternalNetwork | undefined;
     try {
@@ -1933,6 +2182,9 @@ export class OciExecutionBackend implements ExecutionBackend {
       }
       await this.capabilityWorkspaceMounts(ws, policy);
       await this.verifyRootlessEngine();
+      if (mediation.status === "enforced") {
+        await this.assertCommandMediatorPython();
+      }
       const runtimeEnv = this.runtimeEnvironment(this.runtimeSecretNames(runtime));
       const missing = (runtime.requiredEnv ?? []).filter(
         (alternatives) =>

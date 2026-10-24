@@ -136,6 +136,7 @@ import type {
 import { createRequire } from "node:module";
 
 import { EventStore } from "../events/store.js";
+import { exportRunTrace, otlpTraceConfigFromEnv } from "../telemetry/run-trace-otel.js";
 import { materializeScheduleNow } from "../schedules/materialize.js";
 import {
   createSchedule,
@@ -4827,6 +4828,24 @@ async function cancelWebRun(input: {
   if (taskId) {
     await settleOrUpdateUnifiedRun(input.repository.path, taskId, input.runId, {
       status: "failed",
+    });
+  }
+  // An active run exports its trace when it returns; a stopped one has no
+  // runner left to do it. Not awaited: the cancel answers without waiting
+  // on the collector.
+  if (!active && otlpTraceConfigFromEnv()) {
+    const repoPath = input.repository.path;
+    const runId = input.runId;
+    void exportRunTrace({
+      runId,
+      listEvents: () => {
+        const traceStore = new EventStore(eventStorePath(repoPath));
+        try {
+          return traceStore.list(runId);
+        } finally {
+          traceStore.close();
+        }
+      },
     });
   }
 }

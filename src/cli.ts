@@ -42,12 +42,15 @@ import {
 import {
   eventStorePath,
   getProjectedRun,
+  formatAttemptInputBreakdown,
+  formatRuntimeUsageTotal,
   getProjectedRunLogs,
   listProjectedRuns,
   type ProjectedApproval,
   type ProjectedLog,
   type ProjectedOperatorQuestion,
   type ProjectedRun,
+  type ProjectedRuntimeUsageTotal,
 } from "./run/project.js";
 import { diagnoseRepoRun, type EfficiencyReport } from "./run/efficiency.js";
 import { buildRunTrace } from "./run/trace.js";
@@ -196,6 +199,7 @@ import type {
 } from "./cli/remote.js";
 import { buildCliHelp, selectCliCommand, type CliCommand } from "./cli/registry.js";
 import { runEvalCli } from "./eval/cli.js";
+import { runBenchmark } from "./hybrid-retrieval.js";
 import {
   clearCurrentInstance,
   normalizeRemoteServerUrl,
@@ -698,6 +702,7 @@ interface RemoteRunWatchState {
   latestOutputSummary?: string;
   changeRequestUrl?: string;
   prUrl?: string;
+  runtimeUsage?: ProjectedRuntimeUsageTotal;
 }
 
 interface RemoteProviderStatus {
@@ -1115,6 +1120,32 @@ function printGoldenPathDemoResult(io: CliIo, result: GoldenPathDemoResult): voi
   io.stdout(`Evidence: ${result.reworkEvidencePath}`);
 }
 
+/**
+ * The machine-readable `status`: what the text form prints, without the
+ * projection's logs, artifacts, and per-attempt raw provider payloads.
+ */
+function runStatusJson(run: ProjectedRun): Record<string, unknown> {
+  return {
+    runId: run.runId,
+    status: run.status,
+    ...(run.flowName ? { flowName: run.flowName } : {}),
+    ...(run.branchName ? { branchName: run.branchName } : {}),
+    ...(run.worktreePath ? { worktreePath: run.worktreePath } : {}),
+    ...(run.blocker ? { blocker: run.blocker } : {}),
+    ...(run.activeQuestion ? { activeQuestion: run.activeQuestion } : {}),
+    stages: run.stages.map((stage) => ({
+      stageId: stage.stageId,
+      status: stage.status,
+      attempts: stage.attempts.length,
+      ...(stage.blocker ? { blocker: stage.blocker } : {}),
+    })),
+    ...(run.runtimeUsage ? { runtimeUsage: run.runtimeUsage } : {}),
+    ...(run.runtimeInputBreakdown?.length
+      ? { runtimeInputBreakdown: run.runtimeInputBreakdown }
+      : {}),
+  };
+}
+
 function parseRemoteRunPayload(payload: unknown, fallbackRunId: string): RemoteRunWatchState {
   const root = readJsonObject(payload);
   const run = readJsonObject(root?.run);
@@ -1134,7 +1165,39 @@ function parseRemoteRunPayload(payload: unknown, fallbackRunId: string): RemoteR
       ? { changeRequestUrl: run.changeRequestUrl }
       : {}),
     ...(typeof run.prUrl === "string" ? { prUrl: run.prUrl } : {}),
+    ...remoteRuntimeUsage(run.runtimeUsage),
   };
+}
+
+const remoteRuntimeUsageNumbers = [
+  "inputTokens",
+  "outputTokens",
+  "totalTokens",
+  "cachedInputTokens",
+  "freshInputTokens",
+  "actualCostUsd",
+  "estimatedCostUsd",
+] as const;
+
+/** Keeps only the finite numbers of a server's `runtimeUsage`, or nothing. */
+function remoteRuntimeUsage(value: unknown): { runtimeUsage?: ProjectedRuntimeUsageTotal } {
+  const usage = readJsonObject(value);
+  if (!usage) return {};
+  const count = (key: string) => {
+    const raw = usage[key];
+    return typeof raw === "number" && Number.isFinite(raw) ? raw : undefined;
+  };
+  const knownAttempts = count("knownAttempts");
+  if (knownAttempts === undefined) return {};
+  const total: ProjectedRuntimeUsageTotal = {
+    knownAttempts,
+    unknownAttempts: count("unknownAttempts") ?? 0,
+  };
+  for (const key of remoteRuntimeUsageNumbers) {
+    const raw = count(key);
+    if (raw !== undefined) total[key] = raw;
+  }
+  return { runtimeUsage: total };
 }
 
 function parseRemoteLatestRunId(payload: unknown): string {
@@ -1226,6 +1289,9 @@ async function watchRemoteRun(input: {
       previousLine = line;
     }
     if (terminalRemoteRunStatus(state.status)) {
+      if (state.runtimeUsage) {
+        input.io.stdout(`USAGE ${state.runId} ${formatRuntimeUsageTotal(state.runtimeUsage)}`);
+      }
       return state.status === "completed" ? 0 : 1;
     }
     await new Promise((resolve) => setTimeout(resolve, input.intervalMs));
@@ -3723,6 +3789,41 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
     },
   },
   {
+    name: "benchmark",
+    usage: [
+      "  benchmark hybrid-retrieval [--fixture <path>] [--output <path>] [--budget <tokens>]",
+    ],
+    run: async ({ argv, io }) => {
+      if (argv[1] !== "hybrid-retrieval") {
+        io.stderr("Usage: nitely benchmark hybrid-retrieval [--fixture <path>] [--output <path>] [--budget <tokens>]");
+        return 1;
+      }
+      let fixturePath: string | undefined;
+      let outputPath: string | undefined;
+      let budget = 1800;
+      try {
+        for (let index = 2; index < argv.length; index += 1) {
+          const arg = argv[index];
+          if (arg === "--fixture") fixturePath = argv[++index] ?? "";
+          else if (arg === "--output") outputPath = argv[++index] ?? "";
+          else if (arg === "--budget") budget = parsePositiveIntegerOption("--budget", argv[++index] ?? "");
+          else throw new Error(`Unknown benchmark option: ${arg}`);
+        }
+        if (fixturePath === "" || outputPath === "") throw new Error("Missing value for benchmark option");
+        const result = await runBenchmark({ ...(fixturePath ? { fixturePath } : {}), tokenBudget: budget });
+        if (outputPath) {
+          await mkdir(dirname(resolve(outputPath)), { recursive: true });
+          await writeFile(resolve(outputPath), result.report + "\n", "utf8");
+        }
+        io.stdout(result.report);
+        return result.decision === "no-go" ? 1 : 0;
+      } catch (error) {
+        io.stderr(error instanceof Error ? error.message : String(error));
+        return 1;
+      }
+    },
+  },
+  {
     name: "repo-index",
     usage: [
       "  repo-index build --repo <path>",
@@ -4896,17 +4997,22 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
   {
     name: "status",
     usage: [
-      "  status <run-id> [--repo <path>]",
+      "  status <run-id> [--repo <path>] [--json]",
     ],
     run: async ({ argv, io, dependencies }) => {
       const runId = argv[1];
       if (!runId) {
-        io.stderr("Usage: nitely status <run-id> [--repo <path>]");
+        io.stderr("Usage: nitely status <run-id> [--repo <path>] [--json]");
         return 1;
       }
       const { repoPath, nextIndex } = parseRepoOption(argv, 2);
-      if (nextIndex < argv.length) {
-        io.stderr(`Unknown status option: ${argv[nextIndex]}`);
+      let json = false;
+      for (let index = nextIndex; index < argv.length; index += 1) {
+        if (argv[index] === "--json") {
+          json = true;
+          continue;
+        }
+        io.stderr(`Unknown status option: ${argv[index]}`);
         return 1;
       }
       if (!repoPath) {
@@ -4919,6 +5025,10 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
         const run = await (dependencies.getRunStatus ??
           ((path: string, id: string) =>
             getProjectedRun(path, id, { staleAware: true })))(repoPath, runId);
+        if (json) {
+          io.stdout(JSON.stringify(runStatusJson(run), null, 2));
+          return 0;
+        }
         io.stdout(`Run: ${run.runId}`);
         io.stdout(`Status: ${run.status}`);
         if (run.flowName) {
@@ -5002,6 +5112,15 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
           io.stdout(
             `  ${stage.stageId}\t${stage.status}\tattempts: ${stage.attempts.length}${blockerSuffix}`,
           );
+        }
+        if (run.runtimeUsage) {
+          io.stdout(`Runtime usage: ${formatRuntimeUsageTotal(run.runtimeUsage)}`);
+        }
+        if (run.runtimeInputBreakdown?.length) {
+          io.stdout("Input by attempt:");
+          for (const breakdown of run.runtimeInputBreakdown) {
+            io.stdout(`  ${formatAttemptInputBreakdown(breakdown)}`);
+          }
         }
         const trace = tryBuildRunTrace(repoPath, runId);
         if (trace?.resumableCheckpoints.length) {

@@ -36,6 +36,8 @@ The first public release should demonstrate:
 - `pnpm install`
 - `pnpm run check`
 - `pnpm run build`
+- `pnpm run package:smoke` (pack the tarball, install it, and run the mocked
+  golden path from that install)
 - Targeted runtime and Web Console tests that pass on macOS and Linux.
 - Document any Linux-only descriptor-relative filesystem tests separately so the
   first public CI matrix is honest.

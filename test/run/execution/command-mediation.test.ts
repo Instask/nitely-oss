@@ -4,7 +4,9 @@ import {
   commandMediationPromptSection,
   commandRuleMatches,
   decideCommand,
+  decideMediatedExec,
   describeCommandMediation,
+  summarizeCommandMediationLog,
   normalizeCommandMediationPolicy,
   resolveCommandMediation,
   type CommandMediationMechanism,
@@ -173,6 +175,113 @@ describe("command mediation resolution", () => {
     expect(outcome).toMatchObject({
       reason: expect.stringContaining("demands enforcement"),
     });
+  });
+});
+
+describe("mediated exec decisions", () => {
+  it("allows only the resolved executable and denies a lying symlink name", () => {
+    const allowGit = policy({ allow: ["git"], advisory: false });
+
+    expect(
+      decideMediatedExec(allowGit, {
+        requestedPath: "/usr/bin/git",
+        canonicalPath: "/usr/bin/git",
+        args: ["status"],
+      }),
+    ).toMatchObject({ decision: "allow", rule: "git" });
+    expect(
+      decideMediatedExec(allowGit, {
+        requestedPath: "/tmp/git",
+        canonicalPath: "/bin/rm",
+        args: ["-rf", "/"],
+      }),
+    ).toMatchObject({
+      decision: "deny",
+      reason: "no allow rule matched the resolved executable",
+    });
+  });
+
+  it("lets a deny rule match either the requested path or the resolved file", () => {
+    const denied = policy({
+      mode: "deny-list",
+      deny: ["/tmp/git"],
+      advisory: false,
+    });
+
+    expect(
+      decideMediatedExec(denied, {
+        requestedPath: "/tmp/git",
+        canonicalPath: "/usr/bin/git",
+        args: ["status"],
+      }),
+    ).toMatchObject({ decision: "deny", rule: "/tmp/git" });
+  });
+
+  it("denies a shebang whose interpreter is outside the policy", () => {
+    const decision = decideMediatedExec(
+      policy({ allow: ["shebang.sh"], deny: ["touch"], advisory: false }),
+      {
+        requestedPath: "/workspace/shebang.sh",
+        canonicalPath: "/workspace/shebang.sh",
+        args: [],
+        interpreterPath: "/usr/bin/touch",
+      },
+    );
+
+    expect(decision).toMatchObject({
+      decision: "deny",
+      rule: "touch",
+      reason: "shebang interpreter denied by rule touch",
+    });
+  });
+
+  it("denies an unresolved path, including an empty shebang interpreter", () => {
+    const restricted = policy({ allow: ["git"], advisory: false });
+
+    expect(
+      decideMediatedExec(restricted, {
+        requestedPath: "",
+        canonicalPath: null,
+        args: [],
+      }).reason,
+    ).toBe("executable path could not be resolved");
+    expect(
+      decideMediatedExec(restricted, {
+        requestedPath: "/tmp/script",
+        canonicalPath: "/tmp/script",
+        args: [],
+        interpreterPath: "",
+      }).reason,
+    ).toBe("shebang interpreter denied");
+  });
+
+  it("drops mediation log records that carry more than the fixed fields", () => {
+    const summary = summarizeCommandMediationLog(
+      [
+        JSON.stringify({
+          event: "decision",
+          decision: "deny",
+          program: "curl",
+          argc: 2,
+          rule: "curl",
+          reason: "denied by deny rule curl",
+        }),
+        JSON.stringify({
+          event: "decision",
+          decision: "deny",
+          program: "/usr/bin/curl",
+          argc: 2,
+          reason: "denied",
+          token: "super-secret-value",
+        }),
+        JSON.stringify({ event: "supervisor-exit", decisions: 1, denials: 1 }),
+      ].join("\n"),
+    );
+
+    expect(summary.join("\n")).toContain("denied curl rule curl argc 2");
+    expect(summary.join("\n")).toContain("supervisor exit recorded");
+    expect(summary.join("\n")).not.toContain("super-secret-value");
+    expect(summary.join("\n")).not.toContain("/usr/bin/curl");
   });
 });
 

@@ -1,3 +1,7 @@
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
+
+import { summarizeCommandMediationLog } from "./command-mediation.js";
 import type { ExecutionBackendDescription } from "./types.js";
 
 function list(values: readonly string[]): string {
@@ -42,4 +46,46 @@ export function formatExecutionBackendEvidence(
       : []),
     `Limitations: ${list(description.limitations)}`,
   ].join("\n");
+}
+
+const MAX_MEDIATION_LOG_BYTES = 256 * 1024;
+
+/**
+ * Read mediator logs the attempt directories already contain. Only the
+ * stage/attempt layout is walked, and each log is reduced to basenames,
+ * rule names, and counts.
+ */
+export async function collectCommandMediationEvidence(
+  runDirectory: string,
+): Promise<string> {
+  let stageNames: string[];
+  try {
+    stageNames = await readdir(join(runDirectory, "stages"));
+  } catch {
+    return "";
+  }
+  const blocks: string[] = [];
+  for (const stage of stageNames.sort()) {
+    let attempts: string[];
+    try {
+      attempts = await readdir(join(runDirectory, "stages", stage));
+    } catch {
+      continue;
+    }
+    for (const attempt of attempts.sort()) {
+      let text: string;
+      try {
+        const buffer = await readFile(
+          join(runDirectory, "stages", stage, attempt, "command-mediation.jsonl"),
+        );
+        text = buffer.subarray(0, MAX_MEDIATION_LOG_BYTES).toString("utf8");
+      } catch {
+        continue;
+      }
+      const summary = summarizeCommandMediationLog(text);
+      if (summary.length === 0) continue;
+      blocks.push([`Stage ${stage} attempt ${attempt}:`, ...summary].join("\n"));
+    }
+  }
+  return blocks.join("\n");
 }

@@ -4,6 +4,13 @@ import {
   resolveRuntimeEffort,
   type ResolvedRuntimeEffort,
 } from "./execution/effort.js";
+import {
+  changeMutationDomains,
+  collectCoordinationEvidence,
+  runGuardedMutation,
+  type GuardedMutation,
+  type StoredEffectRecord,
+} from "../coordination/claims.js";
 import { applyResolvedFlowSelection, resolveRunFlowSource } from "../flows/catalog.js";
 import { execFile } from "node:child_process";
 import {
@@ -91,6 +98,9 @@ import {
   redactText,
   redactUnknown,
 } from "../context/redaction.js";
+import { estimateKnowledgeTokens } from "../knowledge-repositories/tokenize.js";
+import { prepareContext, retrieveHybridRepositoryContext } from "../hybrid-retrieval.js";
+import { selectStageKnowledgeMatches } from "./knowledge-selection.js";
 import { renderExternalKnowledgePrompt } from "../knowledge-repositories/prompt.js";
 import { knowledgeRepositoryRegistryExists } from "../knowledge-repositories/paths.js";
 import {
@@ -185,7 +195,9 @@ import {
   type ProjectedOperatorQuestion,
   type ProjectedRepoIndexQuery,
   type ProjectedRiskClassification,
+  type ProjectedAttemptInputBreakdown,
   type ProjectedRuntimeUsageTotal,
+  formatAttemptInputBreakdown,
   type ProjectedTaskScope,
   type ProjectedVerificationBudget,
   type ProjectedVerificationFailureDiagnosis,
@@ -314,10 +326,19 @@ import type {
 import type { NormalizedReviewFeedback } from "../review-feedback/model.js";
 import { normalizeRuntimeUsageForPersistence } from "../eval/usage.js";
 import {
+  exportRunTrace,
+  otlpTraceConfigFromEnv,
+  type ExportRunTraceInput,
+  type RunTraceExportResult,
+} from "../telemetry/run-trace-otel.js";
+import {
   createExecutionBackend,
   normalizeExecutionBackendName,
 } from "./execution/backend.js";
-import { formatExecutionBackendEvidence } from "./execution/evidence.js";
+import {
+  collectCommandMediationEvidence,
+  formatExecutionBackendEvidence,
+} from "./execution/evidence.js";
 import {
   requireCodexSandboxMode,
   type RunSandboxPolicy,
@@ -325,6 +346,8 @@ import {
 import type {
   AgentGlobalSkillsOutcome,
   AgentGlobalSkillsRequest,
+  AgentMcpServersOutcome,
+  AgentMcpServersRequest,
   AgentSessionOutcome,
   AgentRunnableStage,
   AgentRuntimePreflightResult,
@@ -706,6 +729,8 @@ export interface RunFlowDependencies {
   fingerprintKnowledgeRepositoryQuery?: typeof defaultFingerprintKnowledgeRepositoryQuery;
   pinKnowledgeRepositorySnapshots?: typeof defaultPinKnowledgeRepositorySnapshots;
   queryKnowledgeRepositories?: typeof defaultQueryKnowledgeRepositories;
+  /** Replaces the OpenTelemetry trace export that follows every run. */
+  exportRunTrace?: (input: ExportRunTraceInput) => Promise<RunTraceExportResult>;
 }
 
 export interface RunFlowResult {
@@ -901,6 +926,76 @@ interface PersistedLoadedSkill {
 interface PreviousFailure {
   attempt: number;
   error: string;
+  /** A stage a rework cycle re-runs only because it depends on the target. */
+  reworkRerun?: boolean;
+}
+
+/**
+ * Nitely never resets the worktree between attempts, so a stage that runs
+ * again in a rework cycle starts on top of its own previous changes. Without
+ * saying so, a fresh runtime session re-explores the repository and its own
+ * half-finished code: a production rework of `implement` spent 4.47M input
+ * tokens over 80 model calls, more than the first attempt.
+ */
+const REWORK_WORKTREE_NOTE =
+  "your previous attempt's changes are still in the worktree; inspect them first (git status, git diff) and build on them to address these findings instead of re-implementing from scratch";
+
+function previousFailureLabel(failure: PreviousFailure): string {
+  return failure.reworkRerun
+    ? `attempt ${failure.attempt} did not fail; a rework cycle re-runs it`
+    : `attempt ${failure.attempt} failed`;
+}
+
+/**
+ * Stages a rework cycle re-runs without targeting them: those after the
+ * target and before the stage that requested the rework, which already ran.
+ */
+function reworkCycleDownstreamStages(input: {
+  order: readonly string[];
+  targetStageId: string;
+  requesterStageId: string | undefined;
+  attemptsByStage: ReadonlyMap<string, number>;
+}): string[] {
+  const from = input.order.indexOf(input.targetStageId);
+  const to = input.requesterStageId ? input.order.indexOf(input.requesterStageId) : -1;
+  if (from < 0 || to <= from) return [];
+  return input.order
+    .slice(from + 1, to)
+    .filter((stageId) => (input.attemptsByStage.get(stageId) ?? 0) > 0);
+}
+
+/** Record a rework request against its target and every stage it re-runs. */
+function recordReworkCycleFailures(input: {
+  previousFailuresByStage: Map<string, PreviousFailure[]>;
+  attemptsByStage: ReadonlyMap<string, number>;
+  order: readonly string[] | undefined;
+  targetStageId: string;
+  requesterStageId: string | undefined;
+  detail: string;
+}): void {
+  const add = (stageId: string, error: string, reworkRerun = false) => {
+    const failures = input.previousFailuresByStage.get(stageId) ?? [];
+    failures.push({
+      attempt: input.attemptsByStage.get(stageId) ?? 1,
+      error,
+      ...(reworkRerun ? { reworkRerun } : {}),
+    });
+    input.previousFailuresByStage.set(stageId, failures);
+  };
+  add(input.targetStageId, `${input.detail}: ${REWORK_WORKTREE_NOTE}`);
+  if (!input.order) return;
+  for (const stageId of reworkCycleDownstreamStages({
+    order: input.order,
+    targetStageId: input.targetStageId,
+    requesterStageId: input.requesterStageId,
+    attemptsByStage: input.attemptsByStage,
+  })) {
+    add(
+      stageId,
+      `${input.detail}: this stage depends on ${input.targetStageId}, so ${REWORK_WORKTREE_NOTE}`,
+      true,
+    );
+  }
 }
 
 export interface ResolvedExternalKnowledgeControls {
@@ -929,6 +1024,19 @@ export interface ExternalKnowledgeAdmissionControls {
  */
 type GlobalSkillsMode = "isolate-if-supported" | "required-isolated" | "inherited";
 
+/**
+ * Which of the operator's configured MCP servers an attempt loads. Each enabled
+ * server's tool definitions are resent on every model call of the turn.
+ *
+ * - `declared-if-supported`: the default. Load exactly the stage's
+ *   `required_mcp_servers` on runtimes that can restrict them, and run
+ *   unchanged on runtimes that cannot.
+ * - `declared-required`: the flow demands the restriction; a runtime that
+ *   cannot provide it fails the stage.
+ * - `inherited`: the flow opted back into every configured server.
+ */
+type McpServersMode = "declared-if-supported" | "declared-required" | "inherited";
+
 interface ResolvedStageContextControls {
   isolated: boolean;
   instructionFiles: boolean;
@@ -938,6 +1046,7 @@ interface ResolvedStageContextControls {
   previousFailures: boolean;
   fullReadInputs: string[];
   globalSkills: GlobalSkillsMode;
+  mcpServers: McpServersMode;
   /** Undefined means "decide from the stage kind". */
   sessionReuse: boolean | undefined;
 }
@@ -953,6 +1062,7 @@ interface StageContextEvidence {
   previousFailures: boolean;
   fullReadInputs: string[];
   globalSkills: GlobalSkillsMode;
+  mcpServers: McpServersMode;
   /** Undefined means "decide from the stage kind". */
   sessionReuse: boolean | undefined;
 }
@@ -976,6 +1086,7 @@ const DEFAULT_READ_DENY_GLOBS = [
 interface ResolvedStageReadPolicy {
   maxFileBytes: number;
   deny: string[];
+  maxToolOutputTokens?: number;
   enforcement: "advisory" | "required";
 }
 
@@ -990,6 +1101,8 @@ function resolveStageReadPolicy(
 ): ResolvedStageReadPolicy {
   const stageReads = "reads" in stage ? stage.reads : undefined;
   const isReviewGate = stage.type === "gate" && stage.mode === "review";
+  const maxToolOutputTokens =
+    stageReads?.maxToolOutputTokens ?? flowReads?.maxToolOutputTokens;
   return {
     maxFileBytes:
       stageReads?.maxFileBytes ??
@@ -998,6 +1111,7 @@ function resolveStageReadPolicy(
         ? DEFAULT_REVIEW_MAX_READ_FILE_BYTES
         : DEFAULT_AGENT_MAX_READ_FILE_BYTES),
     deny: [...(stageReads?.deny ?? flowReads?.deny ?? DEFAULT_READ_DENY_GLOBS)],
+    ...(maxToolOutputTokens !== undefined ? { maxToolOutputTokens } : {}),
     enforcement:
       stageReads?.enforcement ?? flowReads?.enforcement ?? "advisory",
   };
@@ -2257,6 +2371,19 @@ function agentGlobalSkillsRequest(input: {
   };
 }
 
+function agentMcpServersRequest(input: {
+  mode: McpServersMode;
+  stage: AgentRunnableStage;
+}): AgentMcpServersRequest {
+  if (input.mode === "inherited") return { mode: "inherited" };
+  return {
+    mode: input.mode,
+    declared: "required_mcp_servers" in input.stage
+      ? [...(input.stage.required_mcp_servers ?? [])]
+      : [],
+  };
+}
+
 function requireWorkspacePath(ws: WorkspaceHandle): string {
   if (!ws.path) {
     throw new Error("workspace has no host-accessible path");
@@ -2298,6 +2425,7 @@ async function runAgentInWorkspace(input: {
   stderrPath: string;
   usage?: AgentRuntimeUsage;
   globalSkills?: AgentGlobalSkillsOutcome;
+  mcpServers?: AgentMcpServersOutcome;
   session?: AgentSessionOutcome;
 }> {
   const attemptDirectory = await requireContainedAttemptDirectory({
@@ -2381,6 +2509,10 @@ async function runAgentInWorkspace(input: {
               runId: input.context.runId,
               runtime: input.stage.runtime,
             }),
+            mcpServers: agentMcpServersRequest({
+              mode: input.contextControls.mcpServers,
+              stage: input.stage,
+            }),
             visibleInputPaths: input.visibleInputPaths,
             readPolicy: input.readPolicy,
             ...(input.resumeSessionId
@@ -2391,6 +2523,7 @@ async function runAgentInWorkspace(input: {
             ...(await writeLogs(result)),
             ...(result.usage ? { usage: result.usage } : {}),
             ...(result.globalSkills ? { globalSkills: result.globalSkills } : {}),
+            ...(result.mcpServers ? { mcpServers: result.mcpServers } : {}),
             ...(result.session ? { session: result.session } : {}),
           };
         } catch (error) {
@@ -3256,6 +3389,8 @@ async function executeGateStage(input: {
         configuration: input.configuration,
         inputs: scopedInputs,
         controls: input.contextControls.externalKnowledge,
+        readPolicy: input.readPolicy,
+        retrievalRepoPath: input.workspace.path,
         context: input.context,
         dependencies: input.dependencies,
       });
@@ -3390,6 +3525,14 @@ async function executeGateStage(input: {
           stageId: input.stage.id,
           attempt: selectedAttempt,
           ...(result.globalSkills ? { outcome: result.globalSkills } : {}),
+          context: input.context,
+        });
+        appendMcpServersEvent({
+          eventStore: input.eventStore,
+          runId: input.runId,
+          stageId: input.stage.id,
+          attempt: selectedAttempt,
+          ...(result.mcpServers ? { outcome: result.mcpServers } : {}),
           context: input.context,
         });
         recordAgentSession({
@@ -3719,6 +3862,107 @@ async function executeSyncChangeStage(input: {
   return metadata;
 }
 
+function coordinationStopMessage(decision: GuardedMutation<unknown>): string {
+  if (decision.decision === "conflict") {
+    return `work coordination conflict: ${decision.ownerRunId}`;
+  }
+  if (decision.decision === "hold" || decision.decision === "unknown" || decision.decision === "reevaluation-limit") {
+    return `work coordination ${decision.decision}: ${decision.reason}`;
+  }
+  return "work coordination rejected";
+}
+
+function appendCoordinationStop(input: {
+  eventStore: EventStore;
+  runId: string;
+  stageId: string;
+  attempt: number;
+  context: RuntimeContext;
+  decision: GuardedMutation<unknown>;
+}): void {
+  const type = input.decision.decision === "conflict"
+    ? "coordination.conflict"
+    : input.decision.decision === "unknown"
+      ? "coordination.unknown"
+      : "coordination.held";
+  input.eventStore.append({
+    runId: input.runId,
+    stageId: input.stageId,
+    attempt: input.attempt,
+    type,
+    payload: redactRuntimeUnknown({
+      decision: input.decision.decision,
+      ...("reason" in input.decision ? { reason: input.decision.reason } : {}),
+      ...("ownerRunId" in input.decision ? { ownerRunId: input.decision.ownerRunId } : {}),
+      ...("nextCursor" in input.decision ? { nextCursor: input.decision.nextCursor } : {}),
+      ...("delta" in input.decision ? { delta: input.decision.delta } : {}),
+    }, input.context),
+  });
+}
+
+async function guardedChangeResult<T>(input: {
+  repoPath: string;
+  domains: readonly string[];
+  observedHead: string;
+  runId: string;
+  stageId: string;
+  attempt: number;
+  attemptDirectory: string;
+  idempotencyKey: string;
+  eventStore: EventStore;
+  context: RuntimeContext;
+  effect: () => Promise<T>;
+  resultOf: (result: T) => StoredEffectRecord;
+  fromReplay: (record: StoredEffectRecord) => T;
+}): Promise<T> {
+  const guarded = await runGuardedMutation({
+    repoPath: input.repoPath,
+    domains: input.domains,
+    observedHead: input.observedHead,
+    runId: input.runId,
+    idempotencyKey: input.idempotencyKey,
+    attemptDirectory: input.attemptDirectory,
+    effect: input.effect,
+    resultOf: input.resultOf,
+  });
+  if (guarded.decision === "proceed") return guarded.result;
+  if (guarded.decision === "replay") {
+    if (!guarded.record.url) {
+      const unknown: GuardedMutation<unknown> = { decision: "unknown", reason: "effect-started" };
+      appendCoordinationStop({ ...input, decision: unknown });
+      throw new Error(coordinationStopMessage(unknown));
+    }
+    return input.fromReplay(guarded.record);
+  }
+  appendCoordinationStop({ ...input, decision: guarded });
+  throw new Error(coordinationStopMessage(guarded));
+}
+
+function changeDomainsForStage(input: {
+  action: "publish" | "update";
+  branch?: string;
+  worktreePath: string;
+  inputs: Map<string, InputArtifact>;
+  pull?: { owner: string; repository: string; number: number };
+}): string[] {
+  const sourceIssue = githubSourceIssueFromInputs(input.inputs);
+  return changeMutationDomains({
+    action: input.action,
+    ...(input.branch ? { branch: input.branch } : {}),
+    worktreePath: input.worktreePath,
+    ...(input.pull ? { pull: input.pull } : {}),
+    ...(sourceIssue
+      ? {
+          issue: {
+            owner: sourceIssue.owner,
+            repository: sourceIssue.repository,
+            number: sourceIssue.number,
+          },
+        }
+      : {}),
+  });
+}
+
 async function executePublishChangeStage(input: {
   runId: string;
   stage: Extract<Stage, { type: "publish-change" }>;
@@ -3790,11 +4034,34 @@ async function executePublishChangeStage(input: {
     title: redactRuntimeText(resolvedTitle.title, input.context) ?? resolvedTitle.title,
     body: await readFile(evidencePath, "utf8"),
   };
-  const published = input.dependencies.publishChange
-    ? await input.dependencies.publishChange(publishInput)
-    : input.dependencies.scmProvider
-      ? await publishWithProvider(input.dependencies.scmProvider, publishInput)
-      : await defaultPublishChange(publishInput, input.stage.provider, input.providerStore);
+  const publishedHead = (await currentBranchHeadSha(input.worktreePath)) ?? "none";
+  const published = await guardedChangeResult({
+    repoPath: input.repoPath,
+    domains: changeDomainsForStage({
+      action: "publish",
+      branch: input.branchName,
+      worktreePath: input.worktreePath,
+      inputs: input.inputArtifacts,
+    }),
+    observedHead: "none",
+    runId: input.runId,
+    stageId: input.stage.id,
+    attempt: input.attempt,
+    attemptDirectory: input.attemptDirectory,
+    idempotencyKey: `publish:${input.runId}:${input.stage.id}:${input.branchName}`,
+    eventStore: input.eventStore,
+    context: input.context,
+    effect: () => input.dependencies.publishChange
+      ? input.dependencies.publishChange(publishInput)
+      : input.dependencies.scmProvider
+        ? publishWithProvider(input.dependencies.scmProvider, publishInput)
+        : defaultPublishChange(publishInput, input.stage.provider, input.providerStore),
+    resultOf: (result) => ({ url: result.url, head: publishedHead }),
+    fromReplay: (record) => ({
+      url: record.url ?? "",
+      evidencePath,
+    }),
+  });
   const headCommit = await currentBranchHeadSha(input.worktreePath);
   input.eventStore.append({
     runId: input.runId,
@@ -3904,12 +4171,52 @@ async function executeUpdateChangeStage(input: {
     input.dependencies,
     input.providerStore,
   );
-  const updated = await updateChangeRequest({
-    provider,
+  const target = input.reworkTarget.resolved;
+  const updated = await guardedChangeResult({
     repoPath: input.repoPath,
-    worktreePath: input.worktreePath,
-    target: input.reworkTarget.resolved,
-    title: resolvedTitle.title,
+    domains: changeDomainsForStage({
+      action: "update",
+      branch: target.headBranch,
+      worktreePath: input.worktreePath,
+      inputs: input.inputArtifacts,
+      pull: {
+        owner: target.owner,
+        repository: target.repository,
+        number: target.number,
+      },
+    }),
+    observedHead: target.headSha,
+    runId: input.runId,
+    stageId: input.stage.id,
+    attempt: input.attempt,
+    attemptDirectory: input.attemptDirectory,
+    idempotencyKey: `update:${input.runId}:${input.stage.id}:${target.owner}/${target.repository}#${target.number}`,
+    eventStore: input.eventStore,
+    context: input.context,
+    effect: () => updateChangeRequest({
+      provider,
+      repoPath: input.repoPath,
+      worktreePath: input.worktreePath,
+      target,
+      title: resolvedTitle.title,
+    }),
+    resultOf: (result) => ({ url: result.url, head: result.updatedHeadSha }),
+    fromReplay: (record) => ({
+      url: record.url ?? target.url,
+      number: target.number,
+      changeRequest: {
+        provider: "github" as const,
+        url: record.url ?? target.url,
+        number: target.number,
+        owner: target.owner,
+        repository: target.repository,
+        baseBranch: target.baseBranch,
+        headBranch: target.headBranch,
+        draft: false,
+      },
+      previousHeadSha: target.headSha,
+      updatedHeadSha: record.head,
+    }),
   });
   if (!input.recordTitleBeforeUpdate) {
     input.onChangeTitleResolved(changeTitle);
@@ -4224,6 +4531,8 @@ async function executeAgentStage(input: {
       configuration: input.configuration,
       inputs: scopedInputs,
       controls: input.contextControls.externalKnowledge,
+      readPolicy: input.readPolicy,
+      retrievalRepoPath: input.workspace.path,
       context: input.context,
       dependencies: input.dependencies,
     });
@@ -4357,6 +4666,14 @@ async function executeAgentStage(input: {
         stageId: input.stage.id,
         attempt: selectedAttempt,
         ...(result.globalSkills ? { outcome: result.globalSkills } : {}),
+        context: input.context,
+      });
+      appendMcpServersEvent({
+        eventStore: input.eventStore,
+        runId: input.runId,
+        stageId: input.stage.id,
+        attempt: selectedAttempt,
+        ...(result.mcpServers ? { outcome: result.mcpServers } : {}),
         context: input.context,
       });
       recordAgentSession({
@@ -5866,7 +6183,60 @@ export function externalKnowledgeQueryFailureIsFatal(input: {
     input.pins.some((pin) => pin.attachmentRequired);
 }
 
-async function retrieveExternalKnowledgeForStage(input: {
+async function retrieveExternalKnowledgeForStage(input: Parameters<typeof retrieveAttachedKnowledgeForStage>[0] & {
+  readPolicy: ResolvedStageReadPolicy;
+  retrievalRepoPath?: string;
+}): Promise<StageKnowledgeRetrieval | undefined> {
+  const attached = await retrieveAttachedKnowledgeForStage(input);
+  // Explicitly scoped attachment selections and disabled/isolated stages cannot be widened by an environment flag.
+  if (!input.controls.enabled || input.controls.ids !== undefined) return attached;
+  let retrievalFailed = false;
+  const prepared = await prepareContext({
+    existingFlowEvidence: attached,
+    hybridPacker: async () => {
+      try {
+        if (!input.retrievalRepoPath) throw new Error("task repository worktree unavailable");
+        return await retrieveHybridRepositoryContext({
+          repoPath: input.retrievalRepoPath,
+          policyRepoPath: input.context.repoPath,
+          query: buildExternalKnowledgeQuery(input),
+          tokenBudget: input.controls.maxPromptTokens,
+          redactionSecrets: input.context.redactionSecrets,
+          readPolicy: input.readPolicy,
+        });
+      } catch (error) {
+        if (input.controls.availability === "required") throw error;
+        retrievalFailed = true;
+        return [];
+      }
+    },
+  });
+  if (!prepared || !("hybridContext" in prepared)) return attached;
+  // Attached knowledge keeps precedence, but a reserved repository quota keeps
+  // the flag from being a no-op when attachments alone fill topK.
+  const matches = selectStageKnowledgeMatches({
+    attached: attached?.matches ?? [],
+    repository: prepared.hybridContext,
+    topK: input.controls.topK,
+    // Count exactly what renderPrompt consumes, including framing and escaped citations.
+    fits: (selected) =>
+      estimateKnowledgeTokens(renderExternalKnowledgePrompt([...selected]).join("\n")) <=
+        input.controls.maxPromptTokens,
+  });
+  const countBefore = (attached?.matches.length ?? 0) + prepared.hybridContext.length;
+  return {
+    matches,
+    queryFingerprint: attached?.queryFingerprint ?? sha256Text(buildExternalKnowledgeQuery(input)),
+    status: "degraded", // The local hash signal is explicitly non-semantic.
+    degradedAttachmentIds: attached?.degradedAttachmentIds ?? [],
+    reasonCodes: [...(attached?.reasonCodes ?? []), retrievalFailed ? "task-repository-query-failed" : "task-repository-lexical-hash"],
+    candidateCount: (attached?.candidateCount ?? 0) + prepared.hybridContext.length,
+    retrievalTrimmedCount: (attached?.retrievalTrimmedCount ?? 0) + countBefore - matches.length,
+    approxTokens: estimateKnowledgeTokens(renderExternalKnowledgePrompt(matches).join("\n")),
+  };
+}
+
+async function retrieveAttachedKnowledgeForStage(input: {
   stage: AgentRunnableStage;
   flowName: string;
   configuration: FlowConfiguration;
@@ -6066,6 +6436,9 @@ function resolveStageContextControlsFrom(
     globalSkills: resolveGlobalSkillsMode(
       contextControlValue("globalSkills", flowContext, stageContext),
     ),
+    mcpServers: resolveMcpServersMode(
+      contextControlValue("globalMcpServers", flowContext, stageContext),
+    ),
     sessionReuse: contextControlValue("sessionReuse", flowContext, stageContext),
   };
 }
@@ -6086,6 +6459,11 @@ function sessionReuseEnabled(
 function resolveGlobalSkillsMode(value: boolean | undefined): GlobalSkillsMode {
   if (value === undefined) return "isolate-if-supported";
   return value ? "inherited" : "required-isolated";
+}
+
+function resolveMcpServersMode(value: boolean | undefined): McpServersMode {
+  if (value === undefined) return "declared-if-supported";
+  return value ? "inherited" : "declared-required";
 }
 
 type ExternalKnowledgeControl = NonNullable<ContextControls["externalKnowledge"]>;
@@ -6250,6 +6628,63 @@ function globalSkillsEvidenceLabel(mode: GlobalSkillsMode): string {
     default:
       return "isolated where the runtime supports it";
   }
+}
+
+function mcpServersEvidenceLabel(mode: McpServersMode): string {
+  switch (mode) {
+    case "inherited":
+      return "every configured server";
+    case "declared-required":
+      return "declared only (required)";
+    default:
+      return "declared only where the runtime supports it";
+  }
+}
+
+interface McpServerAttemptEvidence {
+  stageId: string;
+  attempt: number;
+  enforcement: string;
+  enabled: string[];
+  disabled: string[];
+  unconfigured: string[];
+  reason?: string;
+}
+
+function eventStringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function collectMcpServerAttemptEvidence(events: readonly StoredRunEvent[]): McpServerAttemptEvidence[] {
+  return events.flatMap((event) => {
+    if (event.type !== "stage.runtime.mcp-servers" || !event.stageId || !event.attempt) {
+      return [];
+    }
+    const payload = event.payload as Record<string, unknown>;
+    if (typeof payload.enforcement !== "string") return [];
+    return [{
+      stageId: event.stageId,
+      attempt: event.attempt,
+      enforcement: payload.enforcement,
+      enabled: eventStringList(payload.enabled),
+      disabled: eventStringList(payload.disabled),
+      unconfigured: eventStringList(payload.unconfigured),
+      ...(typeof payload.reason === "string" ? { reason: payload.reason } : {}),
+    }];
+  });
+}
+
+function mcpServerAttemptEvidenceLabel(attempt: McpServerAttemptEvidence): string {
+  const list = (names: string[]) => (names.length > 0 ? names.join(", ") : "none");
+  return [
+    attempt.enforcement,
+    `enabled: ${list(attempt.enabled)}`,
+    `disabled: ${list(attempt.disabled)}`,
+    ...(attempt.unconfigured.length > 0 ? [`unconfigured: ${list(attempt.unconfigured)}`] : []),
+    ...(attempt.reason ? [`reason: ${attempt.reason}`] : []),
+  ].join("; ");
 }
 
 function collectStageContextEvidence(flow: Flow): StageContextEvidence[] {
@@ -6562,7 +6997,7 @@ function renderResumePrompt(input: {
         "",
         ...input.previousFailures.map(
           (failure) =>
-            `- attempt ${failure.attempt} failed: ${
+            `- ${previousFailureLabel(failure)}: ${
               redactRuntimeText(failure.error, input.context) ?? ""
             }`,
         ),
@@ -6607,6 +7042,11 @@ function renderReadPolicy(policy: ResolvedStageReadPolicy | undefined): string[]
     ...(policy.deny.length > 0
       ? [
         `Do not read these paths in bulk: ${policy.deny.join(", ")}.`,
+      ]
+      : []),
+    ...(policy.maxToolOutputTokens !== undefined
+      ? [
+        `Each tool output is kept to about ${policy.maxToolOutputTokens} tokens of context; anything longer is truncated. Narrow a search or read a smaller range instead of relying on a long output.`,
       ]
       : []),
     "Prefer targeted searches with bounded output over whole-file or whole-tree reads.",
@@ -6722,6 +7162,7 @@ function renderPrompt(
     previousFailures: true,
     fullReadInputs: [],
     globalSkills: "isolate-if-supported",
+    mcpServers: "declared-if-supported",
     sessionReuse: undefined,
   },
   contextKnowledge: ContextKnowledgeEntry[] = [],
@@ -6740,7 +7181,7 @@ function renderPrompt(
           "",
           ...previousFailures.map(
             (failure) =>
-              `- attempt ${failure.attempt} failed: ${
+              `- ${previousFailureLabel(failure)}: ${
                 redactRuntimeText(failure.error, context) ?? ""
               }`,
           ),
@@ -7423,6 +7864,25 @@ function appendRuntimeUsageEvent(input: {
       input.context,
     ),
   });
+  // The per-call log feeds traces; it is kept out of the usage record, whose
+  // raw metadata is bounded far below a long attempt's call count.
+  if (input.usage.callLog && input.usage.callLog.length > 0) {
+    input.eventStore.append({
+      runId: input.runId,
+      stageId: input.stageId,
+      attempt: input.attempt,
+      type: "stage.runtime.calls",
+      payload: redactRuntimeUnknown(
+        {
+          calls: input.usage.callLog,
+          ...(input.usage.callLogDropped ? { dropped: input.usage.callLogDropped } : {}),
+          ...(input.usage.callLogSource ? { source: input.usage.callLogSource } : {}),
+          ...(input.usage.callLogFallback ? { fallback: input.usage.callLogFallback } : {}),
+        },
+        input.context,
+      ),
+    });
+  }
 }
 
 function appendGlobalSkillsEvent(input: {
@@ -7442,6 +7902,33 @@ function appendGlobalSkillsEvent(input: {
     payload: redactRuntimeUnknown(
       {
         isolated: input.outcome.isolated,
+        ...(input.outcome.reason ? { reason: input.outcome.reason } : {}),
+      },
+      input.context,
+    ),
+  });
+}
+
+function appendMcpServersEvent(input: {
+  eventStore: EventStore;
+  runId: string;
+  stageId: string;
+  attempt: number;
+  outcome?: AgentMcpServersOutcome;
+  context: RuntimeContext;
+}): void {
+  if (!input.outcome) return;
+  input.eventStore.append({
+    runId: input.runId,
+    stageId: input.stageId,
+    attempt: input.attempt,
+    type: "stage.runtime.mcp-servers",
+    payload: redactRuntimeUnknown(
+      {
+        enforcement: input.outcome.enforcement,
+        ...(input.outcome.enabled ? { enabled: input.outcome.enabled } : {}),
+        ...(input.outcome.disabled ? { disabled: input.outcome.disabled } : {}),
+        ...(input.outcome.unconfigured ? { unconfigured: input.outcome.unconfigured } : {}),
         ...(input.outcome.reason ? { reason: input.outcome.reason } : {}),
       },
       input.context,
@@ -9418,8 +9905,6 @@ function applyFailedStagePolicy(input: {
       ),
     });
     input.reworkEdges.push({ from: input.stage.id, to: targetStageId });
-    const targetFailures =
-      input.previousFailuresByStage.get(targetStageId) ?? [];
     const detail = [
       `downstream stage ${input.stage.id} requested rework of stage ${targetStageId}`,
       request.targetArtifact ? `artifact ${request.targetArtifact}` : undefined,
@@ -9429,11 +9914,14 @@ function applyFailedStagePolicy(input: {
     ]
       .filter((part): part is string => part !== undefined)
       .join(": ");
-    targetFailures.push({
-      attempt: input.attemptsByStage.get(targetStageId) ?? 1,
-      error: detail,
+    recordReworkCycleFailures({
+      previousFailuresByStage: input.previousFailuresByStage,
+      attemptsByStage: input.attemptsByStage,
+      order: input.graph.order,
+      targetStageId,
+      requesterStageId: input.stage.id,
+      detail,
     });
-    input.previousFailuresByStage.set(targetStageId, targetFailures);
     invalidateCompletedStagesFrom(
       input.completedStages,
       input.graph.order,
@@ -10717,6 +11205,8 @@ async function recordTaskIssueRunLinks(input: {
 
 function formatRuntimeUsageEvidence(
   usage: ProjectedRuntimeUsageTotal | undefined,
+  breakdown: ProjectedAttemptInputBreakdown[] | undefined,
+  context: RuntimeContext,
 ): string {
   if (!usage) return "none";
   const lines = [
@@ -10724,7 +11214,13 @@ function formatRuntimeUsageEvidence(
     `- Runtime attempts without usage data: ${usage.unknownAttempts}`,
   ];
   if (usage.inputTokens !== undefined) {
-    lines.push(`- Input tokens: ${usage.inputTokens}`);
+    lines.push(`- Input tokens (runtime cumulative, cache reads included): ${usage.inputTokens}`);
+  }
+  if (usage.cachedInputTokens !== undefined) {
+    lines.push(`- Cached input tokens: ${usage.cachedInputTokens}`);
+  }
+  if (usage.freshInputTokens !== undefined) {
+    lines.push(`- Fresh input tokens: ${usage.freshInputTokens}`);
   }
   if (usage.outputTokens !== undefined) {
     lines.push(`- Output tokens: ${usage.outputTokens}`);
@@ -10734,6 +11230,17 @@ function formatRuntimeUsageEvidence(
   }
   if (usage.estimatedCostUsd !== undefined) {
     lines.push(`- Estimated cost USD: ${usage.estimatedCostUsd}`);
+  }
+  if (breakdown && breakdown.length > 0) {
+    lines.push(
+      "",
+      "Input by attempt (harness prompt vs. runtime-reported input):",
+      "",
+      ...breakdown.map(
+        (entry) =>
+          `- ${redactRuntimeText(formatAttemptInputBreakdown(entry), context) ?? ""}`,
+      ),
+    );
   }
   return lines.join("\n");
 }
@@ -10994,9 +11501,11 @@ async function writeEvidence(input: {
   gates: GateResult[];
   agentRuntimes: AgentRuntimeEvidence[];
   stageContextControls?: StageContextEvidence[];
+  mcpServerAttempts?: McpServerAttemptEvidence[];
   stageReadPolicies?: StageReadPolicyEvidence[];
   stageTimeouts?: StageTimeoutEvidence[];
   runtimeUsage?: ProjectedRuntimeUsageTotal;
+  runtimeInputBreakdown?: ProjectedAttemptInputBreakdown[];
   verificationBudget?: ProjectedVerificationBudget;
   repoIndexQueries?: ProjectedRepoIndexQuery[];
   knowledgeRetrievals?: ProjectedKnowledgeRetrieval[];
@@ -11029,6 +11538,10 @@ async function writeEvidence(input: {
     worktreePath: input.worktreePath,
     baseBranch: input.baseBranch,
   });
+  const coordinationText = await collectCoordinationEvidence(input.runDirectory);
+  const coordinationSection = coordinationText
+    ? ["## Work Coordination", "", coordinationText, ""]
+    : [];
   const sourceIssue = githubSourceIssueFromInputs(input.inputs);
   const sourceIssueSection = sourceIssue
     ? [
@@ -11224,6 +11737,13 @@ async function writeEvidence(input: {
               `  External knowledge: ${controls.externalKnowledge.enabled ? `enabled (top ${controls.externalKnowledge.topK}, ${controls.externalKnowledge.maxPromptTokens} prompt tokens, ${controls.externalKnowledge.availability})` : "disabled"}`,
               `  Previous failures: ${controls.previousFailures ? "enabled" : "disabled"}`,
               `  Global runtime skills: ${globalSkillsEvidenceLabel(controls.globalSkills)}`,
+              `  MCP servers: ${mcpServersEvidenceLabel(controls.mcpServers)}`,
+              ...(input.mcpServerAttempts ?? [])
+                .filter((attempt) => attempt.stageId === controls.stageId)
+                .map((attempt) =>
+                  `  MCP servers, attempt ${attempt.attempt}: ${
+                    redactRuntimeText(mcpServerAttemptEvidenceLabel(attempt), input.context) ?? ""
+                  }`),
               `  Full-read inputs: ${
                 controls.fullReadInputs.length > 0
                   ? controls.fullReadInputs
@@ -11242,6 +11762,9 @@ async function writeEvidence(input: {
             [
               `- ${redactRuntimeText(policy.stageId, input.context) ?? ""} (${policy.kind})`,
               `  Max file bytes: ${policy.maxFileBytes}`,
+              ...(policy.maxToolOutputTokens !== undefined
+                ? [`  Max tool output tokens: ${policy.maxToolOutputTokens}`]
+                : []),
               `  Enforcement: ${policy.enforcement}`,
               `  Deny: ${policy.deny.length > 0 ? policy.deny.join(", ") : "none"}`,
             ].join("\n"),
@@ -11267,7 +11790,11 @@ async function writeEvidence(input: {
           )
           .join("\n")
       : "none";
-  const runtimeUsageLines = formatRuntimeUsageEvidence(input.runtimeUsage);
+  const runtimeUsageLines = formatRuntimeUsageEvidence(
+    input.runtimeUsage,
+    input.runtimeInputBreakdown,
+    input.context,
+  );
   const verificationBudgetLines = input.verificationBudget
     ? JSON.stringify(input.verificationBudget, null, 2)
     : "not declared";
@@ -11329,6 +11856,12 @@ async function writeEvidence(input: {
   const executionBackendLines = input.executionBackend
     ? formatExecutionBackendEvidence(input.executionBackend)
     : "not available";
+  const commandMediationLines = await collectCommandMediationEvidence(
+    input.runDirectory,
+  );
+  const executionSandboxLines = commandMediationLines
+    ? `${executionBackendLines}\n${commandMediationLines}`
+    : executionBackendLines;
   const riskLines = input.riskClassification
     ? redactRuntimeText(
         renderRiskClassificationMarkdown({
@@ -11822,7 +12355,7 @@ async function writeEvidence(input: {
     "",
     "## Execution Sandbox",
     "",
-    executionBackendLines,
+    executionSandboxLines,
     "",
     "## Risk Classification",
     "",
@@ -11864,6 +12397,7 @@ async function writeEvidence(input: {
     "",
     attemptFileLines,
     "",
+    ...coordinationSection,
     "## Completed Stages",
     "",
     input.completedStages.map((stage) => `- ${stage}`).join("\n"),
@@ -12703,11 +13237,22 @@ export async function runFlow(
   input: RunFlowInput,
   dependencies: RunFlowDependencies = {},
 ): Promise<RunFlowResult> {
+  let createdRunId: string | undefined;
+  const createRunId = dependencies.createRunId ?? createDefaultRunId;
+  const tracked: RunFlowDependencies = {
+    ...dependencies,
+    createRunId: () => {
+      createdRunId = createRunId();
+      return createdRunId;
+    },
+  };
+  let resumed = false;
   try {
-    return await runFlowOnce(input, dependencies);
+    return await runFlowOnce(input, tracked);
   } catch (error) {
     const runId = autoAnsweredRunId(error);
     if (!runId) throw error;
+    resumed = true;
     return await resumeRun(
       {
         repoPath: input.repoPath,
@@ -12716,6 +13261,39 @@ export async function runFlow(
       },
       dependencies,
     );
+  } finally {
+    // resumeRun exports the trace itself.
+    if (createdRunId && !resumed) await exportRunTraceAfterRun(input.repoPath, createdRunId, dependencies);
+  }
+}
+
+/**
+ * Export the run's OpenTelemetry trace when an OTLP endpoint is configured.
+ * Bounded by NITELY_OTEL_EXPORT_TIMEOUT_MS and never throws, so it cannot
+ * change the run's result.
+ */
+async function exportRunTraceAfterRun(
+  repoPath: string,
+  runId: string,
+  dependencies: RunFlowDependencies,
+): Promise<void> {
+  const exporter = dependencies.exportRunTrace ?? exportRunTrace;
+  if (!dependencies.exportRunTrace && !otlpTraceConfigFromEnv()) return;
+  try {
+    await exporter({
+      runId,
+      listEvents: () => {
+        const store = (dependencies.createEventStore ??
+          ((path: string) => new EventStore(path)))(eventStorePath(resolve(repoPath)));
+        try {
+          return store.list(runId);
+        } finally {
+          store.close();
+        }
+      },
+    });
+  } catch {
+    // exportRunTrace never throws; an injected one must not fail the run either.
   }
 }
 
@@ -13267,10 +13845,12 @@ async function runFlowOnce(
       agentRuntimes: collectAgentRuntimeEvidence(loaded.flow.spec.stages),
       executionBackend: backend.describeExecution?.(),
       stageContextControls: collectStageContextEvidence(loaded.flow),
+      mcpServerAttempts: collectMcpServerAttemptEvidence(events),
       stageReadPolicies: collectStageReadPolicyEvidence(loaded.flow),
       stageTimeouts: collectStageTimeoutEvidence(loaded.flow),
       conformancePolicies: collectConformancePolicies(loaded.flow.spec.stages),
       runtimeUsage: projection.runtimeUsage,
+      runtimeInputBreakdown: projection.runtimeInputBreakdown,
       verificationBudget: projection.verificationBudget,
       repoIndexQueries: projection.repoIndexQueries,
       knowledgeRetrievals: projection.knowledgeRetrievals,
@@ -13958,10 +14538,12 @@ async function runFlowOnce(
                 agentRuntimes: collectAgentRuntimeEvidence(loaded.flow.spec.stages),
                 executionBackend: backend.describeExecution?.(),
                 stageContextControls: collectStageContextEvidence(loaded.flow),
+                mcpServerAttempts: collectMcpServerAttemptEvidence(events),
                 stageReadPolicies: collectStageReadPolicyEvidence(loaded.flow),
                 stageTimeouts: collectStageTimeoutEvidence(loaded.flow),
                 conformancePolicies: collectConformancePolicies(loaded.flow.spec.stages),
                 runtimeUsage: projection.runtimeUsage,
+                runtimeInputBreakdown: projection.runtimeInputBreakdown,
                 repoIndexQueries: projection.repoIndexQueries,
                 knowledgeRetrievals: projection.knowledgeRetrievals,
                 commandAttempts: collectCommandAttemptEvidence({
@@ -14046,10 +14628,12 @@ async function runFlowOnce(
                 agentRuntimes: collectAgentRuntimeEvidence(loaded.flow.spec.stages),
                 executionBackend: backend.describeExecution?.(),
                 stageContextControls: collectStageContextEvidence(loaded.flow),
+                mcpServerAttempts: collectMcpServerAttemptEvidence(events),
                 stageReadPolicies: collectStageReadPolicyEvidence(loaded.flow),
                 stageTimeouts: collectStageTimeoutEvidence(loaded.flow),
                 conformancePolicies: collectConformancePolicies(loaded.flow.spec.stages),
                 runtimeUsage: projection.runtimeUsage,
+                runtimeInputBreakdown: projection.runtimeInputBreakdown,
                 repoIndexQueries: projection.repoIndexQueries,
                 knowledgeRetrievals: projection.knowledgeRetrievals,
                 commandAttempts: collectCommandAttemptEvidence({
@@ -14608,7 +15192,10 @@ function nextAttemptForStage(
   return Math.max(0, ...stage.attempts.map((attempt) => attempt.attempt)) + 1;
 }
 
-function rehydrateStageExecutionState(events: StoredRunEvent[]): {
+function rehydrateStageExecutionState(
+  events: StoredRunEvent[],
+  graphOrder?: readonly string[],
+): {
   attemptsByStage: Map<string, number>;
   previousFailuresByStage: Map<string, PreviousFailure[]>;
   reworkEdges: ReworkEdge[];
@@ -14661,12 +15248,14 @@ function rehydrateStageExecutionState(events: StoredRunEvent[]): {
       ]
         .filter((part): part is string => part !== undefined)
         .join(": ");
-      const failures = previousFailuresByStage.get(targetStage) ?? [];
-      failures.push({
-        attempt: attemptsByStage.get(targetStage) ?? 1,
-        error: detail,
+      recordReworkCycleFailures({
+        previousFailuresByStage,
+        attemptsByStage,
+        order: graphOrder,
+        targetStageId: targetStage,
+        requesterStageId: event.stageId,
+        detail,
       });
-      previousFailuresByStage.set(targetStage, failures);
     }
   }
   return { attemptsByStage, previousFailuresByStage, reworkEdges };
@@ -14753,18 +15342,22 @@ export async function resumeRun(
   dependencies: RunFlowDependencies = {},
 ): Promise<RunFlowResult> {
   let current: ResumeRunInput = input;
-  for (let resumes = 0; ; resumes += 1) {
-    try {
-      return await resumeRunOnce(current, dependencies);
-    } catch (error) {
-      const runId = autoAnsweredRunId(error);
-      if (!runId || resumes >= MAX_AUTO_ANSWER_RESUMES) throw error;
-      current = {
-        repoPath: input.repoPath,
-        runId,
-        ...(input.executionBackend ? { executionBackend: input.executionBackend } : {}),
-      };
+  try {
+    for (let resumes = 0; ; resumes += 1) {
+      try {
+        return await resumeRunOnce(current, dependencies);
+      } catch (error) {
+        const runId = autoAnsweredRunId(error);
+        if (!runId || resumes >= MAX_AUTO_ANSWER_RESUMES) throw error;
+        current = {
+          repoPath: input.repoPath,
+          runId,
+          ...(input.executionBackend ? { executionBackend: input.executionBackend } : {}),
+        };
+      }
     }
+  } finally {
+    await exportRunTraceAfterRun(input.repoPath, current.runId, dependencies);
   }
 }
 
@@ -15220,7 +15813,7 @@ async function resumeRunOnce(
       events,
     });
     const { attemptsByStage, previousFailuresByStage, reworkEdges } =
-      rehydrateStageExecutionState(events);
+      rehydrateStageExecutionState(events, loaded.graph.order);
     const baseBranch = projection.baseBranch ?? "HEAD";
     let changeRequestUrl = projection.changeRequestUrl;
     let changeRequest = projection.changeRequest as ChangeRequest | undefined;
@@ -15324,10 +15917,12 @@ async function resumeRunOnce(
         agentRuntimes: collectAgentRuntimeEvidence(loaded.flow.spec.stages),
         executionBackend: backend.describeExecution?.(),
         stageContextControls: collectStageContextEvidence(loaded.flow),
+        mcpServerAttempts: collectMcpServerAttemptEvidence(events),
         stageReadPolicies: collectStageReadPolicyEvidence(loaded.flow),
         stageTimeouts: collectStageTimeoutEvidence(loaded.flow),
         conformancePolicies: collectConformancePolicies(loaded.flow.spec.stages),
         runtimeUsage: projection.runtimeUsage,
+        runtimeInputBreakdown: projection.runtimeInputBreakdown,
         verificationBudget: projection.verificationBudget,
         repoIndexQueries: projection.repoIndexQueries,
         knowledgeRetrievals: projection.knowledgeRetrievals,

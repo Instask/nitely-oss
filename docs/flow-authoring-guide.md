@@ -76,10 +76,20 @@ and `write.scope: "worktree"` for implementation:
 The local backend maps explicit write bounds to native runtime controls where
 available: Codex uses `read-only` or `workspace-write`, and Claude uses its
 permission mode. A local runtime that cannot enforce a required read-only
-stage fails before launch. Path allowlists, network policy, and command
-mediation without a native mechanism remain recorded as advisory until the
-OCI capability enforcement path is selected. Do not treat an advisory entry
-as a security boundary.
+stage fails before launch. Path allowlists and network policy stay advisory
+until the backend can enforce them. Command mediation is enforced on the OCI
+backend when `commands.advisory` is false; see
+[OCI command mediation](oci-command-mediation.md). The local backend fails
+closed on that demand. Do not treat an advisory entry as a security boundary.
+
+Declare the MCP servers a stage actually uses in `required_mcp_servers`, and
+leave the list empty for stages that need none. That list is what a Codex stage
+loads: each enabled server's tool definitions are resent on every model call,
+so a reflection or review stage that inherits every globally configured server
+pays for them on each call and may call tools it was never meant to use. Set
+`context.globalMcpServers: true` only for a stage that genuinely needs the
+operator's whole MCP setup. See
+[Context Delivery And Usage](context-delivery-and-usage.md#stage-mcp-servers).
 
 ## Artifact Contracts
 

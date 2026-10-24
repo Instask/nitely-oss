@@ -131,6 +131,24 @@ does not grant host root authority. Advanced images can override them with
 `NITELY_OCI_TMPFS_BYTES`, `NITELY_OCI_MAX_FILE_BYTES`,
 `NITELY_OCI_MAX_CAPTURED_OUTPUT_BYTES`, and `NITELY_OCI_TIMEOUT_MS`.
 
+`/tmp` inside a workload is a memory-backed tmpfs capped by
+`NITELY_OCI_TMPFS_BYTES` (256 MiB by default). It is too small for a full test
+suite: one agent attempt exhausted a 1 GiB `/tmp` with `ENOSPC` and could not
+finish verifying. Every workload that mounts the run's worktree therefore also
+gets a disk-backed scratch directory at `/nitely/scratch`, with `TMPDIR`
+pointing at it. On the host it lives at `.nitely/runs/.oci-scratch/<container>`,
+on the same disk as the worktrees, and Nitely removes it with the container.
+Read-only isolated workspaces keep only the tmpfs. Verification also treats
+`ENOSPC` / `no space left on device` as an environment failure, so it is
+retried or escalated rather than sent back to the implementation.
+
+Codex writes a per-thread rollout under `CODEX_HOME/sessions`, which Nitely
+reads after the attempt for per-model-call usage. Inside a container it is lost
+with the container unless `CODEX_HOME` is a bind-mounted host directory. Set
+`NITELY_OCI_CODEX_HOME_HOST_PATH` to that directory's host path, or allowlist
+`CODEX_HOME` when it is mounted at the same path inside and out. See
+[Tracing](tracing.md).
+
 **Agent command policy:** a stage declares which commands its agent may spawn
 with `capabilities.commands`:
 
@@ -151,18 +169,23 @@ program name (`git`, matched by program or basename), an explicit path
 A `deny` match always wins. The runtime CLI Nitely launches is the agent itself,
 not one of its commands, and is never matched against the policy.
 
-Container isolation bounds the filesystem and the network; it does not mediate
-which binaries run inside the image. So the policy resolves one of three ways:
+On the OCI backend the policy resolves as follows. The threat model and the
+limits of that mechanism are in [OCI command mediation](oci-command-mediation.md).
 
 - `unrestricted`: no mediation, as before.
 - `advisory: true`: the allow and deny rules are stated to the agent in its
-  prompt and recorded in evidence, and the stage runs.
-- `advisory: false`: enforcement is demanded, no mechanism provides it, and the
-  stage **fails closed** at preflight rather than running unmediated.
+  prompt and recorded in evidence. The stage runs. OCI does not silently
+  upgrade a stated policy into a block.
+- `advisory: false`: OCI supervises every `execve` and `execveat` the agent
+  process tree makes, after the runtime command Nitely itself launched. The
+  decision uses the resolved executable, not `argv[0]`. If the supervisor
+  cannot be installed, the stage **fails closed** before the workload starts.
 
 The local and mise backends run the agent as an ordinary child process and
 mediate nothing it spawns, so they fail closed on `advisory: false` the same
-way. Evidence records the mode, the advisory flag, and the rule names only.
+way. Evidence records the mode, the mechanism, and the rule names. Denial
+lines add the program basename, the rule, and the argument count. They do not
+record the argument values.
 
 Aggregate bind-mount disk quota (`NITELY_OCI_DISK_BYTES`) is not supported and
 will not be; setting it fails closed. Use per-file `NITELY_OCI_MAX_FILE_BYTES`

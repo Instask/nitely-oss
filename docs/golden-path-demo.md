@@ -69,3 +69,8 @@ project-management breadth.
 Use this smoke after changing task approval, source snapshotting, Run
 eligibility, scheduler execution inputs, publish/update-change behavior, or run
 evidence projection.
+
+Linux CI packs the published tarball, installs it in a clean project, and runs
+this command with mocked providers (`pnpm run package:smoke`). A failure
+uploads the command log and the `summary.json` proof flags. The fixture
+repository and run evidence are deleted and are not uploaded.
