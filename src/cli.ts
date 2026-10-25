@@ -128,6 +128,7 @@ import {
   recordCiRepairDecision,
   submitCiRepair,
 } from "./ci-repair/runtime.js";
+import { listUnknownWorkClaims, resolveUnknownWorkClaim } from "./coordination/claims.js";
 import {
   defaultPilotSetupReportPath,
   generatePilotSetupReport,
@@ -4700,6 +4701,72 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
     run: async ({ argv, io, dependencies }) => {
       return await runEvidenceCli(argv, io);
 
+    },
+  },
+  {
+    name: "coordination",
+    usage: [
+      "  coordination unknown [--repo <path>] [--json]",
+      "  coordination resolve <idempotency-key> --applied --head <sha> [--url <url>] | --not-applied [--repo <path>]",
+    ],
+    run: async ({ argv, io }) => {
+      const usage = "Usage: nitely coordination unknown [--repo <path>] [--json]\n       coordination resolve <idempotency-key> --applied --head <sha> [--url <url>] | --not-applied [--repo <path>]";
+      const subcommand = argv[1];
+      const key = subcommand === "resolve" ? argv[2] : undefined;
+      if ((subcommand !== "unknown" && subcommand !== "resolve") || (subcommand === "resolve" && (!key || key.startsWith("--")))) {
+        io.stderr(usage);
+        return 1;
+      }
+      let repoPath = ".";
+      let json = false;
+      let outcome: "applied" | "not-applied" | undefined;
+      let head: string | undefined;
+      let url: string | undefined;
+      try {
+        for (let index = subcommand === "resolve" ? 3 : 2; index < argv.length; index += 1) {
+          const arg = argv[index];
+          const value = () => {
+            const next = argv[++index];
+            if (!next || next.startsWith("--")) throw new Error(`Missing value for ${arg}`);
+            return next;
+          };
+          if (arg === "--repo") repoPath = value();
+          else if (arg === "--json" && subcommand === "unknown") json = true;
+          else if (arg === "--applied" && subcommand === "resolve" && !outcome) outcome = "applied";
+          else if (arg === "--not-applied" && subcommand === "resolve" && !outcome) outcome = "not-applied";
+          else if (arg === "--head" && subcommand === "resolve") head = value();
+          else if (arg === "--url" && subcommand === "resolve") url = value();
+          else throw new Error(`Unknown coordination ${subcommand} option: ${arg}`);
+        }
+        if (subcommand === "unknown") {
+          const claims = listUnknownWorkClaims(repoPath);
+          if (json) {
+            io.stdout(JSON.stringify(claims, null, 2));
+          } else if (claims.length === 0) {
+            io.stdout("No unknown work claims.");
+          } else {
+            for (const claim of claims) {
+              io.stdout(`${claim.idempotencyKey}\trun ${claim.runId}\tsince ${claim.updatedAt}\t${claim.domains.join(" ")}`);
+            }
+          }
+          return 0;
+        }
+        if (!outcome) throw new Error("Choose --applied or --not-applied");
+        if (outcome === "applied" && !head) throw new Error("--applied requires --head <sha> of the pushed change");
+        if (outcome === "not-applied" && (head || url)) throw new Error("--not-applied takes no --head or --url");
+        if (url && !/^https:\/\/github\.com\/\S{1,200}$/.test(url)) throw new Error("--url must be a https://github.com/ URL");
+        const resolved = resolveUnknownWorkClaim(repoPath, {
+          idempotencyKey: key!,
+          outcome,
+          ...(head ? { head } : {}),
+          ...(url ? { url } : {}),
+        });
+        io.stdout(`WORK CLAIM ${key} resolved as ${outcome} for run ${resolved.runId}: ${resolved.domains.join(" ")}`);
+        return 0;
+      } catch (error) {
+        io.stderr(error instanceof Error ? error.message : String(error));
+        return 1;
+      }
     },
   },
   {
