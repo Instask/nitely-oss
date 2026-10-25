@@ -149,6 +149,9 @@ export interface SandboxPolicyV1 {
   readonly tmpfsExec: boolean;
 }
 
+/** Disk-backed temp directory inside OCI containers; TMPDIR points here. */
+const OCI_SCRATCH_PATH = "/nitely/scratch";
+
 const DEFAULT_RESOURCES: OciResourcePolicy = {
   cpus: 1,
   memoryBytes: 1024 * 1024 * 1024,
@@ -1015,6 +1018,20 @@ export class OciExecutionBackend implements ExecutionBackend {
   private async executePlan(plan: {
     containerName: string;
     launch: SandboxProcessInput;
+    scratchDirectory?: string;
+  }): Promise<SandboxProcessResult> {
+    try {
+      return await this.executeContainerPlan(plan);
+    } finally {
+      if (plan.scratchDirectory) {
+        await rm(plan.scratchDirectory, { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
+  }
+
+  private async executeContainerPlan(plan: {
+    containerName: string;
+    launch: SandboxProcessInput;
   }): Promise<SandboxProcessResult> {
     await this.verifyRootlessEngine();
     let result: SandboxProcessResult | undefined;
@@ -1092,7 +1109,7 @@ export class OciExecutionBackend implements ExecutionBackend {
     networkPlan?: ContainerNetworkPlan,
     visibleInputPaths?: readonly string[],
     secretNames?: readonly string[],
-  ): Promise<{ containerName: string; launch: SandboxProcessInput }> {
+  ): Promise<{ containerName: string; launch: SandboxProcessInput; scratchDirectory?: string }> {
     if (!ws.path) {
       throw new Error("OCI execution backend requires a host worktree path");
     }
@@ -1116,6 +1133,17 @@ export class OciExecutionBackend implements ExecutionBackend {
     }
     const containerName = this.containerName();
     assertContainerName(containerName);
+    // The /tmp tmpfs counts against memory and is small; a full test suite in
+    // an agent container exhausted a 1 GiB one in production (ENOSPC), so the
+    // agent could not finish verifying. A disk-backed scratch directory beside
+    // the run, removed with the container, takes TMPDIR instead.
+    const scratchDirectory = options?.isolatedWorkspace
+      ? undefined
+      : join(dirname(runRoot), ".oci-scratch", containerName);
+    if (scratchDirectory) {
+      assertDockerMountPath(scratchDirectory);
+      await mkdir(scratchDirectory, { recursive: true });
+    }
     const timeoutMs = options?.timeoutMs ?? this.resources.timeoutMs;
     const labels = lifecycleLabels({
       runId: options?.runId ?? ws.runId,
@@ -1167,6 +1195,14 @@ export class OciExecutionBackend implements ExecutionBackend {
         `type=bind,src=${workspace},dst=/workspace${options?.isolatedWorkspace ? ",readonly" : ""}`,
       ]),
       ...(options?.isolatedWorkspace ? [] : ["--mount", "type=bind,src=/dev/null,dst=/workspace/.git,readonly"]),
+      ...(scratchDirectory
+        ? [
+          "--mount",
+          `type=bind,src=${scratchDirectory},dst=${OCI_SCRATCH_PATH}`,
+          "--env",
+          `TMPDIR=${OCI_SCRATCH_PATH}`,
+        ]
+        : []),
       ...runArtifactMountArgs,
       ...(options?.isolatedWorkspace
         ? ["--tmpfs", `/nitely/output:rw,nosuid,nodev,noexec,mode=1777,size=${this.resources.tmpfsBytes}`]
@@ -1193,6 +1229,7 @@ export class OciExecutionBackend implements ExecutionBackend {
         maxOutputBytes: this.resources.maxCapturedOutputBytes,
         signal: options?.signal,
       },
+      ...(scratchDirectory ? { scratchDirectory } : {}),
     };
   }
 

@@ -16203,6 +16203,16 @@ async function resumeRunOnce(
                       injectedAgentMemory,
                     })
                   : undefined,
+              onStageChange: () =>
+                dependencies.cancellation?.onStageChange?.({
+                  stageId: stage.id,
+                  attempt,
+                }),
+              assertNotCancelled: () =>
+                throwIfRunCancelled(dependencies.cancellation, {
+                  stageId: stage.id,
+                  attempt,
+                }),
             });
 
             let failureError: string | undefined;
@@ -16848,6 +16858,8 @@ async function resumeRunOnce(
           attemptDirectory,
         });
       }
+      dependencies.cancellation?.onStageChange?.({ stageId: stage.id, attempt });
+      throwIfRunCancelled(dependencies.cancellation, { stageId: stage.id, attempt });
 
       try {
         if (!resumeApprovalAttempt && !resumeOperatorReview) {

@@ -73,6 +73,7 @@ import {
   resolveApproval,
   type ResolveApprovalInput,
 } from "./run/approvals.js";
+import { denyRunApproval, withRunContinuationClaim } from "./run/control.js";
 import {
   answerQuestion,
   listQuestions,
@@ -228,6 +229,7 @@ export interface CliDependencies {
   getRunStatus?: (repoPath: string, runId: string) => Promise<ProjectedRun>;
   listApprovals?: (repoPath: string, runId: string) => Promise<ProjectedApproval[]>;
   resolveApproval?: (input: ResolveApprovalInput) => Promise<ProjectedApproval>;
+  denyRunApproval?: typeof denyRunApproval;
   listQuestions?: (
     repoPath: string,
     runId: string,
@@ -2823,14 +2825,14 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
         return 1;
       }
       try {
-        const decision = argv[0] === "approve" ? "approved" : "denied";
-        const approval = await (dependencies.resolveApproval ?? resolveApproval)({
-          repoPath,
-          runId,
-          approvalId,
-          decision,
-          ...(actor ? { actor } : {}),
-        });
+        const approvalInput = { repoPath, runId, approvalId, ...(actor ? { actor } : {}) };
+        // A denial is terminal: it fails the Run and settles its Work item.
+        const approval = argv[0] === "approve"
+          ? await (dependencies.resolveApproval ?? resolveApproval)({
+              ...approvalInput,
+              decision: "approved",
+            })
+          : await (dependencies.denyRunApproval ?? denyRunApproval)(approvalInput);
         io.stdout(`APPROVAL ${approval.id} ${approval.status}`);
         return 0;
       } catch (error) {
@@ -2878,14 +2880,14 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
         return 1;
       }
       try {
-        const decision = argv[0] === "approve" ? "approved" : "denied";
-        const approval = await (dependencies.resolveApproval ?? resolveApproval)({
-          repoPath,
-          runId,
-          approvalId,
-          decision,
-          ...(actor ? { actor } : {}),
-        });
+        const approvalInput = { repoPath, runId, approvalId, ...(actor ? { actor } : {}) };
+        // A denial is terminal: it fails the Run and settles its Work item.
+        const approval = argv[0] === "approve"
+          ? await (dependencies.resolveApproval ?? resolveApproval)({
+              ...approvalInput,
+              decision: "approved",
+            })
+          : await (dependencies.denyRunApproval ?? denyRunApproval)(approvalInput);
         io.stdout(`APPROVAL ${approval.id} ${approval.status}`);
         return 0;
       } catch (error) {
@@ -5406,12 +5408,14 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
         return 1;
       }
       try {
-        const result = await (dependencies.resumeRun ?? resumeRun)({
-          repoPath,
-          runId,
-          ...(checkpointId ? { checkpointId } : {}),
-          ...(executionBackend ? { executionBackend } : {}),
-        });
+        const result = await withRunContinuationClaim(repoPath, runId, async () =>
+          await (dependencies.resumeRun ?? resumeRun)({
+            repoPath,
+            runId,
+            ...(checkpointId ? { checkpointId } : {}),
+            ...(executionBackend ? { executionBackend } : {}),
+          }),
+        );
         printResumeResult(io, result, "resumed", repoPath);
         return 0;
       } catch (error) {
