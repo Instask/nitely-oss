@@ -1,4 +1,4 @@
-import { normalizeRunOverrides, type RunOverrides } from "../flow/overrides.js";
+import { normalizeRunOverrides, type RunOverrides } from "../../flow/overrides.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   CatalogFlowDisabledError,
@@ -6,8 +6,8 @@ import {
   isFlowSeedKey,
   resolveCatalogFlow,
   type ResolvedCatalogFlow,
-} from "../flows/catalog.js";
-import type { FlowRecord } from "../flows/store.js";
+} from "../../flows/catalog.js";
+import type { FlowRecord } from "../../flows/store.js";
 import {
   mkdir,
   readdir,
@@ -21,21 +21,21 @@ import { dirname, join, resolve } from "node:path";
 import {
   RepositoryFlowPathError,
   resolveRepositoryFlowPath,
-} from "../flows/paths.js";
-import type { IntakeConversationTurn } from "../intake/conversation.js";
-import type { PlanningApprovalStatus } from "../work-items/planning.js";
-import type { FlowTemplateLineage } from "../flows/templates.js";
+} from "../../flows/paths.js";
+import type { IntakeConversationTurn } from "../../intake/conversation.js";
+import type { PlanningApprovalStatus } from "../planning.js";
+import type { FlowTemplateLineage } from "../../flows/templates.js";
 import type {
   WorkItemCandidateVersion,
-} from "../work-items/types.js";
+} from "../types.js";
 import type {
   NormalizedLinkedIssue,
   NormalizedTicketAttachment,
   TicketSourceType,
-} from "../ticket-sources/types.js";
-import { WebInputError, WebNotFoundError } from "./errors.js";
-import { setStructuredSpecStatus } from "../spec-artifacts/parse.js";
-import { workItemCandidateFingerprint } from "../work-items/candidate-version.js";
+} from "../../ticket-sources/types.js";
+import { WebInputError, WebNotFoundError } from "../../web/errors.js";
+import { setStructuredSpecStatus } from "../../spec-artifacts/parse.js";
+import { workItemCandidateFingerprint } from "../candidate-version.js";
 
 export type TaskStatus = "draft" | "ready" | "running" | "completed" | "failed";
 export type SpecApprovalStatus = "draft" | "approved";

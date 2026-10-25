@@ -225,7 +225,6 @@ import {
   updateTaskSpecApproval,
   updateTaskTechnicalDesign,
   updateTaskTechnicalDesignApproval,
-  updateTaskRunState,
   updateTaskSpec,
   updateTaskSourceRecord,
   isSnapshotBackedTaskSourceType,
@@ -241,7 +240,7 @@ import {
   type TaskSourceSnapshot,
   type TaskSourceStatusSync,
   validateFlowPath,
-} from "./tasks.js";
+} from "../work-items/adapters/dev-pr-store.js";
 import {
   ExternalDocumentInputError,
   normalizeExternalDocument,
@@ -324,6 +323,7 @@ import {
   prepareWorkItemRunCandidate,
   prepareWorkItemRunCandidates,
   projectWorkItem,
+  updateWorkItemRunState,
 } from "../work-items/access.js";
 import {
   getWorkItemView,
@@ -6229,30 +6229,7 @@ async function updateUnifiedRunState(
   patch: Parameters<typeof updateWorkItem>[2],
   storeKind?: WorkItemStoreKind,
 ): Promise<void> {
-  if (storeKind === "generic") {
-    await updateWorkItem(repoPath, id, patch);
-    return;
-  }
-  if (storeKind !== "legacy-dev-pr") {
-    try {
-      await updateWorkItem(repoPath, id, patch);
-      return;
-    } catch (error) {
-      if (!(error instanceof WebNotFoundError)) {
-        throw error;
-      }
-    }
-  }
-  if (!patch.status) {
-    throw new Error(`legacy task run-state update requires status: ${id}`);
-  }
-  await updateTaskRunState(repoPath, id, {
-    status: patch.status,
-    ...(patch.latestRunId !== undefined ? { latestRunId: patch.latestRunId } : {}),
-    ...(patch.changeRequestUrl !== undefined
-      ? { changeRequestUrl: patch.changeRequestUrl }
-      : {}),
-  });
+  await updateWorkItemRunState(repoPath, id, patch, storeKind);
 }
 
 async function settleOrUpdateUnifiedRun(

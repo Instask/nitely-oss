@@ -24,7 +24,7 @@ import { resumeRun, runFlow } from "../../src/run/run-flow.js";
 import { runSchedulerOnce } from "../../src/scheduler/run.js";
 import { listUnifiedWorkItems } from "../../src/work-items/access.js";
 import { runWebUsageLimitRecovery } from "../../src/web/server.js";
-import { createTask, updateTaskRunState } from "../../src/web/tasks.js";
+import { createTask, updateTaskRunState } from "../../src/work-items/adapters/dev-pr-store.js";
 
 const execFileAsync = promisify(execFile);
 

@@ -22,7 +22,7 @@ import {
   type TaskPlanningBaseline,
   type TaskSourceDriftOverride,
   type TaskSpecReadinessOverride,
-} from "../web/tasks.js";
+} from "../work-items/adapters/dev-pr-store.js";
 import { RunAdmissionStore, type StoredRunAdmission } from "./admission-store.js";
 import { eventStorePath, projectRun } from "./project.js";
 import type { RunFlowInput } from "./run-flow.js";

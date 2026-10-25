@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { createCompletionPredicate } from "../../src/scheduler/completion.js";
 import type { ChangeRequestStatus } from "../../src/scm/types.js";
-import type { TaskRecord } from "../../src/web/tasks.js";
+import type { TaskRecord } from "../../src/work-items/adapters/dev-pr-store.js";
 
 function task(
   id: string,

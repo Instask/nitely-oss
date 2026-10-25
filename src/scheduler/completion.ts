@@ -1,5 +1,5 @@
 import type { ChangeRequestStatus } from "../scm/types.js";
-import type { TaskRecord } from "../web/tasks.js";
+import type { TaskRecord } from "../work-items/adapters/dev-pr-store.js";
 
 export type ChangeRequestStatusFetcher = (
   url: string,
