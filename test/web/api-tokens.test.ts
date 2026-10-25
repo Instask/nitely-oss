@@ -195,7 +195,12 @@ describe("scoped API tokens", () => {
         target: { previewSessionId: "pvs_1111111111111111" },
       },
     ]);
-    expect(apiTokenActionForRequest("GET", "/api/providers")).toBeNull();
+    expect(apiTokenActionForRequest("POST", "/api/providers/openrouter/connection")).toBeNull();
+    expect(apiTokenActionForRequest("DELETE", "/api/providers/openrouter/connection")).toBeNull();
+    expect(apiTokenActionForRequest("POST", "/api/providers/openrouter/oauth/start")).toBeNull();
+    expect(
+      apiTokenActionForRequest("POST", "/api/providers/openrouter/connections/conn-1/disconnect"),
+    ).toBeNull();
     expect(apiTokenActionForRequest("PATCH", "/api/flows/flows%2Fimplement.json")).toBeNull();
     expect(apiTokenActionForRequest("GET", "/api/flows/%E0%A4%A")).toBeNull();
     expect(apiTokenActionForRequest("GET", "/api/preview-sessions/pvs_1/proxy/app")).toBeNull();
@@ -220,6 +225,19 @@ describe("scoped API tokens", () => {
       capability: "runs:start",
       target: { runId: "run-1" },
     });
+  });
+
+  it("maps provider status and validation, and nothing else, to providers:validate", () => {
+    expect(apiTokenActionForRequest("GET", "/api/providers")).toEqual({
+      action: "providers.list",
+      capability: "providers:validate",
+    });
+    expect(
+      apiTokenActionForRequest("POST", "/api/providers/openrouter/connections/conn-1/validate"),
+    ).toEqual({ action: "providers.validate", capability: "providers:validate" });
+    expect(
+      apiTokenActionForRequest("GET", "/api/providers/openrouter/connections/conn-1/validate"),
+    ).toBeNull();
   });
 
   it("maps Flow catalog reads to tasks:read and mutations to flows:manage", () => {
@@ -329,6 +347,7 @@ describe("scoped API tokens", () => {
       "preview:control",
       "preview:compare",
       "flows:manage",
+      "providers:validate",
     ] as const) {
       await expect(
         createApiToken(repoPath, {
@@ -356,6 +375,7 @@ describe("scoped API tokens", () => {
       "preview:control",
       "preview:compare",
       "flows:manage",
+      "providers:validate",
     ]);
   });
 

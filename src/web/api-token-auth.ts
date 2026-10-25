@@ -72,6 +72,17 @@ export function apiTokenActionForRequest(
   if (method === "GET" && pathname === "/api/flows") {
     return { action: "flows.list", capability: "tasks:read" };
   }
+  // Provider status and validation only. Setting, clearing, and OAuth stay
+  // Console-only, so a token never handles a provider secret.
+  if (method === "GET" && pathname === "/api/providers") {
+    return { action: "providers.list", capability: "providers:validate" };
+  }
+  if (
+    method === "POST" &&
+    /^\/api\/providers\/[^/]+\/connections\/[^/]+\/validate$/.test(pathname)
+  ) {
+    return { action: "providers.validate", capability: "providers:validate" };
+  }
   const flowAction = apiTokenFlowAction(method, pathname);
   if (flowAction) return flowAction;
   if (method === "GET" && pathname === "/api/tasks") {

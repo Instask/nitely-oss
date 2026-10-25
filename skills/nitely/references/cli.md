@@ -241,6 +241,8 @@ nitely whoami
 nitely disconnect
 nitely auth login --server <url> --capability <cap> [--allow-high-impact] [--no-browser]
 nitely auth logout
+nitely provider list [--server <url>] [--json]
+nitely provider validate <provider-id> [--connection <id>] [--allow-stored-only] [--server <url>] [--json]
 nitely scheduler [--repo <path>] [--window HH:MM-HH:MM] [--daemon] [--once] [--server <url>] \
   [--interval-ms <n>] [--max-cycles <n>] [--max-concurrent-tasks <n>] [--usage-limit-cooldown-ms <n>]
 nitely schedule create --name <name> (--cron <expr> | --every <duration> | --at <iso>) \
@@ -254,6 +256,11 @@ nitely schedule tick [--repo <path>] [--json]
 ```
 
 There is no `--token` flag anywhere; tokens are read from `NITELY_API_TOKEN`.
+`provider validate` is the Console's **Providers → Validate**. It exits zero only
+when the provider accepted the key live (`valid`). A stored-only check
+(`unverified`, every provider except an OpenRouter API key today) fails unless
+`--allow-stored-only` is passed. It needs the high-impact `providers:validate`
+capability; keys are set only in the Console.
 `scheduler` stays local unless `--server` or `NITELY_SERVER_URL` is set.
 
 A `schedule` only decides when work is created: each firing makes one Task and

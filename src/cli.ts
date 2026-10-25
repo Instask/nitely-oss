@@ -12,6 +12,7 @@ import {
 import { FlowValidationError, loadFlow, parseFlowDocument } from "./flow/load.js";
 import { lintFlowProduction } from "./flows/lint.js";
 import { FLOW_CLI_USAGE, runFlowCli } from "./cli/flows.js";
+import { runProviderCommand } from "./cli/providers.js";
 import {
   resumeRun,
   runFlow,
@@ -4379,6 +4380,20 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
       }
 
     },
+  },
+  {
+    name: "provider",
+    usage: [
+      "  provider list [--server <url>] [--json]",
+      "  provider validate <provider-id> [--connection <id>] [--server <url>] [--json]",
+    ],
+    run: async ({ argv, io, dependencies }) =>
+      await runProviderCommand({
+        argv,
+        env: dependencies.env ?? process.env,
+        fetchImpl: dependencies.fetch ?? fetch,
+        io,
+      }),
   },
   {
     name: "run",
