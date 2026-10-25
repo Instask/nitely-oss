@@ -39,6 +39,23 @@ jobs:
       - name: Typecheck
         run: pnpm run check
 
+      # The command-mediator race tests compile small binaries. A runner
+      # without gcc fails those three tests at spawn; name the gap here.
+      - name: Command-mediator compiler
+        run: gcc --version
+
+      # The Codex MCP server regression runs the real CLI, because what it
+      # checks is Codex's own merge of its config layers. `codex mcp list`
+      # needs no credentials. Pinned and installed outside the checkout;
+      # NITELY_TEST_REQUIRE_CODEX makes a missing binary fail, not skip.
+      - name: Pinned Codex CLI
+        run: |
+          npm install --no-save --no-audit --no-fund --prefix "$RUNNER_TEMP/codex-cli" @openai/codex@0.162.0
+          codex_bin="$RUNNER_TEMP/codex-cli/node_modules/.bin/codex"
+          "$codex_bin" --version
+          echo "NITELY_TEST_CODEX_BIN=$codex_bin" >> "$GITHUB_ENV"
+          echo "NITELY_TEST_REQUIRE_CODEX=1" >> "$GITHUB_ENV"
+
       - name: Tests
         run: pnpm run test:run
 
@@ -77,5 +94,108 @@ jobs:
         with:
           name: package-smoke-diagnostics
           path: package-smoke-diagnostics/
+          if-no-files-found: warn
+          retention-days: 7
+
+  rootless-oci:
+    name: Rootless OCI integration
+    # The OCI backend's isolation claims (bind mounts, the egress boundary, and
+    # command mediation under ptrace and seccomp) only mean something against a
+    # real rootless dockerd. That needs root to set up, so this job runs on a
+    # fresh GitHub-hosted VM rather than reconfiguring a self-hosted runner.
+    # x86_64 only: command mediation does not support other architectures.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Stop the rootful daemon first: with it running, a test could pass
+      # against the wrong engine. The backend also refuses a non-rootless
+      # engine, and the suite asserts `rootless` in SecurityOptions.
+      # The hosted image ships moby without the rootless extras, so the daemon
+      # comes from Docker's pinned static bundle. The preinstalled CLI and its
+      # buildx plugin talk to it through DOCKER_HOST.
+      - name: Start rootless Docker
+        env:
+          DOCKER_STATIC_VERSION: 27.3.1
+        run: |
+          set -euxo pipefail
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            uidmap slirp4netns
+          bundle="$RUNNER_TEMP/docker-static"
+          mkdir -p "$bundle"
+          for archive in docker docker-rootless-extras; do
+            curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/${archive}-${DOCKER_STATIC_VERSION}.tgz" \
+              | tar -xz -C "$bundle"
+          done
+          daemon_path="$bundle/docker:$bundle/docker-rootless-extras:$PATH"
+          sudo systemctl disable --now docker.service docker.socket
+          sudo rm -f /var/run/docker.sock
+          grep -q "^$(id -un):" /etc/subuid || echo "$(id -un):100000:65536" | sudo tee -a /etc/subuid
+          grep -q "^$(id -un):" /etc/subgid || echo "$(id -un):100000:65536" | sudo tee -a /etc/subgid
+          runtime_dir="/run/user/$(id -u)"
+          sudo mkdir -p "$runtime_dir"
+          sudo chown "$(id -u):$(id -g)" "$runtime_dir"
+          chmod 700 "$runtime_dir"
+          PATH="$daemon_path" XDG_RUNTIME_DIR="$runtime_dir" nohup dockerd-rootless.sh \
+            > "$RUNNER_TEMP/dockerd-rootless.log" 2>&1 &
+          echo "XDG_RUNTIME_DIR=$runtime_dir" >> "$GITHUB_ENV"
+          echo "DOCKER_HOST=unix://$runtime_dir/docker.sock" >> "$GITHUB_ENV"
+          for _ in $(seq 1 60); do
+            if DOCKER_HOST="unix://$runtime_dir/docker.sock" docker info >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          DOCKER_HOST="unix://$runtime_dir/docker.sock" docker info --format '{{json .SecurityOptions}}' | tee /dev/stderr | grep -q rootless
+
+      # The production runner image (node + python3), so the tests exercise
+      # the mediator and the egress gateway in what operators deploy. busybox
+      # has no python3 and proves the enforcement path refuses to launch.
+      - name: Build runner image
+        run: |
+          docker build --target command -t nitely-runner:ci docker/runner
+          docker pull busybox:1.36.1
+
+      - name: Rootless OCI tests
+        env:
+          NITELY_TEST_ROOTLESS_DOCKER: "1"
+          NITELY_OCI_TEST_IMAGE: nitely-runner:ci
+          NITELY_OCI_NO_PYTHON_TEST_IMAGE: busybox:1.36.1
+        run: >-
+          pnpm exec vitest run
+          test/run/execution/oci.test.ts
+          test/run/execution/oci-rootless.test.ts
+          --no-file-parallelism
+          --reporter=default --reporter=json
+          --outputFile.json=rootless-oci-report.json
+
+      # Vitest reports a gated test as skipped and still exits 0. This step is
+      # what makes the job fail if the real-daemon tests did not actually run.
+      - name: Require real-daemon tests to have passed
+        run: >-
+          pnpm exec tsx scripts/assert-vitest-report.mts rootless-oci-report.json
+          "writes worktree and output bind mounts through a real rootless Docker daemon"
+          "blocks direct sockets even when an allowlisted gateway is configured"
+          "enforces command allow and deny inside a real rootless container"
+          "OCI backend on a real rootless Docker daemon"
+
+      - name: Upload rootless daemon log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootless-dockerd-log
+          path: ${{ runner.temp }}/dockerd-rootless.log
           if-no-files-found: warn
           retention-days: 7

@@ -7,6 +7,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 
 import type {
   AgentResult,
+  AgentMcpServersRequest,
   AgentReadPolicy,
   AgentRuntimePreflightResult,
   CommandResult,
@@ -22,11 +23,16 @@ import {
   createDefaultAgentRuntimeRegistry,
   LocalExecutionBackend,
   parseRuntimeUsage,
+  resolveMcpServerRestriction,
   type AgentRuntimeRegistry,
   type ClaudePermissionMode,
   type RuntimeEnv,
 } from "./local.js";
+import { createCodexExecCapture } from "./codex-activity.js";
+import { withCodexToolOutputLimit } from "./codex-tool-output.js";
+import { applyCodexRolloutCalls } from "./codex-rollout.js";
 import {
+  captureCallContent,
   createPiJsonCapture,
   isPiJsonRuntime,
   normalizePiJsonResult,
@@ -80,7 +86,8 @@ export interface SandboxProcessInput {
   signal?: AbortSignal;
   /**
    * Receives stdout instead of a raw buffer; `maxOutputBytes` then counts
-   * what it holds. Used to keep Pi's JSON event stream in bounded memory.
+   * what it holds. Used to keep Pi and Codex JSON event streams in bounded
+   * memory.
    */
   stdoutCapture?: PiJsonCapture;
 }
@@ -140,6 +147,9 @@ export interface SandboxPolicyV1 {
   readonly resources: Readonly<OciResourcePolicy>;
   readonly tmpfsExec: boolean;
 }
+
+/** Disk-backed temp directory inside OCI containers; TMPDIR points here. */
+const OCI_SCRATCH_PATH = "/nitely/scratch";
 
 const DEFAULT_RESOURCES: OciResourcePolicy = {
   cpus: 1,
@@ -223,6 +233,8 @@ const OCI_LIFECYCLE_LABELS = [
   "com.nitely.expires-at",
   "com.nitely.instance-id",
 ] as const;
+
+const OCI_RUNTIME_PROBE_TIMEOUT_MS = 60_000;
 
 function unsupervisedCommandMediation(stageId: string, mechanism: string): string {
   return `stage ${stageId}: command mediation mechanism ${mechanism} cannot supervise agent-spawned commands; refusing to launch an unmediated workload`;
@@ -508,6 +520,7 @@ function withPartialAgentOutput(
       stderr,
       exitCode: 1,
       ...(input.model ? { model: input.model } : {}),
+      ...(captureCallContent() ? { captureContent: true } : {}),
     });
     Object.assign(carrier, { stdout: normalized.stdout, stderr: normalized.stderr });
     if (carrier !== source) Object.assign(source, { stdout: normalized.stdout, stderr: normalized.stderr });
@@ -1008,6 +1021,20 @@ export class OciExecutionBackend implements ExecutionBackend {
   private async executePlan(plan: {
     containerName: string;
     launch: SandboxProcessInput;
+    scratchDirectory?: string;
+  }): Promise<SandboxProcessResult> {
+    try {
+      return await this.executeContainerPlan(plan);
+    } finally {
+      if (plan.scratchDirectory) {
+        await rm(plan.scratchDirectory, { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
+  }
+
+  private async executeContainerPlan(plan: {
+    containerName: string;
+    launch: SandboxProcessInput;
   }): Promise<SandboxProcessResult> {
     await this.verifyRootlessEngine();
     let result: SandboxProcessResult | undefined;
@@ -1085,7 +1112,7 @@ export class OciExecutionBackend implements ExecutionBackend {
     networkPlan?: ContainerNetworkPlan,
     visibleInputPaths?: readonly string[],
     secretNames?: readonly string[],
-  ): Promise<{ containerName: string; launch: SandboxProcessInput }> {
+  ): Promise<{ containerName: string; launch: SandboxProcessInput; scratchDirectory?: string }> {
     if (!ws.path) {
       throw new Error("OCI execution backend requires a host worktree path");
     }
@@ -1109,6 +1136,17 @@ export class OciExecutionBackend implements ExecutionBackend {
     }
     const containerName = this.containerName();
     assertContainerName(containerName);
+    // The /tmp tmpfs counts against memory and is small; a full test suite in
+    // an agent container exhausted a 1 GiB one in production (ENOSPC), so the
+    // agent could not finish verifying. A disk-backed scratch directory beside
+    // the run, removed with the container, takes TMPDIR instead.
+    const scratchDirectory = options?.isolatedWorkspace
+      ? undefined
+      : join(dirname(runRoot), ".oci-scratch", containerName);
+    if (scratchDirectory) {
+      assertDockerMountPath(scratchDirectory);
+      await mkdir(scratchDirectory, { recursive: true });
+    }
     const timeoutMs = options?.timeoutMs ?? this.resources.timeoutMs;
     const labels = lifecycleLabels({
       runId: options?.runId ?? ws.runId,
@@ -1160,6 +1198,14 @@ export class OciExecutionBackend implements ExecutionBackend {
         `type=bind,src=${workspace},dst=/workspace${options?.isolatedWorkspace ? ",readonly" : ""}`,
       ]),
       ...(options?.isolatedWorkspace ? [] : ["--mount", "type=bind,src=/dev/null,dst=/workspace/.git,readonly"]),
+      ...(scratchDirectory
+        ? [
+          "--mount",
+          `type=bind,src=${scratchDirectory},dst=${OCI_SCRATCH_PATH}`,
+          "--env",
+          `TMPDIR=${OCI_SCRATCH_PATH}`,
+        ]
+        : []),
       ...runArtifactMountArgs,
       ...(options?.isolatedWorkspace
         ? ["--tmpfs", `/nitely/output:rw,nosuid,nodev,noexec,mode=1777,size=${this.resources.tmpfsBytes}`]
@@ -1186,6 +1232,7 @@ export class OciExecutionBackend implements ExecutionBackend {
         maxOutputBytes: this.resources.maxCapturedOutputBytes,
         signal: options?.signal,
       },
+      ...(scratchDirectory ? { scratchDirectory } : {}),
     };
   }
 
@@ -1270,6 +1317,7 @@ export class OciExecutionBackend implements ExecutionBackend {
       attemptDirectory: string;
       timeoutMs?: number;
       signal?: AbortSignal;
+      mcpServers?: AgentMcpServersRequest;
       visibleInputPaths?: string[];
       readPolicy?: AgentReadPolicy;
     },
@@ -1305,6 +1353,7 @@ export class OciExecutionBackend implements ExecutionBackend {
     let boundedWorkspace: { path: string; cleanup: string } | undefined;
     let networkPlan: ContainerNetworkPlan | undefined;
     let mediatorDir: string | undefined;
+    let mcpServers: Awaited<ReturnType<typeof resolveMcpServerRestriction>> | undefined;
     try {
       if (networkDecision.mode === "allowlist") {
         if (!this.networkGatewayFactory) {
@@ -1434,9 +1483,46 @@ export class OciExecutionBackend implements ExecutionBackend {
         input.visibleInputPaths ?? [],
         secretNames,
       );
-      const runtimeArgs = [...launch.args];
+      let runtimeArgs = [...launch.args];
       if (launch.runtime === "codex" && runtimeArgs[0] === "exec") {
         runtimeArgs.splice(1, 0, "--skip-git-repo-check");
+      }
+      // The probe runs the runtime CLI in its own offline container with the
+      // same image, mounts, and environment, so it sees exactly the config
+      // layers the launch will (an image's system config included).
+      mcpServers = await resolveMcpServerRestriction({
+        runtime,
+        request: input.mcpServers,
+        launch: { ...launch, args: runtimeArgs },
+        probe: async (args) => {
+          const probePlan = await this.commandPlan(
+            ws,
+            "",
+            { ...options, timeoutMs: OCI_RUNTIME_PROBE_TIMEOUT_MS, signal: input.signal },
+            workspaceMountArgs,
+            undefined,
+            input.visibleInputPaths ?? [],
+            secretNames,
+          );
+          probePlan.launch.args.splice(-3, 3, launch.command, ...args);
+          probePlan.launch.stdin = undefined;
+          const probed = await this.executePlan(probePlan);
+          if (probed.exitCode !== 0) {
+            throw new Error(`${launch.command} ${args.join(" ")} exited with code ${probed.exitCode}`);
+          }
+          return probed.stdout;
+        },
+        env: runtimeEnv,
+        // The container has no user config of its own to fall back on.
+        allowConfigFallback: false,
+        stageId: input.stage.id,
+      });
+      if (mcpServers.disable.length > 0 && runtime.mcpServerRestriction) {
+        runtimeArgs = runtime.mcpServerRestriction.disable(runtimeArgs, mcpServers.disable);
+      }
+      // Codex truncates each stored tool output to the stage's read budget.
+      if (launch.runtime === "codex") {
+        runtimeArgs = withCodexToolOutputLimit(runtimeArgs, input.readPolicy?.maxToolOutputTokens);
       }
       if (launch.runtime === "claude") {
         // A rootless engine maps the operator to uid 0 inside the container,
@@ -1457,13 +1543,15 @@ export class OciExecutionBackend implements ExecutionBackend {
         plan.launch.stdin = undefined;
       }
       const piJson = isPiJsonRuntime(launch.runtime);
-      if (piJson) plan.launch.stdoutCapture = createPiJsonCapture();
+      if (piJson) plan.launch.stdoutCapture = createPiJsonCapture({ captureContent: captureCallContent() });
+      else if (launch.runtime === "codex") plan.launch.stdoutCapture = createCodexExecCapture();
       if (mediation.status === "enforced") {
         await this.assertCommandMediatorPython();
         mediatorDir = await this.prepareCommandMediator(mediation.policy);
         this.installCommandMediator(plan.launch.args, mediatorDir);
       }
       let executed: SandboxProcessResult;
+      const attemptStartedAtMs = Date.now();
       try {
         executed = await this.executePlan(plan);
       } catch (error) {
@@ -1483,12 +1571,19 @@ export class OciExecutionBackend implements ExecutionBackend {
           stderr: executed.stderr,
           exitCode: executed.exitCode,
           ...(input.stage.model ? { model: input.stage.model } : {}),
+          ...(captureCallContent() ? { captureContent: true } : {}),
         })
         : {
           ...executed,
           usage: parseRuntimeUsage(launch.runtime, executed.stdout),
         };
-      const usage = result.usage ? { usage: result.usage } : {};
+      const resultUsage = launch.runtime === "codex"
+        ? await applyCodexRolloutCalls(result.usage, {
+          ...this.codexRolloutHome(),
+          attemptStartedAtMs,
+        })
+        : result.usage;
+      const usage = resultUsage ? { usage: resultUsage } : {};
       if (result.exitCode !== 0) {
         if (
           input.timeoutMs !== undefined &&
@@ -1525,6 +1620,7 @@ export class OciExecutionBackend implements ExecutionBackend {
         // The container never mounts the operator's home; HOME is a throwaway
         // path inside the sandbox, so no user-global skill pack can load.
         globalSkills: { isolated: true },
+        ...(mcpServers?.outcome ? { mcpServers: mcpServers.outcome } : {}),
       };
     } finally {
       await gateway?.dispose().catch(() => undefined);
@@ -1962,6 +2058,24 @@ export class OciExecutionBackend implements ExecutionBackend {
       );
     }
     return args;
+  }
+
+  /**
+   * Where the host sees the container's CODEX_HOME, so a Codex attempt's
+   * rollout can be read after the container exits. Without a host-backed
+   * CODEX_HOME the rollout lives in the container's throwaway home.
+   */
+  private codexRolloutHome(): { codexHome?: string; unavailableReason?: string } {
+    const configured = this.env.NITELY_OCI_CODEX_HOME_HOST_PATH?.trim();
+    if (configured) return { codexHome: configured };
+    const passed = this.environmentAllowlist.includes("CODEX_HOME")
+      ? this.env.CODEX_HOME?.trim()
+      : undefined;
+    if (passed) return { codexHome: passed };
+    return {
+      unavailableReason:
+        "the container's CODEX_HOME is not a host path Nitely knows (allowlist CODEX_HOME bind-mounted at the same path, or set NITELY_OCI_CODEX_HOME_HOST_PATH), so the rollout does not outlive the container",
+    };
   }
 
   private runtimeSecretNames(runtime: {

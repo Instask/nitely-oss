@@ -59,6 +59,9 @@ import {
   type ProjectedStage,
   type ProjectedTaskPlanLoop,
   type ProjectedWorkflowStage,
+  attemptInputBreakdowns,
+  formatAttemptInputBreakdown,
+  formatRuntimeUsageTotal,
   staleRunningRunMs,
   sumContextUsage,
   sumRuntimeUsage,
@@ -89,6 +92,7 @@ import { feedbackMemoryEntryId } from "../review-feedback/memory.js";
 import type { OrchestratorDecisionEvent } from "../policy/decide.js";
 import type { ChangeRequestStatus } from "../scm/types.js";
 import type { PlanningApprovalStatus } from "../work-items/planning.js";
+import { formatModelCallCurve } from "../telemetry/token-waste.js";
 import { WebInputError, WebNotFoundError } from "./errors.js";
 import { redactForWeb, redactUnknownForWeb } from "./redaction.js";
 
@@ -2292,18 +2296,7 @@ function contextUsageDetail(usage: ProjectedContextUsage | undefined): string | 
 }
 
 function runtimeUsageDetail(usage: ProjectedRuntimeUsageTotal | undefined): string | undefined {
-  if (!usage) return undefined;
-  const parts = [
-    usage.totalTokens !== undefined ? `${usage.totalTokens} total tokens` : undefined,
-    usage.inputTokens !== undefined ? `${usage.inputTokens} input` : undefined,
-    usage.outputTokens !== undefined ? `${usage.outputTokens} output` : undefined,
-    usage.estimatedCostUsd !== undefined ? `$${usage.estimatedCostUsd.toFixed(4)}` : undefined,
-    `${usage.knownAttempts} known attempt${usage.knownAttempts === 1 ? "" : "s"}`,
-  ].filter((part): part is string => part !== undefined);
-  if (usage.unknownAttempts > 0) {
-    parts.push(`${usage.unknownAttempts} unknown attempt${usage.unknownAttempts === 1 ? "" : "s"}`);
-  }
-  return parts.join(" · ");
+  return usage ? formatRuntimeUsageTotal(usage) : undefined;
 }
 
 function budgetDetail(budget: ProjectedAttemptBudget | undefined): string | undefined {
@@ -2525,6 +2518,22 @@ function eventsForStage(events: StoredRunEvent[], stageId: string): WebStageDeta
     });
 }
 
+function modelCallsDetail(
+  events: readonly StoredRunEvent[],
+  stageId: string,
+  attempt: number | undefined,
+): string | undefined {
+  if (attempt === undefined) return undefined;
+  let latest: StoredRunEvent | undefined;
+  for (const event of events) {
+    if (event.type === "stage.runtime.calls" && event.stageId === stageId && event.attempt === attempt) {
+      latest = event;
+    }
+  }
+  if (!latest || typeof latest.payload !== "object" || latest.payload === null) return undefined;
+  return formatModelCallCurve(latest.payload as Record<string, unknown>);
+}
+
 async function projectedStageDetails(input: {
   stage: ProjectedStage;
   declaration: Stage | undefined;
@@ -2580,6 +2589,12 @@ async function projectedStageDetails(input: {
   addDetailField(fields, "Stderr path", redactForWeb(attempt?.stderrPath), { mono: true });
   addDetailField(fields, "Context usage", contextUsageDetail(input.stageUsage));
   addDetailField(fields, "Runtime usage", runtimeUsageDetail(input.stageRuntimeUsage));
+  addDetailField(
+    fields,
+    "Input by attempt",
+    attemptInputBreakdowns([stage]).map(formatAttemptInputBreakdown).join("; ") || undefined,
+  );
+  addDetailField(fields, "Model calls", modelCallsDetail(input.events, stage.stageId, attempt?.attempt));
   addDetailField(fields, "Budget", budgetDetail(attempt?.budget));
   addDetailField(fields, "Task plan input", input.taskPlan?.inputId, { mono: true });
   addDetailField(fields, "Current task", input.taskPlan?.currentTaskId, { mono: true });

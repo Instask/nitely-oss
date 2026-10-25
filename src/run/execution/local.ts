@@ -7,6 +7,7 @@ import {
   mkdir,
   mkdtemp,
   readdir,
+  readFile,
   rm,
   symlink,
   writeFile,
@@ -19,6 +20,8 @@ import { promisify } from "node:util";
 import type {
   AgentGlobalSkillsOutcome,
   AgentGlobalSkillsRequest,
+  AgentMcpServersOutcome,
+  AgentMcpServersRequest,
   AgentSessionOutcome,
   AgentSessionRequest,
   AgentRunnableStage,
@@ -33,7 +36,19 @@ import type {
   RunCommandOptions,
   WorkspaceHandle,
 } from "./types.js";
+import { createCodexExecCapture, readCodexExecActivity } from "./codex-activity.js";
+import { withCodexRolloutCalls } from "./codex-rollout.js";
 import {
+  codexConfigOverrides,
+  codexConfiguredMcpServers,
+  codexFeaturesListArgs,
+  codexMcpListArgs,
+  restrictCodexMcpServers,
+  withCodexMcpServersDisabled,
+} from "./mcp-servers.js";
+import { withCodexToolOutputLimit } from "./codex-tool-output.js";
+import {
+  captureCallContent,
   createPiJsonCapture,
   isPiJsonRuntime,
   normalizePiJsonResult,
@@ -125,6 +140,35 @@ export interface RuntimeHomeIsolation {
 }
 
 /**
+ * Runs the runtime's own CLI with `args` where the launch would run, with the
+ * launch's environment and working directory, and resolves its stdout. The
+ * output may carry configuration secrets, so callers must never log it.
+ */
+export type RuntimeProbe = (args: readonly string[]) => Promise<string>;
+
+/**
+ * How a runtime limits which of the operator's configured MCP servers load
+ * into one launch.
+ */
+export interface RuntimeMcpServerRestriction {
+  /**
+   * Decides which servers to turn off for `launch`, asking the runtime itself
+   * through `probe`. `env` is the launch environment, for a best-effort
+   * fallback when `allowConfigFallback` is set.
+   */
+  restrict(input: {
+    request: Exclude<AgentMcpServersRequest, { mode: "inherited" }>;
+    stageId: string;
+    launch: AgentRuntimeLaunchSpec;
+    probe: RuntimeProbe;
+    env: RuntimeEnv;
+    allowConfigFallback: boolean;
+  }): Promise<{ disable: string[]; outcome: AgentMcpServersOutcome }>;
+  /** Launch args with the named servers turned off. */
+  disable(args: readonly string[], names: readonly string[]): string[];
+}
+
+/**
  * How a runtime continues a session it already ran, so a repeated execution of
  * the same stage does not pay for a cold start.
  */
@@ -148,6 +192,8 @@ export interface AgentRuntimeLauncher {
   globalSkillIsolation?: RuntimeHomeIsolation;
   /** Absent when this runtime cannot continue a previous session. */
   sessionReuse?: RuntimeSessionReuse;
+  /** Absent when this runtime offers no way to leave configured MCP servers out. */
+  mcpServerRestriction?: RuntimeMcpServerRestriction;
   /**
    * Returns an actionable reason when the stage's model cannot run on this
    * runtime. Checked by preflight and again before spawning.
@@ -259,7 +305,29 @@ export interface LocalExecutionBackendOptions {
   runtimeRegistry?: AgentRuntimeRegistry;
   spawn?: AgentSpawn;
   commandWrapper?: ProcessCommandWrapper;
+  /** Runs a short runtime CLI probe, such as `codex mcp list --json`. */
+  probeRuntime?: RuntimeProbeRunner;
 }
+
+export type RuntimeProbeRunner = (input: {
+  command: string;
+  args: string[];
+  cwd: string;
+  env: RuntimeEnv;
+}) => Promise<string>;
+
+const RUNTIME_PROBE_TIMEOUT_MS = 30_000;
+
+/** Its stdout is returned, never logged: it can carry configuration secrets. */
+const defaultRuntimeProbe: RuntimeProbeRunner = async (input) => {
+  const { stdout } = await execFileAsync(input.command, input.args, {
+    cwd: input.cwd,
+    env: input.env,
+    timeout: RUNTIME_PROBE_TIMEOUT_MS,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  return stdout;
+};
 
 async function runGit(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args, { cwd });
@@ -569,6 +637,23 @@ export function createPiAgentArgs(model?: string, nativeEffort?: string): string
   ];
 }
 
+function codexHome(env: RuntimeEnv): string | undefined {
+  return env.CODEX_HOME?.trim() ||
+    (env.HOME?.trim() ? join(env.HOME.trim(), ".codex") : undefined);
+}
+
+/** The MCP server tables in the user config.toml, which Codex always loads. */
+async function codexUserConfigServers(env: RuntimeEnv): Promise<string[]> {
+  const home = codexHome(env);
+  if (!home) return [];
+  try {
+    return codexConfiguredMcpServers(await readFile(join(home, "config.toml"), "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
 class DefaultAgentRuntimeRegistry implements AgentRuntimeRegistry {
   private readonly runtimes: Map<string, AgentRuntimeLauncher>;
 
@@ -603,10 +688,28 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
       // login and model configuration while leaving every pack behind.
       globalSkillIsolation: {
         envVar: "CODEX_HOME",
-        resolveDefaultHome: (env) =>
-          env.CODEX_HOME?.trim() ||
-          (env.HOME?.trim() ? join(env.HOME.trim(), ".codex") : undefined),
+        resolveDefaultHome: codexHome,
         preserve: ["auth.json", "config.toml"],
+      },
+      // Every enabled MCP server's tool definitions are resent on each model
+      // call. config.toml stays linked verbatim for auth and provider settings;
+      // the servers a stage did not declare are turned off with -c overrides,
+      // after `codex mcp list` names the effective set across every layer.
+      // The runtime-registered Apps connector (codex_apps) is turned off with
+      // features.apps=false and confirmed with `codex features list`.
+      mcpServerRestriction: {
+        restrict: ({ request, stageId, launch, probe, env, allowConfigFallback }) =>
+          restrictCodexMcpServers({
+            request,
+            stageId,
+            list: (overrides) => probe(codexMcpListArgs(overrides)),
+            features: (overrides) => probe(codexFeaturesListArgs(overrides)),
+            baseOverrides: codexConfigOverrides(launch.args),
+            ...(allowConfigFallback
+              ? { fallbackServers: () => codexUserConfigServers(env) }
+              : {}),
+          }),
+        disable: withCodexMcpServersDisabled,
       },
       sessionReuse: {
         parseSessionId: parseCodexSessionId,
@@ -811,6 +914,47 @@ async function resolveGlobalSkillsIsolation(input: {
   return { envOverrides, outcome: { isolated: true } };
 }
 
+export async function resolveMcpServerRestriction(input: {
+  runtime: AgentRuntimeLauncher;
+  request: AgentMcpServersRequest | undefined;
+  launch: AgentRuntimeLaunchSpec;
+  probe: RuntimeProbe;
+  /** The environment the runtime launches with, isolated home included. */
+  env: RuntimeEnv;
+  /** Whether the user config in `env` is the one the launch reads. */
+  allowConfigFallback: boolean;
+  stageId: string;
+}): Promise<{ disable: string[]; outcome?: AgentMcpServersOutcome }> {
+  const request = input.request;
+  // A caller that says nothing about MCP servers gets the previous behavior
+  // and no claim in the result.
+  if (!request) return { disable: [] };
+  if (request.mode === "inherited") {
+    return {
+      disable: [],
+      outcome: { enforcement: "inherited", reason: "flow opted into every configured MCP server" },
+    };
+  }
+  const restriction = input.runtime.mcpServerRestriction;
+  if (!restriction) {
+    const reason = `agent runtime ${input.runtime.id} has no MCP server restriction mechanism`;
+    if (request.mode === "declared-required") {
+      throw new Error(
+        `stage ${input.stageId} requires only its declared MCP servers but ${reason}`,
+      );
+    }
+    return { disable: [], outcome: { enforcement: "unsupported", reason } };
+  }
+  return await restriction.restrict({
+    request,
+    stageId: input.stageId,
+    launch: input.launch,
+    probe: input.probe,
+    env: input.env,
+    allowConfigFallback: input.allowConfigFallback,
+  });
+}
+
 function missingRuntimeEnv(
   runtime: AgentRuntimeLauncher,
   env: RuntimeEnv,
@@ -894,62 +1038,7 @@ function providerProvenance(
 }
 
 function parseCodexUsage(stdout: string): AgentRuntimeUsage | undefined {
-  const lines = stdout.split(/\r?\n/).filter((line) => line.trim().length > 0);
-  const events: Record<string, unknown>[] = [];
-  try {
-    for (const line of lines) {
-      const event = usageRecord(JSON.parse(line));
-      if (!event) return undefined;
-      events.push(event);
-    }
-  } catch {
-    return undefined;
-  }
-  if (events.length < 3) return undefined;
-  const first = events[0];
-  const last = events.at(-1);
-  if (
-    first?.type !== "thread.started" ||
-    typeof first.thread_id !== "string" ||
-    !UUID_PATTERN.test(first.thread_id) ||
-    last?.type !== "turn.completed" ||
-    events.filter((event) => event.type === "thread.started").length !== 1 ||
-    events.filter((event) => event.type === "turn.started").length !== 1 ||
-    events.filter((event) => event.type === "turn.completed").length !== 1 ||
-    events.some((event) => event.type === "turn.failed" || event.type === "error")
-  ) {
-    return undefined;
-  }
-  const turnStartedIndex = events.findIndex((event) => event.type === "turn.started");
-  if (turnStartedIndex <= 0 || turnStartedIndex >= events.length - 1) {
-    return undefined;
-  }
-  const usage = usageRecord(last.usage);
-  if (!usage) return undefined;
-  const inputTokens = requiredUsageCount(usage, "input_tokens");
-  const cachedInputTokens = requiredUsageCount(usage, "cached_input_tokens");
-  const outputTokens = requiredUsageCount(usage, "output_tokens");
-  if (
-    inputTokens === undefined ||
-    cachedInputTokens === undefined ||
-    outputTokens === undefined ||
-    cachedInputTokens > inputTokens
-  ) {
-    return undefined;
-  }
-  const totalTokens = safeUsageCountSum([inputTokens, outputTokens]);
-  if (totalTokens === undefined) return undefined;
-  return {
-    inputTokens,
-    outputTokens,
-    totalTokens,
-    cachedInputTokens,
-    provenance: providerProvenance(
-      "openai",
-      "codex.exec.turn.completed.usage",
-    ),
-    raw: { cachedInputTokens },
-  };
+  return readCodexExecActivity(stdout);
 }
 
 interface ClaudeTokenCounts {
@@ -1176,6 +1265,21 @@ function parseClaudeUsage(stdout: string): AgentRuntimeUsage | undefined {
   if (permissionDenials.value !== undefined) {
     raw.permissionDenialCount = permissionDenials.value;
   }
+  const callLog = inputTokens !== undefined &&
+      outputTokens !== undefined &&
+      totalTokens !== undefined
+    ? [{
+      kind: "llm" as const,
+      granularity: "attempt" as const,
+      accounting: "delta" as const,
+      provider: "anthropic",
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      cacheReadInputTokens: counts.cacheRead ?? 0,
+      cacheWriteInputTokens: counts.cacheCreation ?? 0,
+    }]
+    : undefined;
   return {
     ...(inputTokens !== undefined ? { inputTokens } : {}),
     ...(outputTokens !== undefined ? { outputTokens } : {}),
@@ -1188,6 +1292,7 @@ function parseClaudeUsage(stdout: string): AgentRuntimeUsage | undefined {
       : {}),
     provenance: providerProvenance("anthropic", "claude.print.result"),
     ...(Object.keys(raw).length > 0 ? { raw } : {}),
+    ...(callLog ? { callLog } : {}),
   };
 }
 
@@ -1205,6 +1310,7 @@ export class LocalExecutionBackend implements ExecutionBackend {
   private readonly runtimeRegistry: AgentRuntimeRegistry;
   private readonly spawnAgent: AgentSpawn;
   private readonly commandWrapper: ProcessCommandWrapper;
+  private readonly probeRuntime: RuntimeProbeRunner;
 
   constructor(options: LocalExecutionBackendOptions = {}) {
     this.env = options.env ?? process.env;
@@ -1214,6 +1320,7 @@ export class LocalExecutionBackend implements ExecutionBackend {
     this.commandWrapper =
       options.commandWrapper ??
       ((input) => ({ command: input.command, args: input.args }));
+    this.probeRuntime = options.probeRuntime ?? defaultRuntimeProbe;
   }
 
   async createWorkspace(input: {
@@ -1403,6 +1510,7 @@ export class LocalExecutionBackend implements ExecutionBackend {
       signal?: AbortSignal;
       cancellationGraceMs?: number;
       globalSkills?: AgentGlobalSkillsRequest;
+      mcpServers?: AgentMcpServersRequest;
       session?: AgentSessionRequest;
       readPolicy?: AgentReadPolicy;
     },
@@ -1506,9 +1614,47 @@ export class LocalExecutionBackend implements ExecutionBackend {
     };
     const resumeSessionId = input.session?.resumeSessionId;
     const canResume = resumeSessionId !== undefined && runtime.sessionReuse !== undefined;
-    const launch = canResume
+    const builtLaunch = canResume
       ? runtime.sessionReuse!.buildResume({ ...launchInput, sessionId: resumeSessionId! })
       : runtime.build(launchInput);
+    const mcpServers = await resolveMcpServerRestriction({
+      runtime,
+      request: input.mcpServers,
+      launch: builtLaunch,
+      probe: async (args) => {
+        const probeLaunch = this.commandWrapper({
+          kind: "agent",
+          cwd,
+          command: builtLaunch.command,
+          args: [...args],
+        });
+        return await this.probeRuntime({
+          command: probeLaunch.command,
+          args: probeLaunch.args,
+          cwd,
+          env: runtimeEnv,
+        });
+      },
+      env: runtimeEnv,
+      allowConfigFallback: true,
+      stageId: input.stage.id,
+    });
+    const restrictedLaunch = mcpServers.disable.length > 0 && runtime.mcpServerRestriction
+      ? {
+        ...builtLaunch,
+        args: runtime.mcpServerRestriction.disable(builtLaunch.args, mcpServers.disable),
+      }
+      : builtLaunch;
+    // Codex truncates each stored tool output to the stage's read budget.
+    const launch = runtime.id === "codex"
+      ? {
+        ...restrictedLaunch,
+        args: withCodexToolOutputLimit(
+          restrictedLaunch.args,
+          input.readPolicy?.maxToolOutputTokens,
+        ),
+      }
+      : restrictedLaunch;
     const sessionOutcome: AgentSessionOutcome = canResume
       ? { mode: "resumed", sessionId: resumeSessionId }
       : {
@@ -1539,7 +1685,12 @@ export class LocalExecutionBackend implements ExecutionBackend {
         },
       });
     }
-    return await new Promise<AgentResult>((resolvePromise, reject) => {
+    // Codex writes a rollout per thread under its CODEX_HOME; after the attempt
+    // it gives the per-model-call usage that codex exec --json leaves out.
+    const rollout = launch.runtime === "codex"
+      ? { codexHome: codexHome(runtimeEnv), attemptStartedAtMs: Date.now() }
+      : undefined;
+    return await withCodexRolloutCalls(new Promise<AgentResult>((resolvePromise, reject) => {
       let timedOut = false;
       let cancelled = false;
       let settled = false;
@@ -1561,7 +1712,18 @@ export class LocalExecutionBackend implements ExecutionBackend {
       // the process ends, so stdout.log reads as it did in text mode.
       const piJson = isPiJsonRuntime(launch.runtime);
       // Bounded: Pi streams per-token and per-tool-snapshot records.
-      const piCapture = piJson ? createPiJsonCapture() : undefined;
+      const piCapture = piJson ? createPiJsonCapture({ captureContent: captureCallContent() }) : undefined;
+      // Codex command results are one JSON line each. Keep turn usage and tool
+      // identity while the line arrives, instead of buffering the command output.
+      const codexCapture = launch.runtime === "codex"
+        ? createCodexExecCapture({
+          onLine: (line) => {
+            const text = `${line}\n`;
+            process.stdout.write(text);
+            logWriters.writeStdout(text);
+          },
+        })
+        : undefined;
       let piTextWritten = false;
       const clearTimers = () => {
         if (timeout) clearTimeout(timeout);
@@ -1584,6 +1746,10 @@ export class LocalExecutionBackend implements ExecutionBackend {
           piCapture.write(chunk);
           return;
         }
+        if (codexCapture) {
+          codexCapture.write(chunk);
+          return;
+        }
         stdout.push(chunk);
         process.stdout.write(chunk);
         logWriters.writeStdout(chunk);
@@ -1601,11 +1767,12 @@ export class LocalExecutionBackend implements ExecutionBackend {
             stderr: Buffer.concat(stderr).toString("utf8"),
             exitCode: 0,
             ...(input.stage.model ? { model: input.stage.model } : {}),
+            ...(captureCallContent() ? { captureContent: true } : {}),
           })
           : undefined;
       const capturedResult = (): AgentResult => {
         const pi = piResult();
-        const capturedStdout = pi?.stdout ?? Buffer.concat(stdout).toString("utf8");
+        const capturedStdout = pi?.stdout ?? codexCapture?.text() ?? Buffer.concat(stdout).toString("utf8");
         if (pi && !piTextWritten) {
           piTextWritten = true;
           if (pi.stdout) {
@@ -1624,6 +1791,7 @@ export class LocalExecutionBackend implements ExecutionBackend {
           stderr: pi?.stderr ?? Buffer.concat(stderr).toString("utf8"),
           ...(usage ? { usage } : {}),
           ...(globalSkills.outcome ? { globalSkills: globalSkills.outcome } : {}),
+          ...(mcpServers.outcome ? { mcpServers: mcpServers.outcome } : {}),
           ...(input.session !== undefined || sessionId !== undefined
             ? {
               session: {
@@ -1745,7 +1913,7 @@ export class LocalExecutionBackend implements ExecutionBackend {
           });
         settle(() => reject(Object.assign(new Error(message), result)));
       });
-    });
+    }), rollout);
   }
 
   async preflightAgentRuntime(

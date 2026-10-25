@@ -2,6 +2,16 @@ import { resolve } from "node:path";
 
 import { EventStore } from "../events/store.js";
 import type { StoredRunEvent } from "../events/types.js";
+import type { AgentRuntimeCall } from "./execution/types.js";
+import {
+  summarizeResentToolOutputs,
+  summarizeRuntimeCalls,
+} from "../telemetry/token-waste.js";
+import {
+  attemptShareOfCodexCalls,
+  codexSessionBaselineKey,
+  codexSessionBaselines,
+} from "./codex-session-usage.js";
 import {
   billableRuntimeTokens,
   eventStorePath,
@@ -27,7 +37,9 @@ export type EfficiencyRuleId =
   | "expensive-model-non-gate"
   | "repeated-large-payloads"
   | "usage-coverage-missing"
-  | "budget-loss-after-outputs";
+  | "budget-loss-after-outputs"
+  | "runtime-activity-shape"
+  | "resent-tool-output";
 
 export interface EfficiencyFinding {
   ruleId: EfficiencyRuleId;
@@ -45,6 +57,10 @@ export interface EfficiencyFinding {
     retryShare?: number;
     retryTokens?: number;
     totalTokens?: number;
+    /** `resent-tool-output`: an upper-bound heuristic estimate, not a measurement. */
+    estimatedUpperBoundResentCachedTokens?: number;
+    /** That upper bound as a share of the attempt's cached input. */
+    estimatedUpperBoundResentCachedShare?: number;
   };
   evidence: {
     runId: string;
@@ -441,6 +457,172 @@ function budgetLossAfterOutputs(
   ];
 }
 
+const ACTIVITY_UNCACHED_TOKENS = 50_000;
+const ACTIVITY_TOOL_LOOP = 25;
+const ACTIVITY_TURN_INPUT_TOKENS = 20_000;
+
+function activityCalls(payload: unknown): AgentRuntimeCall[] {
+  const calls = asRecord(payload).calls;
+  if (!Array.isArray(calls)) return [];
+  return calls.filter((entry): entry is AgentRuntimeCall => {
+    const record = asRecord(entry);
+    return record.kind === "llm" || record.kind === "tool";
+  });
+}
+
+function runtimeActivityShape(events: StoredRunEvent[]): EfficiencyFinding[] {
+  const findings: EfficiencyFinding[] = [];
+  const codexBaselines = codexSessionBaselines(events);
+  for (const event of events) {
+    if (event.type !== "stage.runtime.calls" || !event.stageId) continue;
+    const baseline = event.attempt
+      ? codexBaselines.get(codexSessionBaselineKey(event.stageId, event.attempt))
+      : undefined;
+    const summary = summarizeRuntimeCalls(
+      activityCalls(attemptShareOfCodexCalls(asRecord(event.payload), baseline)),
+    );
+    if (!summary?.summable || summary.inputTokens <= 0) continue;
+    const uncached = summary.inputTokens - summary.cachedInputTokens;
+    const cacheShare = summary.cachedInputTokens / summary.inputTokens;
+    const reasoningShare = summary.outputTokens > 0
+      ? summary.reasoningOutputTokens / summary.outputTokens
+      : 0;
+    const turnLevel = summary.granularities.includes("turn");
+    const largeUncached = uncached >= ACTIVITY_UNCACHED_TOKENS && cacheShare < 0.5;
+    const toolLoop = summary.toolCount >= ACTIVITY_TOOL_LOOP;
+    const reasoningHeavy = summary.reasoningOutputTokens >= 1_000 && reasoningShare >= 0.5;
+    const visibleTurn = turnLevel && summary.inputTokens >= ACTIVITY_TURN_INPUT_TOKENS;
+    if (!largeUncached && !toolLoop && !reasoningHeavy && !visibleTurn) continue;
+    const severity: EfficiencySeverity = largeUncached
+      ? "high"
+      : toolLoop || reasoningHeavy
+        ? "warn"
+        : "info";
+    const tools = summary.toolNames
+      .slice(0, 3)
+      .map((entry) => `${entry.count} ${entry.name}`)
+      .join(", ");
+    const granularity = summary.granularities.join(", ");
+    findings.push(finding({
+      ruleId: "runtime-activity-shape",
+      severity,
+      confidence: turnLevel ? "medium" : "high",
+      title: largeUncached
+        ? "Most input tokens on this attempt were uncached"
+        : toolLoop
+          ? "This attempt ran many tools inside its model usage"
+          : reasoningHeavy
+            ? "Reasoning accounts for most of this attempt's output"
+            : "This attempt's tokens are turn totals",
+      summary:
+        `Stage ${event.stageId} attempt ${event.attempt ?? "?"} recorded ${summary.inputTokens} input tokens` +
+        ` (${summary.cachedInputTokens} cached, ${uncached} uncached)` +
+        ` and ${summary.outputTokens} output tokens` +
+        `${summary.reasoningOutputTokens > 0 ? ` (${summary.reasoningOutputTokens} reasoning)` : ""}` +
+        ` at ${granularity} granularity, across ${summary.toolCount} tool records` +
+        `${tools ? ` (${tools})` : ""}.` +
+        (turnLevel
+          ? " Codex reports a cumulative total per turn, so these numbers are the whole turn, not one model call."
+          : ""),
+      impact: {
+        inputTokens: summary.inputTokens,
+        cachedInputTokens: summary.cachedInputTokens,
+        totalTokens: summary.inputTokens + summary.outputTokens,
+      },
+      evidence: {
+        runId: event.runId,
+        stageIds: [event.stageId],
+        eventTypes: ["stage.runtime.calls"],
+        ...(event.attempt !== undefined ? { attempt: event.attempt } : {}),
+      },
+      remediation: largeUncached
+        ? "Keep the runtime session and the prompt prefix stable so later model calls hit the prompt cache (#713)."
+        : toolLoop
+          ? "Look at the tool records on this attempt. A long tool loop resends the growing context on every model call (#713)."
+          : "Read the turn or call records on stage.runtime.calls before treating the attempt total as one request (#713).",
+      relatedIssues: [713],
+    }));
+  }
+  return findings;
+}
+
+const RESENT_LARGE_OUTPUT_BYTES = 8 * 1024;
+const RESENT_TINY_NEW_INPUT_BYTES = 1024;
+const RESENT_MIN_TOKENS = 100_000;
+const RESENT_MIN_CACHED_SHARE = 0.2;
+
+function kib(bytes: number): string {
+  return `${Math.round(bytes / 102.4) / 10} KB`;
+}
+
+/**
+ * Per-call Codex records (from its rollout) bound how much of an attempt's
+ * cached input large tool outputs could account for. The figure is an upper
+ * bound from a heuristic (see summarizeResentToolOutputs), not a measurement
+ * of what the provider cached: the rollout does not say what each call's
+ * cached prefix contained.
+ */
+function resentToolOutput(events: StoredRunEvent[]): EfficiencyFinding[] {
+  const findings: EfficiencyFinding[] = [];
+  for (const event of events) {
+    if (event.type !== "stage.runtime.calls" || !event.stageId) continue;
+    const summary = summarizeResentToolOutputs(activityCalls(event.payload), {
+      largeOutputBytes: RESENT_LARGE_OUTPUT_BYTES,
+      tinyNewInputBytes: RESENT_TINY_NEW_INPUT_BYTES,
+    });
+    if (!summary || summary.largeOutputs.length === 0 || summary.cachedInputTokens <= 0) continue;
+    const upperBound = summary.estimatedUpperBoundResentCachedTokens;
+    if (upperBound <= 0) continue;
+    const share = Math.min(1, upperBound / summary.cachedInputTokens);
+    if (upperBound < RESENT_MIN_TOKENS && share < RESENT_MIN_CACHED_SHARE) continue;
+    const largeBytes = summary.largeOutputs.reduce((total, entry) => total + entry.outputBytes, 0);
+    const biggest = [...summary.largeOutputs]
+      .filter((entry) => entry.estimatedUpperBoundTokens > 0)
+      .sort((left, right) => right.estimatedUpperBoundTokens - left.estimatedUpperBoundTokens)
+      .slice(0, 3)
+      .map((entry) => `${entry.toolName} ${kib(entry.outputBytes)} on up to ${entry.laterCalls} later calls`)
+      .join(", ");
+    const laterCalls = summary.modelCalls > 1 ? summary.modelCalls - 1 : 0;
+    const tinyShare = laterCalls > 0 ? summary.tinyNewInputCalls / laterCalls : 0;
+    findings.push(finding({
+      ruleId: "resent-tool-output",
+      severity: share >= 0.3 ? "warn" : "info",
+      confidence: "low",
+      title: "Large tool outputs may have been resent on later model calls (upper-bound estimate)",
+      summary:
+        `Stage ${event.stageId} attempt ${event.attempt ?? "?"} made ${summary.modelCalls} model calls` +
+        ` that read ${summary.cachedInputTokens} cached input tokens.` +
+        ` ${summary.largeOutputs.length} tool output${summary.largeOutputs.length === 1 ? "" : "s"}` +
+        ` of at least ${kib(RESENT_LARGE_OUTPUT_BYTES)} (${kib(largeBytes)} in total) account for at most` +
+        ` ${upperBound} of those cached tokens (${Math.round(share * 100)}%).` +
+        ` This is an upper-bound heuristic estimate, not a measurement: each output is taken as ~4 bytes per token` +
+        ` and counted on a later call only while that call's input is at least the input before the output` +
+        ` plus the output's estimated size, and no call is credited with more than its own cache-read tokens.` +
+        ` The outputs may have been dropped or truncated earlier than this assumes.` +
+        (biggest ? ` Largest: ${biggest}.` : "") +
+        ` ${summary.tinyNewInputCalls} of ${laterCalls} later calls (${Math.round(tinyShare * 100)}%)` +
+        ` added under ${kib(RESENT_TINY_NEW_INPUT_BYTES)} of new tool output and read` +
+        ` ${summary.tinyNewInputCallCachedTokens} cached input tokens.`,
+      impact: {
+        inputTokens: summary.inputTokens,
+        cachedInputTokens: summary.cachedInputTokens,
+        estimatedUpperBoundResentCachedTokens: upperBound,
+        estimatedUpperBoundResentCachedShare: Math.round(share * 1000) / 1000,
+      },
+      evidence: {
+        runId: event.runId,
+        stageIds: [event.stageId],
+        eventTypes: ["stage.runtime.calls"],
+        ...(event.attempt !== undefined ? { attempt: event.attempt } : {}),
+      },
+      remediation:
+        "Bound exploratory reads (rg with -l or --max-count, sed/head line ranges) or hand the agent a focused excerpt in its prompt, so a large output is less likely to be carried through later calls (#713, #725).",
+      relatedIssues: [713, 725],
+    }));
+  }
+  return findings;
+}
+
 export function diagnoseRun(input: {
   projection: ProjectedRun;
   events: StoredRunEvent[];
@@ -457,6 +639,8 @@ export function diagnoseRun(input: {
       ...repeatedLargePayloads(projection, events),
       ...usageCoverageMissing(projection),
       ...budgetLossAfterOutputs(projection, events),
+      ...runtimeActivityShape(events),
+      ...resentToolOutput(events),
     ],
   };
 }

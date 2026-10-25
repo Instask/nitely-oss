@@ -20,6 +20,7 @@ import {
   schedulerCooldownStorePath,
 } from "../../src/scheduler/cooldown.js";
 import { RunAdmissionStore } from "../../src/run/admission-store.js";
+import { ResumeClaimStore, resumeClaimStorePath } from "../../src/scheduler/resume-claim.js";
 import { eventStorePath, projectRun } from "../../src/run/project.js";
 import { generateDraftSpec } from "../../src/spec-artifacts/draft.js";
 import { validateStructuredSpec } from "../../src/spec-artifacts/parse.js";
@@ -49,7 +50,7 @@ import {
   updateTaskRunState,
   updateTaskSpecApproval,
   type TaskSourceSnapshot,
-} from "../../src/web/tasks.js";
+} from "../../src/work-items/adapters/dev-pr-store.js";
 import { createUser } from "../../src/web/users.js";
 import {
   changeOrganizationMember, listOrganizationMembers, createOrganizationInvitation, resolveOrganizationInvitation,
@@ -1625,6 +1626,63 @@ describe("web server API and HTML", () => {
       ]),
     );
     evidence.close();
+  });
+
+  it("leaves an approved Run to the owner already holding its continuation claim", async () => {
+    const repoPath = await createRepo();
+    await mkdir(join(repoPath, ".nitely"), { recursive: true });
+    const store = new EventStore(join(repoPath, ".nitely", "events.db"));
+    store.append({
+      runId: "run-claimed-approval",
+      stageId: "review-route",
+      attempt: 1,
+      type: "approval.requested",
+      payload: { approvalId: "approve-route-1", prompt: "Approve the route." },
+    });
+    store.close();
+    const claims = new ResumeClaimStore(resumeClaimStorePath(repoPath));
+    try {
+      expect(claims.claim({ runId: "run-claimed-approval", token: "scheduler", now: new Date() })).toBe(true);
+    } finally {
+      claims.close();
+    }
+    const notification = await upsertNotification(repoPath, {
+      sourceKey: "task:task-claimed:approval:run-claimed-approval:approve-route-1",
+      type: "review-rework",
+      severity: "warning",
+      title: "Approval required",
+      taskId: "task-claimed",
+      runId: "run-claimed-approval",
+      link: "/tasks/task-claimed",
+    });
+    const server = await startTestServer(repoPath);
+
+    const response = await fetch(
+      `${server.url}/api/notifications/${encodeURIComponent(notification.id)}/actions`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "approve" }),
+      },
+    );
+    expect(response.status).toBe(200);
+    // The resume runs in the background; give it time to refuse the claim.
+    await new Promise((resolveWait) => setTimeout(resolveWait, 750));
+
+    const evidence = new EventStore(join(repoPath, ".nitely", "events.db"));
+    try {
+      const types = evidence.list("run-claimed-approval").map((event) => event.type);
+      expect(types).toContain("approval.resolved");
+      expect(types).not.toContain("run.failed");
+    } finally {
+      evidence.close();
+    }
+    const after = new ResumeClaimStore(resumeClaimStorePath(repoPath));
+    try {
+      expect(after.get("run-claimed-approval")?.token).toBe("scheduler");
+    } finally {
+      after.close();
+    }
   });
 
   it("cancels a blocked run once and records the explicit terminal decision", async () => {

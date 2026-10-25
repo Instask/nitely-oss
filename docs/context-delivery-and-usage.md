@@ -97,6 +97,103 @@ into every customer run.
 Nitely's own `stage.skills` are unaffected: those are declared by the flow,
 content-hash checked, and rendered into the prompt.
 
+## Stage MCP Servers
+
+Every MCP server a runtime loads adds its tool definitions to the fixed prefix
+the runtime resends on each model call inside a turn. Isolating global skills
+keeps Codex's `config.toml`, so before this policy every `[mcp_servers.*]` the
+operator configured globally loaded into every stage: a short Codex stage
+measured about 24k cached prefix tokens against a 3k-token Nitely prompt, and a
+reflect stage called MCP servers it never declared.
+
+A stage now loads exactly the MCP servers it lists in `required_mcp_servers`.
+An empty list means no MCP servers at all. `context.globalMcpServers` selects
+the behavior, flow-wide or per stage:
+
+| Value | Behavior |
+| --- | --- |
+| unset (default) | Load only the declared servers on runtimes that can restrict them; run unchanged on runtimes that cannot, and record why. |
+| `false` | The restriction is required. A runtime with no mechanism, or a restriction Nitely cannot complete, fails the stage. |
+| `true` | Opt back into every server the operator configured. |
+
+Codex merges MCP servers from several config layers: the system
+`/etc/codex/config.toml`, the user `config.toml` in `CODEX_HOME`, every trusted
+project `.codex/config.toml` from the working directory up to the repository
+root, and `-c` flags. A linked worktree inherits the trust entry of the
+repository it belongs to, and that entry lives in the user `config.toml` Nitely
+preserves, so a repository's committed `.codex/config.toml` servers load into
+its stages. No single file names the effective set, so Nitely asks Codex:
+
+1. Run `codex mcp list --json` exactly where the launch will run: same command,
+   environment and `CODEX_HOME`, the worktree as working directory, and the
+   launch's own `-c` overrides. Nitely reads only each entry's `name` and
+   `enabled`; the rest of the output carries server env, args, and headers and
+   is never logged or stored.
+2. Turn off every enabled, undeclared server with
+   `-c mcp_servers.<name>.enabled=false`. The config files are never rewritten,
+   so auth, model provider, and model settings reach Codex unchanged.
+3. Run the list again under those overrides. The restriction is **enforced**
+   only if every undeclared server now reports `enabled: false` and the declared
+   ones are still there, and the Apps connector below is confirmed off.
+
+**The ChatGPT Apps connector (`codex_apps`).** Codex also registers a server
+that is in no config layer: when the `apps` feature is on and the session has
+ChatGPT auth, it adds `codex_apps`, which exposes whatever the operator
+connected in ChatGPT Apps (GitHub among them) through `chatgpt.com`.
+`codex mcp list` does not show it, so it cannot be enumerated like the others.
+A production run once reported `enforced` with nothing enabled while its
+reflect stage searched and created GitHub issues through this connector,
+bypassing Nitely's own GitHub credential.
+
+Unless a stage lists `codex_apps` in `required_mcp_servers`, every restricted
+launch (`codex exec` and `codex exec resume`, on both backends) carries
+`-c features.apps=false`. Nitely confirms it with `codex features list` under
+the same flags, environment, `CODEX_HOME`, and working directory, and records
+`codex_apps` as disabled. If the feature cannot be read or stays on, the
+restriction is partial. A stage that needs the connector declares `codex_apps`;
+its `apps` feature is then left as the operator configured it, and `codex_apps`
+is reported enabled when the feature is on. Whether Codex actually registers the
+connector also depends on ChatGPT auth, which `codex features list` cannot show.
+`globalMcpServers: true` leaves the feature alone.
+
+Anything short of that is **partial**: the listing failed or did not parse, the
+verification failed, an override was ignored, or a server name contains a dot,
+which Codex's `-c` key path cannot address. Codex 0.162.0 also fails to start
+when an override names a server it has no configuration for, so Nitely only
+ever disables names Codex itself listed. Under `globalMcpServers: false` a
+partial restriction fails the stage before launch. Under the default the stage
+launches best-effort: if the listing failed it disables the user `config.toml`
+servers it can read, and if verification failed it launches with only the
+Apps override, since the server overrides may be what broke Codex.
+
+Runtime support today:
+
+- `codex` on the local backend: the probe above, run as a child process.
+- `codex` on the OCI backend: the probe runs in its own offline container with
+  the stage's image, mounts, and environment, so a system config baked into the
+  image is seen too. The container's `HOME` is an empty throwaway path, so
+  usually nothing is configured and the restriction is enforced trivially; a
+  declared server is then reported as unconfigured.
+- `claude`, `glm`, `grok`, and the Pi-based runtimes have no restriction
+  mechanism; they run unchanged under the default (`unsupported`) and fail
+  closed under `globalMcpServers: false`.
+
+Each agent attempt emits a `stage.runtime.mcp-servers` event with an
+`enforcement` of `enforced`, `partial`, `unsupported`, or `inherited`, the
+`enabled` and `disabled` server names, any declared server Codex did not list
+(`unconfigured`), and a `reason` whenever the restriction is not enforced. Run
+evidence lists the resolved mode under `Stage Context Controls` as
+`MCP servers`, followed by one `MCP servers, attempt N` line per attempt with
+the same fields. Only `enforced` means the undeclared servers are confirmed off.
+
+The regression suite `test/run/execution/codex-mcp-servers.real.test.ts` runs
+the real Codex CLI against a trusted-project fixture; CI installs a pinned
+`@openai/codex` for it.
+
+`required_mcp_servers` keeps its admission role too: a declared server that
+maps to a provider still requires that provider to be configured before the
+stage starts.
+
 ## Agent Session Reuse
 
 A task-plan loop re-runs one stage in one worktree over and over. Every
@@ -128,6 +225,41 @@ resume mechanism starts cold and records why, so nothing fails because a runtime
 cannot resume. Each attempt emits a `stage.runtime.session` event carrying
 `cold` or `resumed`, the session id, and the reason a requested resume did not
 happen.
+
+A resumed Codex attempt reports the session's cumulative usage, not its own:
+`codex exec resume` keeps the thread's token total, so the attempt's final
+`turn.completed` snapshot includes every earlier attempt on that thread. Run
+projection subtracts the latest snapshot recorded earlier on the same thread
+before it totals attempts. That subtraction feeds the runtime-token ceiling,
+the budget summary, efficiency findings, the Console, evidence, and traces.
+The attempt's `stage.runtime.usage` record keeps the cumulative snapshot as
+written. Without the subtraction, a loop of N resumed iterations would count
+about N(N+1)/2 iterations' worth of tokens. An attempt whose snapshot is
+below that baseline is reported as unknown rather than guessed.
+
+### Per-call Codex usage
+
+`codex exec --json` reports one cumulative total per turn, so an implement
+turn that ran fifty commands shows as one record of millions of mostly cached
+input tokens. Codex's rollout file under `CODEX_HOME/sessions` has the usage of
+every model call. After each Codex attempt Nitely reads it and writes one
+`stage.runtime.calls` record per model call, plus each tool output's size. That
+shows how the input grows call by call: large tool outputs read early can stay
+in the context of later calls, and late calls that add a few hundred bytes of
+new tool output can still read tens of thousands of cached tokens.
+
+The attempt total stays the `turn.completed` snapshot. A resumed attempt only
+counts the calls appended after it started. When the rollout is missing,
+unreadable, or does not add up to that total, the turn records stay and the
+reason is recorded. Only numbers and identifiers are read from the rollout.
+[Tracing](tracing.md) has the record format, the fallback reasons, and how the
+OCI backend finds the rollout.
+
+The Web Console stage details show the measured per-call curve under "Model
+calls". `nitely diagnose` reports `resent-tool-output` when large tool outputs
+could account for a large share of an attempt's cached input. That figure is an
+upper-bound heuristic estimate, capped by each call's cache-read tokens.
+[Tracing](tracing.md) gives the rule.
 
 Session ids are held in memory for the life of the `runFlow` call and are
 deliberately not persisted. A resumed Nitely run starts its next stage
@@ -192,6 +324,38 @@ closed because preserving writes while filtering arbitrary reads needs a
 filesystem mediation layer that Nitely does not ship. Local and Mise backends
 also fail closed for required bounds. This keeps advisory bounds honest rather
 than claiming enforcement that a runtime cannot provide.
+
+### Tool output budget
+
+`maxFileBytes` bounds a single read. It does not bound how long that read
+stays in context. A runtime keeps every tool output in the turn's context and
+resends it on each later model call. In a production Codex implement turn of
+38 model calls, the first eight tool outputs added about 137 KB (12–30 KB
+each) to the context. Using the per-call records, the upper-bound estimate is
+that up to 59% of the turn's input tokens were those early outputs being
+resent.
+
+`reads.maxToolOutputTokens` caps how much of any one tool output the runtime
+keeps in context:
+
+```json
+"reads": { "maxToolOutputTokens": 2500 }
+```
+
+It resolves stage over flow, like the rest of `reads`, and it is unset by
+default, which keeps the runtime's own limit. When set:
+
+- **Codex** enforces it. Nitely passes `-c tool_output_token_limit=<n>` to
+  both `codex exec` and `codex exec resume`, on the local and OCI backends, and
+  Codex truncates each stored tool output to that budget before it enters the
+  context.
+- **Other runtimes** see it only as a line in the `Repository Read Policy`
+  prompt section.
+
+The value is recorded in evidence as `Max tool output tokens`. A lower budget
+trades resent context for truncated outputs, which can cost the agent extra
+narrower calls. Measure the net effect with the per-call records in
+`stage.runtime.calls` before you lower it for a whole flow.
 
 ## Context Usage Metrics
 

@@ -1,19 +1,23 @@
+import { fakeCodexProbeOutput } from "../../helpers/fake-codex-mcp-list.js";
 import {
   access,
   chmod,
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 import { describe, expect, it } from "vitest";
+import { CONTENT_MARKER, outputOf, ROLLOUT_THREAD, RolloutBuilder } from "../../fixtures/codex-rollout.js";
 
 import {
   OciExecutionBackend,
@@ -103,12 +107,19 @@ function offlineTogetherRegistry(): AgentRuntimeRegistry {
 function offlineRuntimeRegistry(input: {
   id?: string;
   requiredEnv?: string[][];
+  mcpServerRestriction?: boolean;
 } = {}): AgentRuntimeRegistry {
   const id = input.id ?? "codex";
   const runtime: AgentRuntimeLauncher = {
     id,
     networkAccess: "none",
     ...(input.requiredEnv ? { requiredEnv: input.requiredEnv } : {}),
+    ...(input.mcpServerRestriction
+      ? {
+        mcpServerRestriction:
+          createDefaultAgentRuntimeRegistry().resolve("codex").mcpServerRestriction,
+      }
+      : {}),
     build: ({ worktreePath }) => ({
       runtime: id,
       command: id,
@@ -259,6 +270,41 @@ function directSocketRuntimeRegistry(): AgentRuntimeRegistry {
 }
 
 describe("OciExecutionBackend", () => {
+  it("gives the workload a disk-backed TMPDIR and removes it with the container", async () => {
+    const fixture = await createFixture();
+    const calls: SandboxProcessInput[] = [];
+    let scratchSeenDuringRun: boolean | undefined;
+    const runner = successfulRunner(calls);
+    const backend = new OciExecutionBackend({
+      image: "nitely-runner:test",
+      processRunner: async (input) => {
+        if (input.args[0] === "run") {
+          const mount = input.args.find((arg) => arg.endsWith(",dst=/nitely/scratch"));
+          const source = mount?.match(/src=([^,]+)/)?.[1];
+          scratchSeenDuringRun = source ? existsSync(source) : false;
+        }
+        return await runner(input);
+      },
+      containerName: () => "nitely-scratch",
+    });
+
+    await backend.runCommand(
+      { runId: "run-scratch", path: fixture.worktree },
+      "true",
+      { runId: "run-scratch", stageId: "verify", outputDirectory: fixture.attempt },
+    );
+
+    const launch = calls.find((call) => call.args[0] === "run")!;
+    const scratchMount = launch.args.find((arg) => arg.endsWith(",dst=/nitely/scratch"));
+    const scratchSource = scratchMount?.match(/src=([^,]+)/)?.[1];
+    expect(scratchSource).toBe(join(await realpath(dirname(fixture.runRoot)), ".oci-scratch", "nitely-scratch"));
+    expect(launch.args).toEqual(expect.arrayContaining(["--env", "TMPDIR=/nitely/scratch"]));
+    // The small memory-backed /tmp stays as it was.
+    expect(launch.args.some((arg) => arg.startsWith("/tmp:rw,"))).toBe(true);
+    expect(scratchSeenDuringRun).toBe(true);
+    expect(existsSync(scratchSource!)).toBe(false);
+  });
+
   it("labels workloads with ownership and bounded expiry metadata", async () => {
     const fixture = await createFixture();
     const calls: SandboxProcessInput[] = [];
@@ -1077,6 +1123,57 @@ describe("OciExecutionBackend", () => {
         { outputDirectory: fixture.attempt },
       ),
     ).rejects.toThrow(/Docker endpoint.*Unix socket/i);
+  });
+
+  it("reads a Codex attempt's rollout from the host-backed CODEX_HOME after the container exits", async () => {
+    const fixture = await createFixture();
+    const codexHome = await mkdtemp(join(tmpdir(), "nitely-oci-codex-home-"));
+    const runner = async (input: SandboxProcessInput): Promise<SandboxProcessResult> => {
+      if (input.args[0] !== "run") return successfulRunner([])(input);
+      const rollout = new RolloutBuilder(Date.now() + 5)
+        .meta()
+        .turn()
+        .call({ input: 8_000, cached: 0, output: 20 })
+        .tool("call_1", outputOf(12_000))
+        .call({ input: 11_100, cached: 8_000, output: 20 });
+      await rollout.write(codexHome);
+      const total = rollout.runningTotal;
+      return {
+        stdout: [
+          { type: "thread.started", thread_id: ROLLOUT_THREAD },
+          { type: "turn.started" },
+          { type: "turn.completed", usage: { input_tokens: total.input, cached_input_tokens: total.cached, output_tokens: total.output } },
+        ].map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+        stderr: "",
+        exitCode: 0,
+      };
+    };
+    const run = (options: { environmentAllowlist?: string[] }) =>
+      new OciExecutionBackend({
+        image: "nitely-runner:test",
+        processRunner: runner,
+        runtimeRegistry: offlineRuntimeRegistry(),
+        env: { CODEX_HOME: codexHome },
+        ...options,
+      }).runAgent(
+        { runId: "codex-rollout", path: fixture.worktree },
+        { stage: agentStage(sandboxCapabilities()), prompt: "Implement.", attemptDirectory: fixture.attempt },
+      );
+    try {
+      const passed = await run({ environmentAllowlist: ["CODEX_HOME"] });
+      expect(passed.usage?.callLogSource).toBe("codex.rollout.token_count");
+      expect(passed.usage?.callLog?.map((call) => call.kind === "llm" ? call.inputTokens : call.outputBytes))
+        .toEqual([8_000, 12_000, 11_100]);
+      expect(JSON.stringify(passed.usage)).not.toContain(CONTENT_MARKER);
+
+      await rm(join(codexHome, "sessions"), { recursive: true, force: true });
+      const hidden = await run({});
+      expect(hidden.usage?.callLogSource).toBe("codex.exec.json");
+      expect(hidden.usage?.callLogFallback?.reason).toBe("no-codex-home");
+      expect(hidden.usage?.callLog?.[0]).toMatchObject({ kind: "llm", granularity: "turn" });
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
   });
 
   it("attaches stdin to the workload when the runtime reads its prompt from stdin", async () => {
@@ -2087,6 +2184,92 @@ describe("OciExecutionBackend", () => {
       ),
     ).rejects.toThrow(/internal egress network could not be created/i);
     expect(calls.some((call) => call.args[0] === "run")).toBe(false);
+  });
+
+  it("restricts Codex MCP servers from a probe run in the same sandbox", async () => {
+    const fixture = await createFixture();
+    const calls: SandboxProcessInput[] = [];
+    const runner = successfulRunner(calls);
+    const backend = new OciExecutionBackend({
+      image: "nitely-runner:test",
+      env: {},
+      processRunner: async (input) => {
+        const probeAt = Math.max(input.args.indexOf("mcp"), input.args.indexOf("features"));
+        if (input.args[0] === "run" && probeAt !== -1 && input.args[probeAt + 1] === "list") {
+          calls.push(input);
+          // An image's system config.toml is a layer the probe must see.
+          return {
+            stdout: fakeCodexProbeOutput({ imageone: true, github: true }, input.args),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        return await runner(input);
+      },
+      containerName: () => "nitely-agent",
+      runtimeRegistry: offlineRuntimeRegistry({ mcpServerRestriction: true }),
+    });
+
+    const result = await backend.runAgent(
+      { runId: "agent", path: fixture.worktree },
+      {
+        stage: agentStage(sandboxCapabilities()),
+        prompt: "Implement.",
+        attemptDirectory: fixture.attempt,
+        mcpServers: { mode: "declared-required", declared: ["github"] },
+      },
+    );
+
+    expect(result.mcpServers).toEqual({
+      enforcement: "enforced",
+      enabled: ["github"],
+      disabled: ["imageone", "codex_apps"],
+    });
+    const runs = calls.filter((call) => call.args[0] === "run");
+    expect(runs).toHaveLength(4);
+    const tail = (args: string[]) => args.slice(args.indexOf("nitely-runner:test") + 1);
+    const overrides = ["-c", "mcp_servers.imageone.enabled=false", "-c", "features.apps=false"];
+    // Every probe is an offline container of the same image.
+    expect(runs[0]!.args).toContain("--network=none");
+    expect(tail(runs[0]!.args)).toEqual(["codex", "mcp", "list", "--json"]);
+    expect(tail(runs[1]!.args)).toEqual(["codex", ...overrides, "mcp", "list", "--json"]);
+    expect(tail(runs[2]!.args)).toEqual(["codex", ...overrides, "features", "list"]);
+    expect(tail(runs[3]!.args)).toEqual([
+      "codex",
+      "exec",
+      ...overrides,
+      "--skip-git-repo-check",
+      "--cd",
+      "/workspace",
+      "-",
+    ]);
+  });
+
+  it("caps stored Codex tool output inside the sandbox to the stage read budget", async () => {
+    const fixture = await createFixture();
+    const calls: SandboxProcessInput[] = [];
+    const backend = new OciExecutionBackend({
+      image: "nitely-runner:test",
+      env: {},
+      processRunner: successfulRunner(calls),
+      containerName: () => "nitely-agent",
+      runtimeRegistry: offlineRuntimeRegistry(),
+    });
+
+    await backend.runAgent(
+      { runId: "agent", path: fixture.worktree },
+      {
+        stage: agentStage(sandboxCapabilities()),
+        prompt: "Implement.",
+        attemptDirectory: fixture.attempt,
+        readPolicy: { maxFileBytes: 262_144, deny: [], enforcement: "advisory", maxToolOutputTokens: 2500 },
+      },
+    );
+
+    const runs = calls.filter((call) => call.args[0] === "run");
+    const launch = runs.at(-1)!.args;
+    const tail = launch.slice(launch.indexOf("nitely-runner:test") + 1);
+    expect(tail.slice(0, 4)).toEqual(["codex", "exec", "-c", "tool_output_token_limit=2500"]);
   });
 
   it("runs an agent inside the sandbox and translates the persisted output path", async () => {

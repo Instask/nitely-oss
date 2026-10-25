@@ -45,7 +45,7 @@ describe("work item view performance", () => {
         },
       };
     });
-    const { createTask } = await import("../../src/web/tasks.js");
+    const { createTask } = await import("../../src/work-items/adapters/dev-pr-store.js");
     const { createWorkItem } = await import("../../src/work-items/store.js");
     const { listWorkItemViews } = await import("../../src/web/work-item-views.js");
 

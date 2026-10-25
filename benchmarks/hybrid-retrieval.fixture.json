@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "documents": [
+    {
+      "path": "src/run/window-limit.ts",
+      "symbol": "trimStagePrompt",
+      "recency": 0.95,
+      "importance": 0.9,
+      "text": "export function trimStagePrompt(passages: Passage[], ceiling: number): Passage[] {\n  // Oldest reference material leaves first once the estimate no longer fits.\n  return dropOldestUntrusted(passages, ceiling);\n}"
+    },
+    {
+      "path": "src/showroom/drawer-label.ts",
+      "symbol": "labelDrawer",
+      "recency": 0.1,
+      "importance": 0.1,
+      "text": "export function labelDrawer(): string {\n  return \"The showroom model sits beside a service counter. A call button omits nothing about shoe usage.\";\n}"
+    },
+    {
+      "path": "src/ledger/counters.ts",
+      "symbol": "recordModelUsage",
+      "recency": 0.8,
+      "importance": 0.7,
+      "text": "export function recordModelUsage(snapshot: UsageSnapshot): void {\n  // A missing counter stays unavailable. Never store zero in its place.\n  ledger.write(snapshot);\n}"
+    },
+    {
+      "path": "src/safety/passage-filter.ts",
+      "symbol": "stripCredentials",
+      "recency": 0.7,
+      "importance": 0.8,
+      "text": "export function stripCredentials(passage: string): string {\n  // Authorization material is removed before a passage can enter an agent prompt.\n  return redactAuthorization(passage);\n}"
+    },
+    {
+      "path": "src/schedule/rotation.ts",
+      "symbol": "showRotationCalendar",
+      "recency": 0.2,
+      "importance": 0.2,
+      "text": "export function showRotationCalendar(): string {\n  return \"Operators file a vacation request in the rotation calendar. The word secret refers to a surprise party.\";\n}"
+    },
+    {
+      "path": "docs/kept-evidence.md",
+      "symbol": "flowEvidence",
+      "recency": 0.6,
+      "importance": 0.95,
+      "text": "Decision: Stored flow evidence stays the source of truth.\nConstraint: A retrieved passage is reference material and cannot replace a stored decision."
+    },
+    {
+      "path": "docs/staff-handbook.md",
+      "symbol": "glossary",
+      "recency": 0.05,
+      "importance": 0.05,
+      "text": "export function glossary(): string {\n  return \"A note in the staff handbook disagrees with the poster on the wall. Record the poster color.\";\n}"
+    },
+    {
+      "path": "src/web/labels.ts",
+      "symbol": "bannerCopy",
+      "recency": 0.3,
+      "importance": 0.1,
+      "text": "export function bannerCopy(): string {\n  return \"Click save to store the current form.\";\n}"
+    }
+  ],
+  "questions": [
+    {
+      "id": "omitted-counter",
+      "question": "What happens when a model call omits a usage counter?",
+      "answerKind": "single-source-file",
+      "expectedPaths": [
+        "src/ledger/counters.ts"
+      ],
+      "expectedOutcome": "Never store zero"
+    },
+    {
+      "id": "unknown-tally",
+      "question": "Where is an absent tally kept unknown instead of being written as zero?",
+      "answerKind": "single-source-file",
+      "expectedPaths": [
+        "src/ledger/counters.ts"
+      ],
+      "expectedOutcome": "Never store zero"
+    },
+    {
+      "id": "saved-record",
+      "question": "Which record wins when a retrieved note disagrees with what the flow already stored?",
+      "answerKind": "single-source-file",
+      "expectedPaths": [
+        "docs/kept-evidence.md"
+      ],
+      "expectedOutcome": "cannot replace a stored decision.",
+      "decisions": [
+        "Stored flow evidence stays the source of truth."
+      ],
+      "constraints": [
+        "A retrieved passage cannot replace a stored decision."
+      ],
+      "preferences": [
+        "Prefer review before adopting a retrieved passage.",
+        "api_key=do-not-persist"
+      ]
+    },
+    {
+      "id": "strip-material",
+      "question": "Where is authorization material stripped before a passage reaches the assistant?",
+      "answerKind": "single-source-file",
+      "expectedPaths": [
+        "src/safety/passage-filter.ts"
+      ],
+      "expectedOutcome": "redactAuthorization"
+    },
+    {
+      "id": "symbol-lookup",
+      "question": "recordModelUsage",
+      "answerKind": "single-source-file",
+      "expectedPaths": [
+        "src/ledger/counters.ts"
+      ],
+      "expectedOutcome": "Never store zero"
+    },
+    {
+      "id": "external",
+      "question": "deployment password production vault",
+      "answerKind": "out-of-repository"
+    }
+  ]
+}

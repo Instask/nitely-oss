@@ -136,6 +136,7 @@ import type {
 import { createRequire } from "node:module";
 
 import { EventStore } from "../events/store.js";
+import { exportRunTrace, otlpTraceConfigFromEnv } from "../telemetry/run-trace-otel.js";
 import { materializeScheduleNow } from "../schedules/materialize.js";
 import {
   createSchedule,
@@ -228,7 +229,6 @@ import {
   updateTaskSpecApproval,
   updateTaskTechnicalDesign,
   updateTaskTechnicalDesignApproval,
-  updateTaskRunState,
   updateTaskSpec,
   updateTaskSourceRecord,
   isSnapshotBackedTaskSourceType,
@@ -244,7 +244,7 @@ import {
   type TaskSourceSnapshot,
   type TaskSourceStatusSync,
   validateFlowPath,
-} from "./tasks.js";
+} from "../work-items/adapters/dev-pr-store.js";
 import {
   ExternalDocumentInputError,
   normalizeExternalDocument,
@@ -296,6 +296,11 @@ import {
 } from "../scheduler/cooldown.js";
 import { ResumeClaimStore, resumeClaimStorePath } from "../scheduler/resume-claim.js";
 import {
+  denyRunApproval,
+  RunContinuationClaimConflictError,
+  withRunContinuationClaim,
+} from "../run/control.js";
+import {
   dispatchFactoryQueue,
   getFactoryQueueSnapshot,
   setFactoryQueuePaused,
@@ -319,6 +324,7 @@ import {
   prepareWorkItemRunCandidate,
   prepareWorkItemRunCandidates,
   projectWorkItem,
+  updateWorkItemRunState,
 } from "../work-items/access.js";
 import {
   getWorkItemView,
@@ -4829,6 +4835,24 @@ async function cancelWebRun(input: {
       status: "failed",
     });
   }
+  // An active run exports its trace when it returns; a stopped one has no
+  // runner left to do it. Not awaited: the cancel answers without waiting
+  // on the collector.
+  if (!active && otlpTraceConfigFromEnv()) {
+    const repoPath = input.repository.path;
+    const runId = input.runId;
+    void exportRunTrace({
+      runId,
+      listEvents: () => {
+        const traceStore = new EventStore(eventStorePath(repoPath));
+        try {
+          return traceStore.list(runId);
+        } finally {
+          traceStore.close();
+        }
+      },
+    });
+  }
 }
 
 function requestActiveRunCancellation(input: {
@@ -5678,31 +5702,24 @@ async function applyWorkflowApprovalAction(input: {
           resolve(input.serverInput.repoPath),
           input.user,
         );
+  const taskId = input.notification.taskId;
+  if (input.action === "deny") {
+    await denyRunApproval({
+      repoPath: input.repository.path,
+      runId: input.approvalSource.runId,
+      approvalId: input.approvalSource.approvalId,
+      actor: input.user.id,
+      ...(taskId ? { workItemId: taskId } : {}),
+    });
+    return;
+  }
   await resolveApproval({
     repoPath: input.repository.path,
     runId: input.approvalSource.runId,
     approvalId: input.approvalSource.approvalId,
-    decision: input.action === "approve" ? "approved" : "denied",
+    decision: "approved",
     actor: input.user.id,
   });
-
-  const taskId = input.notification.taskId;
-  if (input.action === "deny") {
-    if (taskId) {
-      ensureRunFailedEvent(
-        input.repository.path,
-        input.approvalSource.runId,
-        new Error(`approval ${input.approvalSource.approvalId} denied`),
-      );
-      await settleOrUpdateUnifiedRun(
-        input.repository.path,
-        taskId,
-        input.approvalSource.runId,
-        { status: "failed" },
-      );
-    }
-    return;
-  }
   if (!taskId) return;
 
   const providerStore = providerStoreForUser(
@@ -5715,14 +5732,28 @@ async function applyWorkflowApprovalAction(input: {
     input.user.authMode,
   );
   void (async () => {
+    // Register before the runner starts so a cancel that lands mid-resume
+    // can abort it.
+    const cancellation = registerActiveRunCancellation({
+      repoPath: input.repository.path,
+      runId: input.approvalSource.runId,
+    });
     try {
-      const result = await resumeRun(
-        {
-          repoPath: input.repository.path,
-          runId: input.approvalSource.runId,
-          executionBackend: execution.backend,
-        },
-        { providerStore, knowledgeProviderStore: knowledgeProviderStore! },
+      const result = await withRunContinuationClaim(
+        input.repository.path,
+        input.approvalSource.runId,
+        async () => await resumeRun(
+          {
+            repoPath: input.repository.path,
+            runId: input.approvalSource.runId,
+            executionBackend: execution.backend,
+          },
+          {
+            providerStore,
+            knowledgeProviderStore: knowledgeProviderStore!,
+            cancellation: cancellation.control,
+          },
+        ),
       );
       if (result.status === "awaiting-approval") {
         const approval = pendingApprovalForRun(
@@ -5809,6 +5840,8 @@ async function applyWorkflowApprovalAction(input: {
       }
       ensureRunCompletedEvent(input.repository.path, result);
     } catch (error) {
+      // Another owner is already resuming this Run; it settles the Run.
+      if (error instanceof RunContinuationClaimConflictError) return;
       ensureRunFailedEvent(
         input.repository.path,
         input.approvalSource.runId,
@@ -5853,6 +5886,8 @@ async function applyWorkflowApprovalAction(input: {
           { providerStore },
         );
       }
+    } finally {
+      cancellation.finish();
     }
   })();
 }
@@ -6352,30 +6387,7 @@ async function updateUnifiedRunState(
   patch: Parameters<typeof updateWorkItem>[2],
   storeKind?: WorkItemStoreKind,
 ): Promise<void> {
-  if (storeKind === "generic") {
-    await updateWorkItem(repoPath, id, patch);
-    return;
-  }
-  if (storeKind !== "legacy-dev-pr") {
-    try {
-      await updateWorkItem(repoPath, id, patch);
-      return;
-    } catch (error) {
-      if (!(error instanceof WebNotFoundError)) {
-        throw error;
-      }
-    }
-  }
-  if (!patch.status) {
-    throw new Error(`legacy task run-state update requires status: ${id}`);
-  }
-  await updateTaskRunState(repoPath, id, {
-    status: patch.status,
-    ...(patch.latestRunId !== undefined ? { latestRunId: patch.latestRunId } : {}),
-    ...(patch.changeRequestUrl !== undefined
-      ? { changeRequestUrl: patch.changeRequestUrl }
-      : {}),
-  });
+  await updateWorkItemRunState(repoPath, id, patch, storeKind);
 }
 
 async function settleOrUpdateUnifiedRun(

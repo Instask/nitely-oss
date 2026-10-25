@@ -15,7 +15,7 @@ import {
   setScheduleEnabled,
   updateSchedule,
 } from "../../src/schedules/store.js";
-import { getTask, listTasks } from "../../src/web/tasks.js";
+import { getTask, listTasks } from "../../src/work-items/adapters/dev-pr-store.js";
 
 async function repo(): Promise<string> {
   const repoPath = await mkdtemp(join(tmpdir(), "nitely-schedules-"));

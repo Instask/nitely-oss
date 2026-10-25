@@ -8,7 +8,7 @@ directory is the in-repo baseline for building one.
 
 | Variant | Contains | Use for |
 | --- | --- | --- |
-| `command` | Debian slim, Node 24, pnpm, git, bash, Python 3, ca-certificates | offline `command` stages and Python Skills |
+| `command` | Debian slim, Node 24, pnpm, git, bash, Python 3, gcc, ca-certificates | offline `command` stages and Python Skills |
 | `agent` | `command` plus the agent CLIs you name | `agent` stages and review gates |
 
 The `agent` variant installs nothing by default. Name the CLIs you want and the
@@ -41,9 +41,13 @@ docker/runner/build.sh --verify
 
 The image is where a repository's verification toolchain lives: CI runners
 come with a browser, `mise`, and a large `/tmp`; the slim base image comes
-with nothing beyond node, pnpm, git, and bash. When a command stage fails
-inside the sandbox on a tool the suite takes for granted, add the package
-here rather than skipping the test.
+with node, pnpm, git, bash, and `gcc`. `gcc` is part of the baseline because
+`test/run/execution/command-mediator.test.ts` compiles the sibling-thread,
+symlink-swap, and shebang-interpreter race binaries. Linux CI has a compiler
+already; an image without one fails those three tests at `spawn gcc` before
+any mediation assertion runs. When a command stage fails inside the sandbox
+on some other tool the suite takes for granted, add that package here rather
+than skipping the test.
 
 `--print` shows the engine argv without running it. `--engine podman` builds
 with Podman. `--node-image` and `--pnpm-version` pin the base and the pnpm
@@ -51,8 +55,8 @@ release; the defaults track this repository's `engines.node` and
 `packageManager`.
 
 `--verify` runs the image read-only, with `--network=none`, an unprivileged
-uid, and `/tmp` on tmpfs, then checks that `sh`, `git`, `bash`, `node`, and
-`pnpm` all resolve. That is the shape Nitely itself launches, so a build that
+uid, and `/tmp` on tmpfs, then checks that `sh`, `git`, `bash`, `gcc`, `node`,
+and `pnpm` all resolve. That is the shape Nitely itself launches, so a build that
 verifies is a build that will start. The image includes `git`, but linked-worktree
 Git metadata is never mounted into the workload. Host-side workspace
 create/commit is the only Git write path; in-container `git` against the

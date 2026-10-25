@@ -10,6 +10,9 @@ import { EventStore } from "../src/events/store.js";
 import { eventStorePath } from "../src/run/project.js";
 import { projectRun } from "../src/run/project.js";
 import { WEB_RUN_STATUSES } from "../src/web/runs.js";
+import { admitWorkItemRun } from "../src/run/admission.js";
+import { ResumeClaimStore, resumeClaimStorePath } from "../src/scheduler/resume-claim.js";
+import { createWorkItem, getWorkItem, getWorkItemSnapshot } from "../src/work-items/store.js";
 import { createTokenOwner } from "./helpers/token-owner.js";
 
 async function writeCliFlow(flow: unknown): Promise<string> {
@@ -3137,6 +3140,57 @@ describe("runCli", () => {
     ]);
   });
 
+  it("prints the run's runtime usage once when a remote watch ends", async () => {
+    const stdout: string[] = [];
+    const responses = [
+      {
+        run: {
+          runId: "run-usage",
+          status: "running",
+          currentStage: "implement",
+          runtimeUsage: { totalTokens: 10, knownAttempts: 1, unknownAttempts: 0 },
+        },
+      },
+      {
+        run: {
+          runId: "run-usage",
+          status: "failed",
+          currentStage: "implement",
+          runtimeUsage: {
+            totalTokens: 4_000_000,
+            inputTokens: 3_990_000,
+            freshInputTokens: 60_000,
+            cachedInputTokens: 3_930_000,
+            outputTokens: 10_000,
+            estimatedCostUsd: 1.5,
+            knownAttempts: 2,
+            unknownAttempts: 1,
+            ignored: "not a number",
+          },
+        },
+      },
+    ];
+
+    const code = await runCli(
+      ["run", "watch", "run-usage", "--server", "http://server.test", "--interval-ms", "1"],
+      { stdout: (line) => stdout.push(line), stderr: () => {} },
+      {
+        fetch: async () =>
+          new Response(JSON.stringify(responses.shift() ?? responses.at(-1)), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      },
+    );
+
+    expect(code).toBe(1);
+    expect(stdout).toEqual([
+      "RUN run-usage running stage=implement",
+      "RUN run-usage failed stage=implement",
+      "USAGE run-usage 4000000 total tokens · 3990000 input · 60000 fresh input · 3930000 cached input · 10000 output · $1.5000 estimated · 2 known attempts · 1 unknown attempt",
+    ]);
+  });
+
   it.each(["failed", "blocked", "interrupted"] as const)(
     "exits non-zero when a remote run reaches %s",
     async (terminalStatus) => {
@@ -3805,6 +3859,89 @@ None.
     ]);
   });
 
+  it("prints runtime usage and each attempt's input in status, and as --json", async () => {
+    const run = {
+      runId: "run-usage",
+      status: "completed" as const,
+      flowName: "flow",
+      completedStages: ["implement"],
+      stages: [
+        {
+          stageId: "implement",
+          status: "completed" as const,
+          attempts: [{ attempt: 1, status: "completed" as const }],
+        },
+      ],
+      logs: [{ stageId: "implement", message: "secret-ish log line" }],
+      approvals: [],
+      artifacts: [],
+      gates: [],
+      orchestratorDecisions: [],
+      verificationDiagnoses: [],
+      runtimeUsage: {
+        totalTokens: 1_210,
+        inputTokens: 1_200,
+        freshInputTokens: 200,
+        cachedInputTokens: 1_000,
+        outputTokens: 10,
+        actualCostUsd: 0.0123,
+        knownAttempts: 1,
+        unknownAttempts: 0,
+      },
+      runtimeInputBreakdown: [
+        {
+          stageId: "implement",
+          attempt: 1,
+          runtime: "codex",
+          harnessPromptApproxTokens: 900,
+          usageReported: true,
+          cumulativeInputTokens: 1_200,
+          freshInputTokens: 200,
+          cachedInputTokens: 1_000,
+          outputTokens: 10,
+          usageSource: "codex.exec.turn.completed.usage",
+        },
+      ],
+    };
+    const dependencies = { getRunStatus: async () => run } as unknown as Parameters<typeof runCli>[2];
+
+    const stdout: string[] = [];
+    expect(
+      await runCli(["status", "run-usage", "--repo", "/repo"], {
+        stdout: (line) => stdout.push(line),
+        stderr: () => {},
+      }, dependencies),
+    ).toBe(0);
+    expect(stdout).toEqual([
+      "Run: run-usage",
+      "Status: completed",
+      "Flow: flow",
+      "Stages:",
+      "  implement\tcompleted\tattempts: 1",
+      "Runtime usage: 1210 total tokens · 1200 input · 200 fresh input · 1000 cached input · 10 output · $0.0123 actual · 1 known attempt",
+      "Input by attempt:",
+      "  implement attempt 1 (codex): harness prompt ~900 · fresh input 200 · cached input 1000 · cumulative input 1200 · output 10 [codex.exec.turn.completed.usage]",
+    ]);
+
+    const jsonOut: string[] = [];
+    expect(
+      await runCli(["status", "run-usage", "--repo", "/repo", "--json"], {
+        stdout: (line) => jsonOut.push(line),
+        stderr: () => {},
+      }, dependencies),
+    ).toBe(0);
+    const parsed = JSON.parse(jsonOut.join("\n"));
+    expect(parsed).toEqual({
+      runId: "run-usage",
+      status: "completed",
+      flowName: "flow",
+      stages: [{ stageId: "implement", status: "completed", attempts: 1 }],
+      runtimeUsage: run.runtimeUsage,
+      runtimeInputBreakdown: run.runtimeInputBreakdown,
+    });
+    expect(jsonOut.join("\n")).not.toContain("secret-ish log line");
+  });
+
   it("prints reproducibility diagnostics in projected status output", async () => {
     const repoPath = await mkdtemp(join(tmpdir(), "nitely-cli-repro-"));
     const runDirectory = join(repoPath, ".nitely", "runs", "run-1");
@@ -4444,6 +4581,103 @@ None.
     ]);
   });
 
+  it("fails the Run and settles its Work item when an approval is denied", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "nitely-cli-deny-"));
+    await mkdir(join(repo, "flows"), { recursive: true });
+    await writeFile(join(repo, "flows", "generic.json"), "{}\n", "utf8");
+    const created = await createWorkItem(
+      repo,
+      { title: "Publish", workItemType: "autofarm.site", flowPath: "flows/generic.json", inputs: {} },
+      { createId: () => "site" },
+    );
+    const candidate = await getWorkItemSnapshot(repo, created.id);
+    const admission = await admitWorkItemRun({
+      repoPath: repo,
+      candidate: { workItem: candidate.record, version: candidate.version },
+      runInput: { repoPath: repo, flowPath: created.flowPath, inputs: {}, workItemId: created.id },
+      createRunId: () => "run-deny",
+    });
+    expect(admission.decision).toBe("admitted");
+    const store = new EventStore(eventStorePath(repo));
+    try {
+      store.append({ runId: "run-deny", type: "run.created", payload: { flowName: "approval-flow" } });
+      store.append({ runId: "run-deny", stageId: "approve", attempt: 1, type: "stage.started", payload: { type: "approval" } });
+      store.append({
+        runId: "run-deny",
+        stageId: "approve",
+        attempt: 1,
+        type: "approval.requested",
+        payload: { approvalId: "approve-1", prompt: "Approve" },
+      });
+    } finally {
+      store.close();
+    }
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const code = await runCli(
+      ["deny", "run-deny", "approve-1", "--repo", repo, "--actor", "human:test"],
+      { stdout: (line) => stdout.push(line), stderr: (line) => stderr.push(line) },
+    );
+
+    expect(stderr).toEqual([]);
+    expect(code).toBe(0);
+    expect(stdout).toEqual(["APPROVAL approve-1 denied"]);
+    const verify = new EventStore(eventStorePath(repo));
+    try {
+      expect(projectRun(verify.list("run-deny")).status).toBe("failed");
+    } finally {
+      verify.close();
+    }
+    await expect(getWorkItem(repo, "site")).resolves.toMatchObject({
+      status: "failed",
+      latestRunId: "run-deny",
+    });
+  });
+
+  it("refuses to resume a Run whose continuation claim another owner holds", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "nitely-cli-resume-claim-"));
+    await mkdir(join(repo, ".nitely"), { recursive: true });
+    const claims = new ResumeClaimStore(resumeClaimStorePath(repo));
+    try {
+      expect(claims.claim({ runId: "run-held", token: "other-owner", now: new Date() })).toBe(true);
+    } finally {
+      claims.close();
+    }
+    let resumed = 0;
+    const stderr: string[] = [];
+    const code = await runCli(
+      ["resume", "run-held", "--repo", repo],
+      { stdout: () => {}, stderr: (line) => stderr.push(line) },
+      { resumeRun: async () => { resumed += 1; throw new Error("resume should not run"); } },
+    );
+
+    expect(code).toBe(1);
+    expect(resumed).toBe(0);
+    expect(stderr.join("\n")).toContain("run is already being resumed: run-held");
+  });
+
+  it("releases the continuation claim after a CLI resume finishes", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "nitely-cli-resume-release-"));
+    let heldDuringResume: string | undefined;
+    const code = await runCli(
+      ["resume", "run-free", "--repo", repo],
+      { stdout: () => {}, stderr: () => {} },
+      {
+        resumeRun: async (input) => {
+          const claims = new ResumeClaimStore(resumeClaimStorePath(repo));
+          try { heldDuringResume = claims.get(input.runId)?.runId; } finally { claims.close(); }
+          return { runId: input.runId, branchName: "nitely/run-free", worktreePath: join(repo, "worktree") };
+        },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(heldDuringResume).toBe("run-free");
+    const claims = new ResumeClaimStore(resumeClaimStorePath(repo));
+    try { expect(claims.get("run-free")).toBeUndefined(); } finally { claims.close(); }
+  });
+
   it("lists and resolves approval requests", async () => {
     const repo = await mkdtemp(join(tmpdir(), "nitely-cli-approvals-"));
     await mkdir(join(repo, ".nitely"), { recursive: true });
@@ -4787,11 +5021,14 @@ None.
   });
 
   it("resumes interrupted runs through the injected runner", async () => {
+    // Resuming takes the Run continuation claim in the repository, so the
+    // repository has to exist.
+    const repo = await mkdtemp(join(tmpdir(), "nitely-cli-resume-"));
     const stdout: string[] = [];
     const stderr: string[] = [];
 
     const code = await runCli(
-      ["resume", "run-1", "--repo", "/repo", "--checkpoint", "stage-attempt:2"],
+      ["resume", "run-1", "--repo", repo, "--checkpoint", "stage-attempt:2"],
       {
         stdout: (line) => stdout.push(line),
         stderr: (line) => stderr.push(line),
@@ -4799,14 +5036,14 @@ None.
       {
         resumeRun: async (input) => {
           expect(input).toEqual({
-            repoPath: "/repo",
+            repoPath: repo,
             runId: "run-1",
             checkpointId: "stage-attempt:2",
           });
           return {
             runId: "run-1",
             branchName: "nitely/run-1",
-            worktreePath: "/repo/.nitely/runs/run-1/worktree",
+            worktreePath: join(repo, ".nitely", "runs", "run-1", "worktree"),
           };
         },
       },
@@ -4817,9 +5054,9 @@ None.
     expect(stdout).toEqual([
       "RUN run-1 resumed",
       "Branch: nitely/run-1",
-      "Worktree: /repo/.nitely/runs/run-1/worktree",
-      `Status command: nitely status run-1 --repo ${resolve("/repo")}`,
-      `Run directory: ${join(resolve("/repo"), ".nitely", "runs", "run-1")}`,
+      `Worktree: ${join(repo, ".nitely", "runs", "run-1", "worktree")}`,
+      `Status command: nitely status run-1 --repo ${resolve(repo)}`,
+      `Run directory: ${join(resolve(repo), ".nitely", "runs", "run-1")}`,
     ]);
   });
 

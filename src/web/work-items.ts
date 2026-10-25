@@ -1,6 +1,6 @@
 import { organizationSessionAccessAllowed, type OrganizationSessionAccess } from "./session-policy.js";
-import type { TaskDetail, TaskRecord } from "./tasks.js";
-import { getTaskDetail, listTasks } from "./tasks.js";
+import type { TaskDetail, TaskRecord } from "../work-items/adapters/dev-pr-store.js";
+import { getTaskDetail, listTasks } from "../work-items/adapters/dev-pr-store.js";
 import { getRunDetail, listRuns, type WebRunSummary } from "./runs.js";
 import type { PublicOrganizationMembership } from "./organizations.js";
 

@@ -46,7 +46,7 @@ const VERIFICATION_PATTERN =
   /\b(verify|verification|verified|test|tests|testing|e2e|end[-_ ]?to[-_ ]?end|playwright|cypress|vitest|jest|pytest|rspec|check|typecheck|tsc|lint|build|conformance|acceptance|qa|smoke)\b/i;
 
 const ENVIRONMENT_PATTERN =
-  /\b(timeout|timed out|etimedout|econnreset|econnrefused|eaddrinuse|enotfound|eai_again|network|rate limit|429|5\d\d|service unavailable|registry|npm err|pnpm fetch|command not found|executable doesn't exist|no such file or directory|permission denied|browser executable)\b/i;
+  /\b(timeout|timed out|etimedout|econnreset|econnrefused|eaddrinuse|enotfound|eai_again|network|rate limit|429|5\d\d|service unavailable|registry|npm err|pnpm fetch|command not found|executable doesn't exist|no such file or directory|permission denied|browser executable|enospc|no space left on device)\b/i;
 
 const SPEC_FAILURE_PATTERN =
   /\b(spec mismatch|requirement mismatch|acceptance criteria|acceptance mismatch|expected behavior|ambiguous requirement|missing requirement|requirements changed|planning mismatch|design mismatch|contradictory requirement|out of scope)\b/i;

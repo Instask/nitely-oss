@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
 
+import {
+  FROZEN_SEMANTIC_DIMENSIONS,
+  FROZEN_SEMANTIC_MODEL,
+  FROZEN_SEMANTIC_SOURCE_DIGEST,
+  FROZEN_SEMANTIC_VECTORS,
+} from "./frozen-semantic-table.js";
 import { tokenizeKnowledgeText } from "./tokenize.js";
 
 export const KNOWLEDGE_EMBEDDING_PROVIDER_VERSION = "nitely.knowledge-embeddings.v1";
@@ -445,6 +451,60 @@ export class OpenAICompatibleEmbeddingProvider implements KnowledgeEmbeddingProv
       throw new Error("knowledge embedding response is missing an index");
     }
     return normalizeVectors(ordered, texts.length);
+  }
+}
+
+export class FrozenSemanticEmbeddingProvider implements KnowledgeEmbeddingProvider {
+  readonly identity: KnowledgeEmbeddingProviderIdentity;
+
+  constructor() {
+    const entries = Object.keys(FROZEN_SEMANTIC_VECTORS).sort().map((text) =>
+      `${text}\0${FROZEN_SEMANTIC_VECTORS[text]}`);
+    this.identity = {
+      id: "frozen-semantic",
+      model: providerModel(FROZEN_SEMANTIC_MODEL),
+      version: KNOWLEDGE_EMBEDDING_PROVIDER_VERSION,
+      configurationDigest: configurationDigest([
+        "frozen-semantic",
+        FROZEN_SEMANTIC_MODEL,
+        FROZEN_SEMANTIC_SOURCE_DIGEST,
+        String(FROZEN_SEMANTIC_DIMENSIONS),
+        entries.join("\n"),
+      ].join("\0")),
+      dimensions: FROZEN_SEMANTIC_DIMENSIONS,
+      semantic: true,
+    };
+  }
+
+  has(text: string): boolean {
+    return Object.prototype.hasOwnProperty.call(FROZEN_SEMANTIC_VECTORS, text);
+  }
+
+  knownText(): string {
+    const text = Object.keys(FROZEN_SEMANTIC_VECTORS).sort()[0];
+    if (!text) throw new Error("frozen semantic table is empty");
+    return text;
+  }
+
+  async embedDocuments(texts: readonly string[]): Promise<readonly Float32Array[]> {
+    return texts.map((text) => this.vector(text));
+  }
+
+  async embedQuery(text: string): Promise<Float32Array> {
+    return this.vector(text);
+  }
+
+  private vector(text: string): Float32Array {
+    const encoded = FROZEN_SEMANTIC_VECTORS[text];
+    if (encoded === undefined) throw new Error("frozen semantic embedding has no vector for this text");
+    const bytes = Buffer.from(encoded, "base64");
+    if (bytes.byteLength !== FROZEN_SEMANTIC_DIMENSIONS * 4) {
+      throw new Error("frozen semantic embedding dimensions do not match the table");
+    }
+    const vector = new Float32Array(FROZEN_SEMANTIC_DIMENSIONS);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    for (let index = 0; index < vector.length; index += 1) vector[index] = view.getFloat32(index * 4, true);
+    return vector;
   }
 }
 

@@ -6,7 +6,7 @@ import {
   selectRunnableTasks,
   wouldCreateCycle,
 } from "../../src/scheduler/graph.js";
-import type { TaskRecord } from "../../src/web/tasks.js";
+import type { TaskRecord } from "../../src/work-items/adapters/dev-pr-store.js";
 
 function task(
   id: string,

@@ -13,7 +13,7 @@ import {
 } from "../../src/web/organizations.js";
 import { startWebServer } from "../../src/web/server.js";
 import { listSecurityAuditEvents } from "../../src/web/security-audit.js";
-import { createTask } from "../../src/web/tasks.js";
+import { createTask } from "../../src/work-items/adapters/dev-pr-store.js";
 
 const repos: string[] = [];
 afterEach(async () => { await Promise.all(repos.splice(0).map((repo) => rm(repo, { recursive: true, force: true }))); });
