@@ -6,8 +6,8 @@ import type { RunEventType } from "../events/types.js";
 import { upsertFactoryCandidate } from "../factory-queue.js";
 import { eventStorePath } from "../run/project.js";
 import { WebNotFoundError } from "../web/errors.js";
-import { createTask, getTask, updateTaskDependencies } from "../web/tasks.js";
-import type { CreateTaskInput, CreateTaskOptions, TaskRecord } from "../web/tasks.js";
+import { createTask, getTask, updateTaskDependencies } from "../work-items/adapters/dev-pr-store.js";
+import type { CreateTaskInput, CreateTaskOptions, TaskRecord } from "../work-items/adapters/dev-pr-store.js";
 import {
   nextRunAtFor,
   readOccurrencesFile,

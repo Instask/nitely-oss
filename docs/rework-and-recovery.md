@@ -203,3 +203,13 @@ the normal retry/rework/escalation policy path. Failed agent retries receive a
 prompt section with prior failure context and an instruction not to repeat the
 failed approach. When the budget is exhausted, the run fails with an explicit
 attempts-exhausted message.
+
+A rework request also re-runs every stage between its target and the stage
+that requested it. Every one of those stages gets the rework in its prompt's
+previous-failure context, not only the target. A stage that did not fail itself
+is labelled as re-run by the rework cycle. Nitely does not reset the worktree
+between attempts, so these prompts also say the stage's previous changes are
+still there and should be inspected (`git status`, `git diff`) and built on,
+not re-implemented. Without this, a production rework re-ran `implement` with
+its original prompt and spent more tokens re-exploring the repository than the
+first attempt did.

@@ -1,5 +1,5 @@
 import { wouldCreateCycle } from "./graph.js";
-import type { SuggestedDependency, TaskSourceRecord } from "../web/tasks.js";
+import type { SuggestedDependency, TaskSourceRecord } from "../work-items/adapters/dev-pr-store.js";
 
 export const SCHEDULER_DEPENDENCY_SUGGESTION_SOURCE = "scheduler-context";
 

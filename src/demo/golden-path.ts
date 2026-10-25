@@ -21,7 +21,7 @@ import { projectRun, eventStorePath } from "../run/project.js";
 import { EventStore } from "../events/store.js";
 import type { ProviderConnectionStore } from "../providers/types.js";
 import type { ChangeRequestTarget, ScmProvider } from "../scm/types.js";
-import { createTask } from "../web/tasks.js";
+import { createTask } from "../work-items/adapters/dev-pr-store.js";
 import {
   finalizeWorkItemRunCandidate,
   prepareWorkItemRunCandidate,

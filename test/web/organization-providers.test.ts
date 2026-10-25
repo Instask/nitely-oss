@@ -7,7 +7,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { startWebServer } from "../../src/web/server.js";
 import { createSession, createUser } from "../../src/web/users.js";
 import { addOrganizationMember, listPublicMemberships } from "../../src/web/organizations.js";
-import { createTask } from "../../src/web/tasks.js";
+import { createTask } from "../../src/work-items/adapters/dev-pr-store.js";
 import { FileProviderConnectionStore } from "../../src/providers/file-store.js";
 import { EventStore } from "../../src/events/store.js";
 import { eventStorePath } from "../../src/run/project.js";

@@ -325,6 +325,38 @@ filesystem mediation layer that Nitely does not ship. Local and Mise backends
 also fail closed for required bounds. This keeps advisory bounds honest rather
 than claiming enforcement that a runtime cannot provide.
 
+### Tool output budget
+
+`maxFileBytes` bounds a single read. It does not bound how long that read
+stays in context. A runtime keeps every tool output in the turn's context and
+resends it on each later model call. In a production Codex implement turn of
+38 model calls, the first eight tool outputs added about 137 KB (12–30 KB
+each) to the context. Using the per-call records, the upper-bound estimate is
+that up to 59% of the turn's input tokens were those early outputs being
+resent.
+
+`reads.maxToolOutputTokens` caps how much of any one tool output the runtime
+keeps in context:
+
+```json
+"reads": { "maxToolOutputTokens": 2500 }
+```
+
+It resolves stage over flow, like the rest of `reads`, and it is unset by
+default, which keeps the runtime's own limit. When set:
+
+- **Codex** enforces it. Nitely passes `-c tool_output_token_limit=<n>` to
+  both `codex exec` and `codex exec resume`, on the local and OCI backends, and
+  Codex truncates each stored tool output to that budget before it enters the
+  context.
+- **Other runtimes** see it only as a line in the `Repository Read Policy`
+  prompt section.
+
+The value is recorded in evidence as `Max tool output tokens`. A lower budget
+trades resent context for truncated outputs, which can cost the agent extra
+narrower calls. Measure the net effect with the per-call records in
+`stage.runtime.calls` before you lower it for a whole flow.
+
 ## Context Usage Metrics
 
 Each agent or review-gate attempt emits one `stage.context.usage` event. The

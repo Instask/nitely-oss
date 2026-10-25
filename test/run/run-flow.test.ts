@@ -6514,6 +6514,56 @@ describe("runFlow", () => {
     expect(payload.reviewedArtifactIds).toEqual(["site-plan"]);
   });
 
+  it("reports and honours cancellation for stages a resumed run starts", async () => {
+    const repo = await createRepo();
+    const flowPath = join(repo, "flows", "resume-cancellation.json");
+    await writeJson(flowPath, {
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "resume-cancellation" },
+      spec: {
+        stages: [
+          { id: "build", type: "command", command: "printf plan", inputs: [], outputs: ["site-plan"] },
+          { id: "approve-plan", type: "approval", prompt: "Approve the plan", inputs: ["site-plan"], outputs: [] },
+          { id: "publish", type: "command", command: "printf published", inputs: ["site-plan"], outputs: ["test-report"] },
+        ],
+      },
+    });
+    await runFlow({ flowPath, repoPath: repo, inputs: {} }, { createRunId: () => "run-resume-cancel" });
+    await resolveApproval({
+      repoPath: repo,
+      runId: "run-resume-cancel",
+      approvalId: "approve-plan-1",
+      decision: "approved",
+    });
+
+    const controller = new AbortController();
+    const stages: string[] = [];
+    await expect(resumeRun(
+      { repoPath: repo, runId: "run-resume-cancel" },
+      {
+        cancellation: {
+          signal: controller.signal,
+          getRequest: () => ({ actor: "operator", reason: "stop", source: "web" }),
+          onStageChange: (stage) => {
+            if (!stage) return;
+            stages.push(stage.stageId);
+            // An operator cancels as soon as the resumed run reaches publish.
+            if (stage.stageId === "publish") controller.abort();
+          },
+        },
+      },
+    )).rejects.toThrow(/cancelled/);
+
+    expect(stages).toContain("publish");
+    const store = new EventStore(join(repo, ".nitely", "events.db"));
+    try {
+      const events = store.list("run-resume-cancel");
+      expect(projectRun(events).status).toBe("cancelled");
+      expect(events.some((event) => event.type === "stage.completed" && event.stageId === "publish")).toBe(false);
+    } finally { store.close(); }
+  });
+
   it("pauses at an approval stage and does not start downstream stages", async () => {
     const repo = await createRepo();
     const flowPath = join(repo, "flows", "approval-pause.json");
@@ -9885,6 +9935,96 @@ describe("runFlow", () => {
       });
     },
   );
+
+  it("tells every stage a rework cycle re-runs why it runs and that its changes are still there", async () => {
+    const repo = await createRepo();
+    const flowPath = join(repo, "flows", "downstream-rework.json");
+    await writeJson(flowPath, {
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "downstream-rework" },
+      spec: {
+        stages: [
+          {
+            id: "write-tests",
+            type: "agent",
+            runtime: "codex",
+            prompt: "Write the tests.",
+            inputs: [],
+            outputs: ["tests"],
+            maxAttempts: 2,
+          },
+          {
+            id: "implement",
+            type: "agent",
+            runtime: "codex",
+            prompt: "Implement the change.",
+            inputs: ["tests"],
+            outputs: ["implementation"],
+            maxAttempts: 2,
+          },
+          {
+            id: "test",
+            type: "command",
+            command: "grep fixed feature.txt",
+            inputs: ["tests", "implementation"],
+            outputs: ["test-report"],
+            maxAttempts: 2,
+          },
+        ],
+      },
+    });
+    const prompts = new Map<string, string[]>();
+
+    await runFlow(
+      { flowPath, repoPath: repo, inputs: {} },
+      {
+        createRunId: () => "run-downstream-rework",
+        executeAgent: async ({ stage, prompt, attemptDirectory, worktreePath }) => {
+          const stagePrompts = prompts.get(stage.id) ?? [];
+          stagePrompts.push(prompt);
+          prompts.set(stage.id, stagePrompts);
+          if (stage.id === "write-tests") {
+            await writeFile(join(attemptDirectory, "tests.md"), "tests\n", "utf8");
+            return;
+          }
+          const fixed = stagePrompts.length > 1;
+          await writeFile(join(worktreePath, "feature.txt"), fixed ? "fixed\n" : "broken\n", "utf8");
+          await writeFile(join(attemptDirectory, "implementation.md"), "done\n", "utf8");
+        },
+        recommendOrchestration: ({ stage }) =>
+          stage.id === "test"
+            ? {
+                action: "rework",
+                targetStage: "write-tests",
+                targetArtifact: "tests",
+                reason: "the tests miss the required case",
+                instructions: "Cover the fixed feature case.",
+              }
+            : undefined,
+      },
+    );
+
+    const writeTests = prompts.get("write-tests") ?? [];
+    const implement = prompts.get("implement") ?? [];
+    expect(writeTests).toHaveLength(2);
+    expect(implement).toHaveLength(2);
+    expect(implement[0]).not.toContain("## Previous Failure Context");
+
+    // The target learns why, and that its earlier changes are still there.
+    expect(writeTests[1]).toContain("- attempt 1 failed: downstream stage test requested rework of stage write-tests");
+    expect(writeTests[1]).toContain("your previous attempt's changes are still in the worktree");
+
+    // A stage re-run only because it depends on the target is told so too,
+    // instead of starting blind with the original prompt.
+    expect(implement[1]).toContain("## Previous Failure Context");
+    expect(implement[1]).toContain(
+      "- attempt 1 did not fail; a rework cycle re-runs it: downstream stage test requested rework of stage write-tests",
+    );
+    expect(implement[1]).toContain("Cover the fixed feature case.");
+    expect(implement[1]).toContain("this stage depends on write-tests");
+    expect(implement[1]).toContain("git status, git diff");
+  });
 
   it("diagnoses verification failures and routes high-confidence implementation rework", async () => {
     const repo = await createRepo();
@@ -18001,6 +18141,25 @@ describe("stage read policies", () => {
     expect(evidence).toContain("Max file bytes: 8192");
     // The review gate falls back to the flow value, not the stage override.
     expect(evidence).toContain("Max file bytes: 4096");
+  });
+
+  it("states the tool output budget in the prompt and records it per stage", async () => {
+    const { prompt, evidence } = await runWithReads({
+      flow: { maxToolOutputTokens: 4000 },
+      stage: { maxToolOutputTokens: 2500 },
+    });
+
+    expect(prompt).toContain("Each tool output is kept to about 2500 tokens of context");
+    expect(evidence).toContain("Max tool output tokens: 2500");
+    // The review gate falls back to the flow value.
+    expect(evidence).toContain("Max tool output tokens: 4000");
+  });
+
+  it("leaves the tool output budget out when no flow or stage sets it", async () => {
+    const { prompt, evidence } = await runWithReads();
+
+    expect(prompt).not.toContain("Each tool output is kept to about");
+    expect(evidence).not.toContain("Max tool output tokens:");
   });
 
   it("fails closed when a stage demands enforcement the injected executor lacks", async () => {

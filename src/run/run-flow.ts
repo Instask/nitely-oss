@@ -926,6 +926,76 @@ interface PersistedLoadedSkill {
 interface PreviousFailure {
   attempt: number;
   error: string;
+  /** A stage a rework cycle re-runs only because it depends on the target. */
+  reworkRerun?: boolean;
+}
+
+/**
+ * Nitely never resets the worktree between attempts, so a stage that runs
+ * again in a rework cycle starts on top of its own previous changes. Without
+ * saying so, a fresh runtime session re-explores the repository and its own
+ * half-finished code: a production rework of `implement` spent 4.47M input
+ * tokens over 80 model calls, more than the first attempt.
+ */
+const REWORK_WORKTREE_NOTE =
+  "your previous attempt's changes are still in the worktree; inspect them first (git status, git diff) and build on them to address these findings instead of re-implementing from scratch";
+
+function previousFailureLabel(failure: PreviousFailure): string {
+  return failure.reworkRerun
+    ? `attempt ${failure.attempt} did not fail; a rework cycle re-runs it`
+    : `attempt ${failure.attempt} failed`;
+}
+
+/**
+ * Stages a rework cycle re-runs without targeting them: those after the
+ * target and before the stage that requested the rework, which already ran.
+ */
+function reworkCycleDownstreamStages(input: {
+  order: readonly string[];
+  targetStageId: string;
+  requesterStageId: string | undefined;
+  attemptsByStage: ReadonlyMap<string, number>;
+}): string[] {
+  const from = input.order.indexOf(input.targetStageId);
+  const to = input.requesterStageId ? input.order.indexOf(input.requesterStageId) : -1;
+  if (from < 0 || to <= from) return [];
+  return input.order
+    .slice(from + 1, to)
+    .filter((stageId) => (input.attemptsByStage.get(stageId) ?? 0) > 0);
+}
+
+/** Record a rework request against its target and every stage it re-runs. */
+function recordReworkCycleFailures(input: {
+  previousFailuresByStage: Map<string, PreviousFailure[]>;
+  attemptsByStage: ReadonlyMap<string, number>;
+  order: readonly string[] | undefined;
+  targetStageId: string;
+  requesterStageId: string | undefined;
+  detail: string;
+}): void {
+  const add = (stageId: string, error: string, reworkRerun = false) => {
+    const failures = input.previousFailuresByStage.get(stageId) ?? [];
+    failures.push({
+      attempt: input.attemptsByStage.get(stageId) ?? 1,
+      error,
+      ...(reworkRerun ? { reworkRerun } : {}),
+    });
+    input.previousFailuresByStage.set(stageId, failures);
+  };
+  add(input.targetStageId, `${input.detail}: ${REWORK_WORKTREE_NOTE}`);
+  if (!input.order) return;
+  for (const stageId of reworkCycleDownstreamStages({
+    order: input.order,
+    targetStageId: input.targetStageId,
+    requesterStageId: input.requesterStageId,
+    attemptsByStage: input.attemptsByStage,
+  })) {
+    add(
+      stageId,
+      `${input.detail}: this stage depends on ${input.targetStageId}, so ${REWORK_WORKTREE_NOTE}`,
+      true,
+    );
+  }
 }
 
 export interface ResolvedExternalKnowledgeControls {
@@ -1016,6 +1086,7 @@ const DEFAULT_READ_DENY_GLOBS = [
 interface ResolvedStageReadPolicy {
   maxFileBytes: number;
   deny: string[];
+  maxToolOutputTokens?: number;
   enforcement: "advisory" | "required";
 }
 
@@ -1030,6 +1101,8 @@ function resolveStageReadPolicy(
 ): ResolvedStageReadPolicy {
   const stageReads = "reads" in stage ? stage.reads : undefined;
   const isReviewGate = stage.type === "gate" && stage.mode === "review";
+  const maxToolOutputTokens =
+    stageReads?.maxToolOutputTokens ?? flowReads?.maxToolOutputTokens;
   return {
     maxFileBytes:
       stageReads?.maxFileBytes ??
@@ -1038,6 +1111,7 @@ function resolveStageReadPolicy(
         ? DEFAULT_REVIEW_MAX_READ_FILE_BYTES
         : DEFAULT_AGENT_MAX_READ_FILE_BYTES),
     deny: [...(stageReads?.deny ?? flowReads?.deny ?? DEFAULT_READ_DENY_GLOBS)],
+    ...(maxToolOutputTokens !== undefined ? { maxToolOutputTokens } : {}),
     enforcement:
       stageReads?.enforcement ?? flowReads?.enforcement ?? "advisory",
   };
@@ -6923,7 +6997,7 @@ function renderResumePrompt(input: {
         "",
         ...input.previousFailures.map(
           (failure) =>
-            `- attempt ${failure.attempt} failed: ${
+            `- ${previousFailureLabel(failure)}: ${
               redactRuntimeText(failure.error, input.context) ?? ""
             }`,
         ),
@@ -6968,6 +7042,11 @@ function renderReadPolicy(policy: ResolvedStageReadPolicy | undefined): string[]
     ...(policy.deny.length > 0
       ? [
         `Do not read these paths in bulk: ${policy.deny.join(", ")}.`,
+      ]
+      : []),
+    ...(policy.maxToolOutputTokens !== undefined
+      ? [
+        `Each tool output is kept to about ${policy.maxToolOutputTokens} tokens of context; anything longer is truncated. Narrow a search or read a smaller range instead of relying on a long output.`,
       ]
       : []),
     "Prefer targeted searches with bounded output over whole-file or whole-tree reads.",
@@ -7102,7 +7181,7 @@ function renderPrompt(
           "",
           ...previousFailures.map(
             (failure) =>
-              `- attempt ${failure.attempt} failed: ${
+              `- ${previousFailureLabel(failure)}: ${
                 redactRuntimeText(failure.error, context) ?? ""
               }`,
           ),
@@ -9826,8 +9905,6 @@ function applyFailedStagePolicy(input: {
       ),
     });
     input.reworkEdges.push({ from: input.stage.id, to: targetStageId });
-    const targetFailures =
-      input.previousFailuresByStage.get(targetStageId) ?? [];
     const detail = [
       `downstream stage ${input.stage.id} requested rework of stage ${targetStageId}`,
       request.targetArtifact ? `artifact ${request.targetArtifact}` : undefined,
@@ -9837,11 +9914,14 @@ function applyFailedStagePolicy(input: {
     ]
       .filter((part): part is string => part !== undefined)
       .join(": ");
-    targetFailures.push({
-      attempt: input.attemptsByStage.get(targetStageId) ?? 1,
-      error: detail,
+    recordReworkCycleFailures({
+      previousFailuresByStage: input.previousFailuresByStage,
+      attemptsByStage: input.attemptsByStage,
+      order: input.graph.order,
+      targetStageId,
+      requesterStageId: input.stage.id,
+      detail,
     });
-    input.previousFailuresByStage.set(targetStageId, targetFailures);
     invalidateCompletedStagesFrom(
       input.completedStages,
       input.graph.order,
@@ -11682,6 +11762,9 @@ async function writeEvidence(input: {
             [
               `- ${redactRuntimeText(policy.stageId, input.context) ?? ""} (${policy.kind})`,
               `  Max file bytes: ${policy.maxFileBytes}`,
+              ...(policy.maxToolOutputTokens !== undefined
+                ? [`  Max tool output tokens: ${policy.maxToolOutputTokens}`]
+                : []),
               `  Enforcement: ${policy.enforcement}`,
               `  Deny: ${policy.deny.length > 0 ? policy.deny.join(", ") : "none"}`,
             ].join("\n"),
@@ -15109,7 +15192,10 @@ function nextAttemptForStage(
   return Math.max(0, ...stage.attempts.map((attempt) => attempt.attempt)) + 1;
 }
 
-function rehydrateStageExecutionState(events: StoredRunEvent[]): {
+function rehydrateStageExecutionState(
+  events: StoredRunEvent[],
+  graphOrder?: readonly string[],
+): {
   attemptsByStage: Map<string, number>;
   previousFailuresByStage: Map<string, PreviousFailure[]>;
   reworkEdges: ReworkEdge[];
@@ -15162,12 +15248,14 @@ function rehydrateStageExecutionState(events: StoredRunEvent[]): {
       ]
         .filter((part): part is string => part !== undefined)
         .join(": ");
-      const failures = previousFailuresByStage.get(targetStage) ?? [];
-      failures.push({
-        attempt: attemptsByStage.get(targetStage) ?? 1,
-        error: detail,
+      recordReworkCycleFailures({
+        previousFailuresByStage,
+        attemptsByStage,
+        order: graphOrder,
+        targetStageId: targetStage,
+        requesterStageId: event.stageId,
+        detail,
       });
-      previousFailuresByStage.set(targetStage, failures);
     }
   }
   return { attemptsByStage, previousFailuresByStage, reworkEdges };
@@ -15725,7 +15813,7 @@ async function resumeRunOnce(
       events,
     });
     const { attemptsByStage, previousFailuresByStage, reworkEdges } =
-      rehydrateStageExecutionState(events);
+      rehydrateStageExecutionState(events, loaded.graph.order);
     const baseBranch = projection.baseBranch ?? "HEAD";
     let changeRequestUrl = projection.changeRequestUrl;
     let changeRequest = projection.changeRequest as ChangeRequest | undefined;
@@ -16121,6 +16209,16 @@ async function resumeRunOnce(
                       injectedAgentMemory,
                     })
                   : undefined,
+              onStageChange: () =>
+                dependencies.cancellation?.onStageChange?.({
+                  stageId: stage.id,
+                  attempt,
+                }),
+              assertNotCancelled: () =>
+                throwIfRunCancelled(dependencies.cancellation, {
+                  stageId: stage.id,
+                  attempt,
+                }),
             });
 
             let failureError: string | undefined;
@@ -16766,6 +16864,8 @@ async function resumeRunOnce(
           attemptDirectory,
         });
       }
+      dependencies.cancellation?.onStageChange?.({ stageId: stage.id, attempt });
+      throwIfRunCancelled(dependencies.cancellation, { stageId: stage.id, attempt });
 
       try {
         if (!resumeApprovalAttempt && !resumeOperatorReview) {

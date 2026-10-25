@@ -32,7 +32,7 @@ import {
   type TaskSourceIntakeProvenance,
   type TaskSourceRecord,
   type TaskSourceSnapshot,
-} from "../web/tasks.js";
+} from "../work-items/adapters/dev-pr-store.js";
 import { WebInputError } from "../web/errors.js";
 import {
   createTaskReworkRequest,
@@ -40,8 +40,8 @@ import {
   type TaskReworkRequest,
 } from "../web/task-rework-requests.js";
 import { WebNotFoundError } from "../web/errors.js";
-// intake.ts already depends on src/web/ (tasks.js, errors.js); see
-// src/web/repositories.ts for the definition.
+// intake.ts already depends on src/web/ (errors.js, task-rework-requests.js);
+// see src/web/repositories.ts for the definition.
 import { LEGACY_DEFAULT_REPOSITORY_ID } from "../web/repositories.js";
 import { normalizeReviewFeedback } from "../review-feedback/model.js";
 import { upsertFactoryCandidateForWorkItem } from "../factory-queue.js";
