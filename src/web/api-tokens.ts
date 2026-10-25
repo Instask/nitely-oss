@@ -25,6 +25,7 @@ export const API_TOKEN_CAPABILITIES = [
   "preview:control",
   "preview:compare",
   "flows:manage",
+  "providers:validate",
 ] as const;
 
 export type ApiTokenCapability = (typeof API_TOKEN_CAPABILITIES)[number];
@@ -39,6 +40,9 @@ const highImpactCapabilities = new Set<ApiTokenCapability>([
   "preview:control",
   "preview:compare",
   "flows:manage",
+  // Uses the owner's stored provider key against the provider and stamps the
+  // result on the connection. It never reads, sets, or clears the key.
+  "providers:validate",
 ]);
 
 interface StoredApiTokenRecord {

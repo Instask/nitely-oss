@@ -667,8 +667,11 @@ describe("web server API and HTML", () => {
       },
     });
 
-    const unsupported = await fetch(`${server.url}/api/providers`, {
-      headers: { authorization },
+    // Setting a provider key is Console-only; no capability reaches it.
+    const unsupported = await fetch(`${server.url}/api/providers/openrouter/connection`, {
+      method: "POST",
+      headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({ value: "sk-or-v1-token-set-0123456789", authMethod: "api_key" }),
     });
     expect(unsupported.status).toBe(403);
     await expect(json(unsupported)).resolves.toEqual({
