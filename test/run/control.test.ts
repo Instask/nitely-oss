@@ -9,8 +9,15 @@ import { admitWorkItemRun } from "../../src/run/admission.js";
 import {
   cancelRun,
   claimRunContinuation,
+  decideRunApproval,
+  latestRunEventSequence,
+  recordRunnerCompletion,
+  recordRunnerFailure,
+  recordRunResumeFailure,
   registerActiveRun,
+  requireResumableRun,
   RunCancellationRefusedError,
+  RunResumeRefusedError,
 } from "../../src/run/control.js";
 import { eventStorePath, projectRun } from "../../src/run/project.js";
 import {
@@ -132,5 +139,126 @@ describe("Run control", () => {
     const next = await claimRunContinuation(repoPath, "run-claimed");
     expect(next).toBeDefined();
     next!();
+  });
+
+  it("records a runner's completion only while the Run is unsettled", async () => {
+    const repoPath = await createRepo();
+    await admittedRun(repoPath, "run-done");
+    const result = { runId: "run-done", branchName: "nitely/run-done", worktreePath: repoPath };
+
+    recordRunnerCompletion({ repoPath, result });
+    recordRunnerCompletion({ repoPath, result });
+
+    expect(
+      runEvents(repoPath, "run-done").filter((event) => event.type === "run.completed"),
+    ).toHaveLength(1);
+  });
+
+  it("records run.created first for a Work item Run that has no events", async () => {
+    const repoPath = await createRepo();
+    await mkdir(join(repoPath, ".nitely"), { recursive: true });
+
+    recordRunnerCompletion({
+      repoPath,
+      result: { runId: "run-bare", branchName: "nitely/run-bare", worktreePath: repoPath },
+      runInput: { repoPath, flowPath: "flows/generic.json", inputs: {}, workItemId: "site" },
+    });
+
+    expect(runEvents(repoPath, "run-bare").map((event) => event.type)).toEqual([
+      "run.created",
+      "run.completed",
+    ]);
+    expect(projectRun(runEvents(repoPath, "run-bare"))).toMatchObject({
+      status: "completed",
+      workItemId: "site",
+    });
+  });
+
+  it("does not record a runner failure over a cancellation", async () => {
+    const repoPath = await createRepo();
+    await admittedRun(repoPath, "run-cancelled");
+    await cancelRun({ repoPath, runId: "run-cancelled", ...cancel });
+
+    const projection = recordRunnerFailure({
+      repoPath,
+      runId: "run-cancelled",
+      error: new Error("runner stopped"),
+    });
+
+    expect(projection.status).toBe("cancelled");
+    expect(
+      runEvents(repoPath, "run-cancelled").some((event) => event.type === "run.failed"),
+    ).toBe(false);
+  });
+
+  it("fails a resumed Run whose runner wrote no terminal event since it started", async () => {
+    const repoPath = await createRepo();
+    await admittedRun(repoPath, "run-resumed");
+    appendEvents(repoPath, [
+      { runId: "run-resumed", type: "run.blocked", payload: { reason: "approval_required", stageId: "build" } },
+    ]);
+    const afterSequence = latestRunEventSequence(repoPath, "run-resumed");
+
+    const projection = recordRunnerFailure({
+      repoPath,
+      runId: "run-resumed",
+      error: new Error("resume crashed"),
+      afterSequence,
+    });
+
+    expect(projection.status).toBe("failed");
+  });
+
+  it("refuses to resume a Run that is not blocked or interrupted", async () => {
+    const repoPath = await createRepo();
+    await admittedRun(repoPath, "run-active");
+    // The open attempt has no runner, so it counts as interrupted.
+    expect(requireResumableRun(repoPath, "run-active").status).toBe("interrupted");
+
+    appendEvents(repoPath, [{ runId: "run-active", type: "run.failed", payload: { error: "x" } }]);
+    expect(() => requireResumableRun(repoPath, "run-active")).toThrow(RunResumeRefusedError);
+  });
+
+  it("does not record a resume failure on a cancelled Run", async () => {
+    const repoPath = await createRepo();
+    await admittedRun(repoPath, "run-stop");
+    const failure = { repoPath, runId: "run-stop", message: "boom", actor: "human:test", source: "web" };
+
+    expect(recordRunResumeFailure(failure)).toBe(true);
+    expect(projectRun(runEvents(repoPath, "run-stop")).resumeFailure).toMatchObject({
+      message: "boom",
+      actor: "human:test",
+    });
+    await cancelRun({ repoPath, runId: "run-stop", ...cancel });
+    expect(recordRunResumeFailure(failure)).toBe(false);
+    expect(
+      runEvents(repoPath, "run-stop").filter((event) => event.type === "run.resume.failed"),
+    ).toHaveLength(1);
+  });
+
+  it("fails the Run and settles its Work item when an approval is denied", async () => {
+    const repoPath = await createRepo();
+    const workItemId = await admittedRun(repoPath, "run-gate");
+    appendEvents(repoPath, [
+      {
+        runId: "run-gate",
+        stageId: "build",
+        attempt: 1,
+        type: "approval.requested",
+        payload: { approvalId: "gate-1", prompt: "ok?" },
+      },
+    ]);
+
+    const approval = await decideRunApproval({
+      repoPath,
+      runId: "run-gate",
+      approvalId: "gate-1",
+      decision: "denied",
+      actor: "human:test",
+    });
+
+    expect(approval.status).toBe("denied");
+    expect(projectRun(runEvents(repoPath, "run-gate")).status).toBe("failed");
+    expect((await getWorkItem(repoPath, workItemId)).status).not.toBe("running");
   });
 });

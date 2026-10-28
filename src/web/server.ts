@@ -54,7 +54,6 @@ import {
   settleWorkItemRun,
   type WorkItemRunAdmission,
 } from "../run/admission.js";
-import { resolveApproval } from "../run/approvals.js";
 import {
   answerQuestion,
   questionPolicyResumeDue,
@@ -132,7 +131,6 @@ import type {
 } from "../knowledge-repositories/schema.js";
 import { createRequire } from "node:module";
 
-import { EventStore } from "../events/store.js";
 import { materializeScheduleNow } from "../schedules/materialize.js";
 import {
   createSchedule,
@@ -293,8 +291,18 @@ import {
 import {
   cancelRun,
   claimRunContinuation,
-  denyRunApproval,
+  decideRunApproval,
+  isResumableRunStatus,
+  recordRunnerCompletion,
+  recordRunResumeFailure,
   registerActiveRun,
+  requireResumableRun,
+  RunResumeRefusedError,
+  runStatus,
+  settleAdmittedRunAfterRunnerError,
+  settleResumedRun,
+  settleResumedRunAfterError,
+  settleRunWorkItem,
   RunCancellationRefusedError,
   RunContinuationClaimConflictError,
   withRunContinuationClaim,
@@ -4351,7 +4359,7 @@ async function runStoredWorkItem(
       },
     );
     assertAdmittedRunId(admission.runId, result.runId);
-    if (currentProjectedRunStatus(repoPath, admission.runId) === "cancelled") {
+    if (runStatus(repoPath, admission.runId) === "cancelled") {
       throw new Error(`Run ${admission.runId} was cancelled`);
     }
     if (result.status === "awaiting-approval") {
@@ -4396,12 +4404,12 @@ async function runStoredWorkItem(
     }
     return result;
   } catch (error) {
-    await settleAdmittedRunAfterRunnerError(
-      repoPath,
-      workItemId,
-      admission.runId,
+    await settleAdmittedRunAfterRunnerError({
+      repoPath: repoPath,
+      workItemId: workItemId,
+      runId: admission.runId,
       error,
-    );
+    });
     throw error;
   } finally {
     cancellation.finish();
@@ -4726,31 +4734,6 @@ async function cancelWebRun(input: {
   }
 }
 
-function appendRunEvent(
-  repoPath: string,
-  event: Parameters<EventStore["append"]>[0],
-): void {
-  const store = openRunEventStore(repoPath);
-  try {
-    store.append(event);
-  } finally {
-    store.close();
-  }
-}
-
-function currentProjectedRunStatus(
-  repoPath: string,
-  runId: string,
-): ReturnType<typeof projectRun>["status"] | undefined {
-  const store = openRunEventStore(repoPath);
-  try {
-    const events = store.list(runId);
-    return events.length > 0 ? projectRun(events).status : undefined;
-  } finally {
-    store.close();
-  }
-}
-
 function runHasPinnedExternalKnowledge(repoPath: string, runId: string): boolean {
   const store = openRunEventStore(repoPath);
   try {
@@ -4782,18 +4765,6 @@ function pendingApprovalForRun(
   } finally {
     store.close();
   }
-}
-
-function isTerminalProjectedRunStatus(
-  status: ReturnType<typeof projectRun>["status"] | undefined,
-): boolean {
-  return (
-    status === "completed" ||
-    status === "failed" ||
-    status === "blocked" ||
-    status === "interrupted" ||
-    status === "cancelled"
-  );
 }
 
 function notificationVisibleToUser(
@@ -5546,24 +5517,15 @@ async function applyWorkflowApprovalAction(input: {
           input.user,
         );
   const taskId = input.notification.taskId;
-  if (input.action === "deny") {
-    await denyRunApproval({
-      repoPath: input.repository.path,
-      runId: input.approvalSource.runId,
-      approvalId: input.approvalSource.approvalId,
-      actor: input.user.id,
-      ...(taskId ? { workItemId: taskId } : {}),
-    });
-    return;
-  }
-  await resolveApproval({
+  await decideRunApproval({
     repoPath: input.repository.path,
     runId: input.approvalSource.runId,
     approvalId: input.approvalSource.approvalId,
-    decision: "approved",
+    decision: input.action === "deny" ? "denied" : "approved",
     actor: input.user.id,
+    ...(taskId ? { workItemId: taskId } : {}),
   });
-  if (!taskId) return;
+  if (input.action === "deny" || !taskId) return;
 
   const providerStore = providerStoreForUser(
     input.serverInput,
@@ -5646,17 +5608,15 @@ async function applyWorkflowApprovalAction(input: {
         );
         return;
       }
-      const stillOwnsWorkItem = await settleOrUpdateUnifiedRun(
-        input.repository.path,
-        taskId,
-        result.runId,
-        {
-          status: "completed",
-          ...(result.changeRequestUrl
-            ? { changeRequestUrl: result.changeRequestUrl }
-            : {}),
-        },
-      );
+      const stillOwnsWorkItem = await settleRunWorkItem({
+        repoPath: input.repository.path,
+        workItemId: taskId,
+        runId: result.runId,
+        status: "completed",
+        ...(result.changeRequestUrl
+          ? { changeRequestUrl: result.changeRequestUrl }
+          : {}),
+      });
       if (result.changeRequestUrl && stillOwnsWorkItem) {
         const notificationCopy = reviewPrNotificationCopy(result.changeRequest);
         await upsertAndDispatchNotification(
@@ -5681,28 +5641,16 @@ async function applyWorkflowApprovalAction(input: {
           { providerStore },
         );
       }
-      ensureRunCompletedEvent(input.repository.path, result);
+      recordRunnerCompletion({ repoPath: input.repository.path, result });
     } catch (error) {
       // Another owner is already resuming this Run; it settles the Run.
       if (error instanceof RunContinuationClaimConflictError) return;
-      ensureRunFailedEvent(
-        input.repository.path,
-        input.approvalSource.runId,
+      const stillOwnsWorkItem = await settleResumedRunAfterError({
+        repoPath: input.repository.path,
+        workItemId: taskId,
+        runId: input.approvalSource.runId,
         error,
-      );
-      const stillOwnsWorkItem =
-        currentProjectedRunStatus(
-          input.repository.path,
-          input.approvalSource.runId,
-        ) === "blocked"
-          ? (await getUnifiedWorkItem(input.repository.path, taskId)).latestRunId ===
-            input.approvalSource.runId
-          : await settleOrUpdateUnifiedRun(
-              input.repository.path,
-              taskId,
-              input.approvalSource.runId,
-              { status: "failed" },
-            );
+      });
       if (stillOwnsWorkItem) {
         await upsertAndDispatchNotification(
           input.repository.path,
@@ -5733,125 +5681,6 @@ async function applyWorkflowApprovalAction(input: {
       cancellation.finish();
     }
   })();
-}
-
-function appendAcceptedRunCreated(input: {
-  repoPath: string;
-  runId: string;
-  branchName: string;
-  flowPath: string;
-  repoId?: string;
-  repoName?: string;
-  inputs: RunFlowInput["inputs"];
-  configuration?: RunFlowInput["configuration"];
-  overrides?: RunOverrides;
-  aliasOf?: string;
-  providerConnections?: RunFlowInput["providerConnections"];
-  workItemId: string;
-  workItemType?: string;
-  ownerId?: string;
-  organizationId?: string;
-  planningApproval?: RunFlowInput["planningApproval"];
-  runEligibilityOverride?: RunFlowInput["runEligibilityOverride"];
-}): void {
-  appendRunEvent(input.repoPath, {
-    runId: input.runId,
-    type: "run.created",
-    payload: {
-      flowPath: input.flowPath,
-      repoPath: input.repoPath,
-      repoId: input.repoId,
-      repoName: input.repoName,
-      inputs: input.inputs,
-      configuration: input.configuration,
-      overrides: input.overrides,
-      aliasOf: input.aliasOf,
-      providerConnections: input.providerConnections,
-      branchName: input.branchName,
-      workItemId: input.workItemId,
-      workItemType: input.workItemType,
-      ownerId: input.ownerId,
-      organizationId: input.organizationId,
-      planningApproval: input.planningApproval,
-      runEligibilityOverride: input.runEligibilityOverride,
-    },
-  });
-}
-
-function ensureRunCompletedEvent(
-  repoPath: string,
-  result: RunFlowResult,
-  runInput?: RunFlowInput,
-): void {
-  const status = currentProjectedRunStatus(repoPath, result.runId);
-  if (isTerminalProjectedRunStatus(status)) {
-    return;
-  }
-  if (!status && runInput?.workItemId) {
-    appendAcceptedRunCreated({
-      repoPath,
-      runId: result.runId,
-      branchName: result.branchName,
-      flowPath: runInput.flowPath,
-      repoId: runInput.repoId,
-      repoName: runInput.repoName,
-      inputs: runInput.inputs,
-      ...(runInput.configuration ? { configuration: runInput.configuration } : {}),
-      ...(runInput.overrides ? { overrides: runInput.overrides } : {}),
-      ...(runInput.aliasOf ? { aliasOf: runInput.aliasOf } : {}),
-      ...(runInput.providerConnections ? { providerConnections: runInput.providerConnections } : {}),
-      workItemId: runInput.workItemId,
-      workItemType: runInput.workItemType,
-      ...(runInput.ownerId ? { ownerId: runInput.ownerId } : {}),
-      ...(runInput.organizationId ? { organizationId: runInput.organizationId } : {}),
-      ...(runInput.planningApproval
-        ? { planningApproval: runInput.planningApproval }
-        : {}),
-      ...(runInput.runEligibilityOverride
-        ? { runEligibilityOverride: runInput.runEligibilityOverride }
-        : {}),
-    });
-  }
-  appendRunEvent(repoPath, {
-    runId: result.runId,
-    type: "run.completed",
-    payload: {
-      changeRequestUrl: result.changeRequestUrl,
-      changeRequest: result.changeRequest,
-    },
-  });
-}
-
-function ensureRunFailedEvent(repoPath: string, runId: string, error: unknown): void {
-  if (isTerminalProjectedRunStatus(currentProjectedRunStatus(repoPath, runId))) {
-    return;
-  }
-  appendRunEvent(repoPath, {
-    runId,
-    type: "run.failed",
-    payload: { error: error instanceof Error ? error.message : String(error) },
-  });
-}
-
-async function settleAdmittedRunAfterRunnerError(
-  repoPath: string,
-  workItemId: string,
-  runId: string,
-  error: unknown,
-): Promise<"blocked" | "completed" | "failed"> {
-  ensureRunFailedEvent(repoPath, runId, error);
-  const projectedStatus = currentProjectedRunStatus(repoPath, runId);
-  if (projectedStatus === "blocked") {
-    return "blocked";
-  }
-  const status = projectedStatus === "completed" ? "completed" : "failed";
-  await settleWorkItemRun({
-    repoPath,
-    workItemId,
-    runId,
-    status,
-  });
-  return status;
 }
 
 async function startConfirmedTaskReworkRun(input: {
@@ -5968,7 +5797,7 @@ async function startConfirmedTaskReworkRun(input: {
     try {
       const result = await runnerExecution;
       assertAdmittedRunId(admission.runId, result.runId);
-      if (currentProjectedRunStatus(input.repository.path, admission.runId) === "cancelled") {
+      if (runStatus(input.repository.path, admission.runId) === "cancelled") {
         throw new Error(`Run ${admission.runId} was cancelled`);
       }
       if (result.status === "awaiting-approval") {
@@ -6031,15 +5860,15 @@ async function startConfirmedTaskReworkRun(input: {
           ? { organizationId: input.task.organizationId }
           : {}),
       }, { providerStore: input.providerStore });
-      ensureRunCompletedEvent(input.repository.path, result, runnerInput);
+      recordRunnerCompletion({ repoPath: input.repository.path, result, runInput: runnerInput });
       return result;
     } catch (error) {
-      await settleAdmittedRunAfterRunnerError(
-        input.repository.path,
-        input.task.id,
-        admission.runId,
+      await settleAdmittedRunAfterRunnerError({
+        repoPath: input.repository.path,
+        workItemId: input.task.id,
+        runId: admission.runId,
         error,
-      );
+      });
       await settleTaskReworkRequest({
         repoPath: input.repository.path,
         taskId: input.task.id,
@@ -6122,45 +5951,20 @@ async function runStoredWorkItemAcrossRepositories(
   throw new WebNotFoundError(notFoundMessage);
 }
 
-/**
- * Record a background resume failure on the run so the API and Console show
- * why the requested Resume did not happen, not only `web.log`.
- */
-function recordWebResumeFailure(
-  repoPath: string,
-  runId: string,
-  message: string,
-  actor: string,
-): void {
-  try {
-    const store = openRunEventStore(repoPath);
-    try {
-      store.append({
-        runId,
-        type: "run.resume.failed",
-        payload: { message: redactForWeb(message) ?? "resume failed", actor, source: "web" },
-      });
-    } finally {
-      store.close();
-    }
-  } catch (error) {
-    console.error(
-      `Nitely Web could not record the resume failure for ${runId}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-}
-
 async function prepareWebRunResume(
   input: RuntimeStartWebServerInput,
   repository: WebRepository,
   runId: string,
   requestingUser?: WebUserContext,
 ) {
-  const events = openRunEventStore(repository.path);
-  const run = (() => { try { return projectRun(events.list(runId), { openAttemptStatus: "interrupted" }); } finally { events.close(); } })();
-  if (run.status !== "blocked" && run.status !== "interrupted") {
-    throw new WebInputError("only blocked or interrupted runs can be resumed");
-  }
+  const run = (() => {
+    try {
+      return requireResumableRun(repository.path, runId);
+    } catch (error) {
+      if (error instanceof RunResumeRefusedError) throw new WebInputError(error.message);
+      throw error;
+    }
+  })();
   const authMode = webStartupSecurityPolicy(input).authMode;
   const owner = run.ownerId ? await getPublicUser(resolve(input.repoPath), run.ownerId) : null;
   const user: WebUserContext = authMode === "local"
@@ -6233,45 +6037,6 @@ async function updateUnifiedRunState(
   await updateWorkItemRunState(repoPath, id, patch, storeKind);
 }
 
-async function settleOrUpdateUnifiedRun(
-  repoPath: string,
-  workItemId: string,
-  runId: string,
-  patch: {
-    status: "completed" | "failed";
-    changeRequestUrl?: string;
-  },
-): Promise<boolean> {
-  const result = await settleWorkItemRun({
-    repoPath,
-    workItemId,
-    runId,
-    status: patch.status,
-    ...(patch.changeRequestUrl
-      ? { changeRequestUrl: patch.changeRequestUrl }
-      : {}),
-  });
-  if (result.settled) return true;
-  if (
-    result.reason !== "not-admitted" ||
-    result.workItem.latestRunId !== runId
-  ) {
-    return false;
-  }
-  await updateUnifiedRunState(
-    repoPath,
-    workItemId,
-    {
-      status: patch.status,
-      latestRunId: runId,
-      ...(patch.changeRequestUrl
-        ? { changeRequestUrl: patch.changeRequestUrl }
-        : {}),
-    },
-    result.storeKind,
-  );
-  return true;
-}
 
 async function listRunPage(
   repositories: WebRepository[], user: WebUserContext, url: URL,
@@ -10553,7 +10318,7 @@ async function handleApiRequest(
       try {
         const result = await runnerExecution;
         assertAdmittedRunId(admission.runId, result.runId);
-        if (currentProjectedRunStatus(repository.path, admission.runId) === "cancelled") {
+        if (runStatus(repository.path, admission.runId) === "cancelled") {
           throw new Error(`Run ${admission.runId} was cancelled`);
         }
         if (result.status === "awaiting-approval") {
@@ -10611,15 +10376,15 @@ async function handleApiRequest(
             ...(task.organizationId ? { organizationId: task.organizationId } : {}),
           }, { providerStore: taskProviderStore });
         }
-        ensureRunCompletedEvent(repository.path, result, runnerInput);
+        recordRunnerCompletion({ repoPath: repository.path, result, runInput: runnerInput });
         return result;
       } catch (error) {
-        await settleAdmittedRunAfterRunnerError(
-          repository.path,
-          runTaskId,
-          admission.runId,
+        await settleAdmittedRunAfterRunnerError({
+          repoPath: repository.path,
+          workItemId: runTaskId,
+          runId: admission.runId,
           error,
-        );
+        });
         await upsertAndDispatchNotification(repository.path, input, {
           sourceKey: taskSourceKey(runTaskId, `run-blocked:${admission.runId}`),
           type: "resolve-blocker",
@@ -11024,8 +10789,8 @@ async function handleApiRequest(
     const runId = decodeURIComponent(resumeRunMatch[1]!);
     const run = await getScopedRunDetail(repositories, homeRepoPath, input, runId, user);
     requireWriteAccessToRecord(user, run, "runs:start");
-    if (run.status !== "blocked" && run.status !== "interrupted") {
-      throw new WebInputError("only blocked or interrupted runs can be resumed");
+    if (!isResumableRunStatus(run.status)) {
+      throw new WebInputError(new RunResumeRefusedError().message);
     }
     const repository = repositories.find((repo) => repo.path === run.repoPath)!;
     // The scheduler's durable claim fences a double submit and the usage-limit
@@ -11049,16 +10814,24 @@ async function handleApiRequest(
       ...prepared.dependencies,
       cancellation: cancellation.control,
     }).then(async () => {
-      const tasks = await listUnifiedWorkItems(repository.path);
-      const task = tasks.find((item) => item.latestRunId === runId);
-      if (task) await reconcileTerminalWorkItemRun({ repoPath: repository.path, workItemId: task.id, runId });
+      await settleResumedRun({ repoPath: repository.path, runId });
     }).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       console.error(`Nitely Web resume failed for ${runId}: ${message}`);
-      // A resume refused or stopped because the run was cancelled is not a
-      // resume failure worth showing on the cancelled run.
-      if (currentProjectedRunStatus(repository.path, runId) !== "cancelled") {
-        recordWebResumeFailure(repository.path, runId, message, user.id);
+      // Recorded on the Run so the API and Console show why the requested
+      // Resume did not happen, not only `web.log`.
+      try {
+        recordRunResumeFailure({
+          repoPath: repository.path,
+          runId,
+          message: redactForWeb(message) ?? "resume failed",
+          actor: user.id,
+          source: "web",
+        });
+      } catch (recordError) {
+        console.error(
+          `Nitely Web could not record the resume failure for ${runId}: ${recordError instanceof Error ? recordError.message : String(recordError)}`,
+        );
       }
     }).finally(() => {
       cancellation.finish();
