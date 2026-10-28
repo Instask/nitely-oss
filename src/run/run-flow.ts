@@ -133,7 +133,7 @@ import { decodeRunEvent } from "../events/decode.js";
 
 type TaskPlanEventType = Extract<TypedRunEventType, `task.plan.${string}`>;
 import { ensureContextKnowledgeProposalNotification } from "../web/context-knowledge-notifications.js";
-import { loadFlow, parseFlowDocument, type FlowGraph } from "../flow/load.js";
+import { loadFlow, parseFlowDocument, type FlowGraph, type LoadedFlow } from "../flow/load.js";
 import { normalizeRunOverrides, type RunOverrides } from "../flow/overrides.js";
 import { decideBudgetStoppedResume } from "./budget-resume.js";
 import { flowInputReferences } from "../flow/inputs.js";
@@ -201,6 +201,8 @@ import {
   type ProjectedKnowledgeRetrieval,
   type ProjectedOperatorQuestion,
   type ProjectedRepoIndexQuery,
+  type ProjectedRun,
+  type ProjectedStage,
   type ProjectedRiskClassification,
   type ProjectedAttemptInputBreakdown,
   type ProjectedRuntimeUsageTotal,
@@ -13195,6 +13197,1326 @@ function createInjectedAgentMemoryScope(
   };
 }
 
+/** Where the stage driver starts, and what a resumed Run carries into it. */
+interface StageCursor {
+  startIndex: number;
+  resume?: {
+    stages: Map<string, ProjectedStage>;
+    operatorReview?: ReturnType<typeof operatorReviewForActiveBlocker>;
+    answeredOperatorQuestion?: ProjectedOperatorQuestion;
+  };
+}
+
+async function driveStages(
+  driver: StageDriver,
+  cursor: StageCursor,
+): Promise<{ approvalId?: string } | undefined> {
+  const {
+    runId,
+    repoPath,
+    runDirectory,
+    worktreePath,
+    branchName,
+    baseBranch,
+    runWorkItemType,
+    loaded,
+    configuration,
+    inputArtifacts,
+    backend,
+    workspace,
+    providerStore,
+    dependencies,
+    eventStore,
+    runtimeContext,
+    injectedAgentMemory,
+    loadedSkillUsages,
+    contextKnowledge,
+    agentSessions,
+    completedStages,
+    gateResults,
+    attemptsByStage,
+    previousFailuresByStage,
+    reworkEdges,
+    taskPlanStates,
+    reworkTarget,
+    reworkProvider,
+    outcome,
+    writeRunEvidenceSnapshot,
+  } = driver;
+  const { resume } = cursor;
+  const resumableStageById = resume?.stages ?? new Map<string, ProjectedStage>();
+  const submittedOperatorReview = resume?.operatorReview;
+  let answeredOperatorQuestion = resume?.answeredOperatorQuestion;
+  let projection = driver.projection;
+  const taskPlanController = createTaskPlanExecutionController({
+    startIndex: cursor.startIndex,
+    states: taskPlanStates,
+    inputArtifacts,
+    stages: loaded.flow.spec.stages,
+    graph: loaded.graph,
+    completedStages,
+    eventStore,
+    runId: runId,
+    context: runtimeContext,
+  });
+  while (!taskPlanController.done) {
+    const stageIndex = taskPlanController.stageIndex;
+    const stageId = taskPlanController.stageId;
+    const stage = loaded.flow.spec.stages.find((candidate) => candidate.id === stageId);
+    if (!stage) {
+      taskPlanController.next();
+      continue;
+    }
+    if (stage.alwaysRun) {
+      taskPlanController.next();
+      continue;
+    }
+    const taskPlanStage = taskPlanController.prepare(stage);
+    if (!taskPlanStage.run) continue;
+    const preparedTaskPlan = taskPlanStage.prepared;
+    const resumableStage = resumableStageById.get(stage.id);
+    const resumableAttempt = resumableStage?.attempts.at(-1);
+    const resumeApprovalAttempt =
+      stage.type === "approval" && resumableStage?.status === "awaiting-approval"
+        ? resumableAttempt
+        : undefined;
+    const resumeOperatorReview =
+      stage.type === "gate" &&
+      stage.mode === "review" &&
+      resumableStage?.status === "blocked" &&
+      submittedOperatorReview?.stageId === stage.id
+        ? submittedOperatorReview
+        : undefined;
+
+    if (stage.type === "agent" || stage.type === "judge" || stage.type === "command" || stage.type === "gate") {
+      const resumableAttempt = resumableStage?.attempts.at(-1);
+      if (resumableAttempt && resumableStage?.status === "interrupted") {
+        appendOrchestratorDecision({
+          eventStore,
+          runId: runId,
+          stage,
+          attempt: resumableAttempt.attempt,
+          maxAttempts: maxAttemptsForStage(stage, loaded.flow.spec.maxAttempts),
+          decision: { action: "fail", reason: "interrupted after process restart" },
+          context: runtimeContext,
+          error: "interrupted after process restart",
+        });
+        eventStore.append({
+          runId: runId,
+          stageId: stage.id,
+          attempt: resumableAttempt.attempt,
+          type: "stage.failed",
+          payload: {
+            error: "interrupted after process restart",
+            interrupted: true,
+          },
+        });
+        const failures = previousFailuresByStage.get(stage.id) ?? [];
+        failures.push({
+          attempt: resumableAttempt.attempt,
+          error: "interrupted after process restart",
+        });
+        previousFailuresByStage.set(stage.id, failures);
+        projection = projectRun(eventStore.list(runId));
+      }
+      if (resumableStage) resumableStageById.delete(stage.id);
+      const resumeSource = resume
+        ? resumableStage?.status ??
+          (projection.status === "blocked" ? "blocked" : "interrupted")
+        : undefined;
+      const maxAttempts = maxAttemptsForStage(stage, loaded.flow.spec.maxAttempts);
+      const previousFailures = previousFailuresByStage.get(stage.id) ?? [];
+      previousFailuresByStage.set(stage.id, previousFailures);
+      let reworkRequested = false;
+      let stageCompleted = false;
+      let completedAttempt: number | undefined;
+      let continuationAttemptAvailable = resumableStage !== undefined;
+
+      try {
+        if (resumeOperatorReview && stage.type === "gate") {
+          const recordedGate = recordGateStageResult({
+            runId: runId,
+            stage,
+            attempt: resumeOperatorReview.attempt ?? 1,
+            maxAttempts,
+            gateResult: resumeOperatorReview,
+            gateResults,
+            completedStages,
+            eventStore,
+            context: runtimeContext,
+          });
+          completedAttempt = recordedGate.gateAttempt;
+          attemptsByStage.set(
+            stage.id,
+            Math.max(attemptsByStage.get(stage.id) ?? 0, recordedGate.gateAttempt),
+          );
+          if (resumeOperatorReview.operatorReview) {
+            eventStore.append({
+              runId: runId,
+              stageId: stage.id,
+              attempt: recordedGate.gateAttempt,
+              type: "operator.review.resolved",
+              payload: redactRuntimeUnknown(
+                {
+                  gateResultId: resumeOperatorReview.id,
+                  actor: resumeOperatorReview.operatorReview.actor,
+                  submittedAt: resumeOperatorReview.operatorReview.submittedAt,
+                  blocker: resumeOperatorReview.operatorReview.blocker,
+                  resolution: recordedGate.passed
+                    ? "blocker_overridden"
+                    : "review_failed",
+                },
+                runtimeContext,
+              ),
+            });
+          }
+          if (!recordedGate.passed) {
+            throw new Error(recordedGate.reason);
+          }
+          const operatorAttemptDirectory = join(
+            runDirectory,
+            "stages",
+            stage.id,
+            String(recordedGate.gateAttempt),
+          );
+          await executeStageHooks({
+            stage,
+            phase: "post",
+            attempt: recordedGate.gateAttempt,
+            attemptDirectory: operatorAttemptDirectory,
+            backend,
+            workspace,
+            flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
+            context: runtimeContext,
+            eventStore,
+            runId: runId,
+            cancellation: dependencies.cancellation,
+          });
+          stageCompleted = true;
+        }
+
+        while (
+          !stageCompleted &&
+          ((attemptsByStage.get(stage.id) ?? 0) < maxAttempts ||
+            continuationAttemptAvailable)
+        ) {
+          continuationAttemptAvailable = false;
+          const attempt = (attemptsByStage.get(stage.id) ?? 0) + 1;
+          let effectiveAttempt = attempt;
+          attemptsByStage.set(stage.id, attempt);
+          const { attemptDirectory } = await prepareStageAttempt({
+            begin: {
+              eventStore,
+              runId: runId,
+              runDirectory,
+              stage,
+              attempt,
+              resumedFrom: resumeSource,
+              branchHeadSha: await currentBranchHeadSha(worktreePath),
+              ...(resume ? { directoryMode: "ensure" as const } : {}),
+            },
+            prepare:
+              stage.type === "agent" || stage.type === "judge" || (stage.type === "gate" && stage.mode === "review")
+                ? async () => await prepareStageInstructionFilesBeforeAttempt({
+                    stage,
+                    controls: resolveStageContextControls(loaded.flow, stage),
+                    injectedAgentMemory,
+                  })
+                : undefined,
+            onStageChange: () =>
+              dependencies.cancellation?.onStageChange?.({
+                stageId: stage.id,
+                attempt,
+              }),
+            assertNotCancelled: () =>
+              throwIfRunCancelled(dependencies.cancellation, {
+                stageId: stage.id,
+                attempt,
+              }),
+          });
+
+          let failureError: string | undefined;
+          let budgetExceededError: BudgetExceededError | undefined;
+          let builtInRecommendation: OrchestratorRecommendation | undefined;
+          try {
+            await executeStageHooks({
+              stage,
+              phase: "pre",
+              attempt,
+              attemptDirectory,
+              backend,
+              workspace,
+              flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
+              context: runtimeContext,
+              eventStore,
+              runId: runId,
+              cancellation: dependencies.cancellation,
+            });
+
+            if (stage.type === "judge") {
+              const contextControls = resolveStageContextControls(loaded.flow, stage);
+              const readPolicy = resolveStageReadPolicy(loaded.flow.spec.reads, stage);
+              const result = await withStageInstructionFiles({
+                stage,
+                controls: contextControls,
+                attemptDirectory,
+                workspace,
+                injectedAgentMemory,
+                run: async () => await executeAgentStage({
+                  runId: runId,
+                  stage,
+                  attempt,
+                  attemptDirectory,
+                  runDirectory,
+                  repoPath,
+                  backend,
+                  dependencies,
+                  workspace,
+                  flowName: loaded.flow.metadata.name,
+                  flowMaxInputTokens: loaded.flow.spec.maxInputTokens,
+                  flowMaxAttempts: loaded.flow.spec.maxAttempts,
+                  flowTimeouts: loaded.flow.spec.timeouts,
+                  flowQuestions: loaded.flow.spec.questions,
+                  flowBudgets: effectiveFlowBudgets(loaded.flow),
+                  inputArtifacts,
+                  configuration,
+                  context: runtimeContext,
+                  eventStore,
+                  providerStore,
+                  loadedSkillUsages,
+                  contextControls,
+                  readPolicy,
+                  contextKnowledge,
+                  previousFailures,
+                  taskPlanPrompt: preparedTaskPlan?.promptContext,
+                  agentSessions,
+                  completedStages,
+                  completeStage: false,
+                  resumedFrom: resumeSource,
+                  onAttemptSelected: (selectedAttempt) => {
+                    effectiveAttempt = selectedAttempt;
+                    attemptsByStage.set(stage.id, selectedAttempt);
+                  },
+                }),
+              });
+              effectiveAttempt = result.selectedAttempt;
+              const judgeOutput = await readJudgeOutput({
+                stage,
+                attempt: effectiveAttempt,
+                attemptDirectory: selectedAttemptDirectory({
+                  runDirectory,
+                  stageId: stage.id,
+                  currentAttempt: attempt,
+                  currentAttemptDirectory: attemptDirectory,
+                  selectedAttempt: effectiveAttempt,
+                }),
+                context: runtimeContext,
+              });
+              if (!judgeOutput.result) throw new Error(judgeOutput.reason);
+              eventStore.append({
+                runId: runId,
+                stageId: stage.id,
+                attempt: effectiveAttempt,
+                type: "judge.completed",
+                payload: redactRuntimeUnknown({
+                  verdict: judgeOutput.result.verdict,
+                  findings: judgeOutput.result.findings,
+                  evidence: judgeOutput.result.evidence,
+                  reworkTarget: judgeOutput.result.reworkTarget,
+                  reworkInstructions: judgeOutput.result.reworkInstructions,
+                  humanReviewReason: judgeOutput.result.humanReviewReason,
+                  outputPath: judgeOutput.outputPath,
+                  criteria: stage.criteria,
+                }, runtimeContext),
+              });
+              if (judgeOutput.result.verdict !== "PASS") {
+                builtInRecommendation = judgeRecommendation({
+                  stage,
+                  result: judgeOutput.result,
+                  graph: loaded.graph,
+                  validReworkStages: validReworkStagesForStage(stage.id, loaded.graph),
+                });
+                throw new Error(`judge returned ${judgeOutput.result.verdict}`);
+              }
+              markStageCompleted(completedStages, stage.id);
+              appendSuccessfulStageCompletion({
+                eventStore,
+                runId: runId,
+                stage,
+                attempt: effectiveAttempt,
+                maxAttempts,
+                context: runtimeContext,
+                payload: {
+                  outputs: stageOutputIds(stage),
+                  verdict: judgeOutput.result.verdict,
+                  criteria: stage.criteria,
+                },
+              });
+              await executeStageHooks({
+                stage,
+                phase: "post",
+                attempt: effectiveAttempt,
+                attemptDirectory: selectedAttemptDirectory({
+                  runDirectory,
+                  stageId: stage.id,
+                  currentAttempt: attempt,
+                  currentAttemptDirectory: attemptDirectory,
+                  selectedAttempt: effectiveAttempt,
+                }),
+                backend,
+                workspace,
+                flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
+                context: runtimeContext,
+                eventStore,
+                runId: runId,
+                cancellation: dependencies.cancellation,
+              });
+              stageCompleted = true;
+              completedAttempt = effectiveAttempt;
+              break;
+            }
+
+            if (stage.type === "agent") {
+              const contextControls = resolveStageContextControls(loaded.flow, stage);
+            const readPolicy = resolveStageReadPolicy(loaded.flow.spec.reads, stage);
+              const operatorQuestion = answeredOperatorQuestion?.stageId === stage.id
+                ? answeredOperatorQuestion : undefined;
+              // A timeout failure is one continuation failure, not a persistent retry veto.
+              if (operatorQuestion?.answer?.failStage) answeredOperatorQuestion = undefined;
+              const result = await withStageInstructionFiles({
+                stage,
+                controls: contextControls,
+                attemptDirectory,
+                workspace,
+                injectedAgentMemory,
+                run: async () => await executeAgentStage({
+                  runId: runId,
+                  stage,
+                  attempt,
+                  attemptDirectory,
+                  runDirectory,
+                  repoPath,
+                  backend,
+                  dependencies,
+                  workspace,
+                  flowName: loaded.flow.metadata.name,
+                  flowMaxInputTokens: loaded.flow.spec.maxInputTokens,
+                  flowMaxAttempts: loaded.flow.spec.maxAttempts,
+                  flowTimeouts: loaded.flow.spec.timeouts,
+                  flowQuestions: loaded.flow.spec.questions,
+                  flowBudgets: effectiveFlowBudgets(loaded.flow),
+                  inputArtifacts,
+                  configuration,
+                  context: runtimeContext,
+                  eventStore,
+                  providerStore,
+                  loadedSkillUsages,
+                  contextControls,
+                  readPolicy,
+                  contextKnowledge,
+                  previousFailures,
+                  operatorQuestion,
+                  taskPlanPrompt: preparedTaskPlan?.promptContext,
+                  agentSessions,
+                  completedStages,
+                  resumedFrom: resumeSource,
+                  onAttemptSelected: (selectedAttempt) => {
+                    effectiveAttempt = selectedAttempt;
+                    attemptsByStage.set(stage.id, selectedAttempt);
+                    dependencies.cancellation?.onStageChange?.({
+                      stageId: stage.id,
+                      attempt: selectedAttempt,
+                    });
+                  },
+                }),
+              });
+              effectiveAttempt = result.selectedAttempt;
+              await executeStageHooks({
+                stage,
+                phase: "post",
+                attempt: effectiveAttempt,
+                attemptDirectory: selectedAttemptDirectory({
+                  runDirectory,
+                  stageId: stage.id,
+                  currentAttempt: attempt,
+                  currentAttemptDirectory: attemptDirectory,
+                  selectedAttempt: effectiveAttempt,
+                }),
+                backend,
+                workspace,
+                flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
+                context: runtimeContext,
+                eventStore,
+                runId: runId,
+                cancellation: dependencies.cancellation,
+              });
+              stageCompleted = true;
+              completedAttempt = effectiveAttempt;
+              break;
+            }
+
+            if (stage.type === "gate") {
+              const contextControls = resolveStageContextControls(loaded.flow, stage);
+            const readPolicy = resolveStageReadPolicy(loaded.flow.spec.reads, stage);
+              const runGate = async () => await executeGateStage({
+                runId: runId,
+                attempt,
+                stage,
+                repoPath,
+                backend,
+                dependencies,
+                workspace,
+                flowName: loaded.flow.metadata.name,
+                flowMaxInputTokens: loaded.flow.spec.maxInputTokens,
+                flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
+                flowTimeouts: loaded.flow.spec.timeouts,
+                flowBudgets: effectiveFlowBudgets(loaded.flow),
+                inputArtifacts,
+                configuration,
+                attemptDirectory,
+                context: runtimeContext,
+                eventStore,
+                providerStore,
+                loadedSkillUsages,
+                contextControls,
+                readPolicy,
+                contextKnowledge,
+                previousFailures,
+                taskPlanPrompt: preparedTaskPlan?.promptContext,
+                agentSessions,
+              });
+              const { result: gateResult, budgetFailure } = stage.mode === "review"
+                ? await withStageInstructionFiles({
+                    stage,
+                    controls: contextControls,
+                    attemptDirectory,
+                    workspace,
+                    injectedAgentMemory,
+                    run: runGate,
+                  })
+                : await (async () => {
+                    await injectedAgentMemory.cleanup();
+                    return await runGate();
+                  })();
+              const recordedGate = recordGateStageResult({
+                runId: runId,
+                stage,
+                attempt,
+                maxAttempts,
+                gateResult,
+                gateResults,
+                completedStages,
+                eventStore,
+                context: runtimeContext,
+              });
+              effectiveAttempt = recordedGate.gateAttempt;
+              attemptsByStage.set(stage.id, effectiveAttempt);
+              if (
+                !recordedGate.passed &&
+                (stage.mode === "review" || stage.mode === "review-aggregate")
+              ) {
+                builtInRecommendation = reviewGateVerdictRecommendation({
+                  stage,
+                  gateResult,
+                  graph: loaded.graph,
+                  validReworkStages: validReworkStagesForStage(
+                    stage.id,
+                    loaded.graph,
+                  ),
+                });
+              }
+              if (budgetFailure) {
+                if (recordedGate.passed) {
+                  budgetFailure.stageCompleted = true;
+                }
+                throw budgetFailure;
+              }
+              if (recordedGate.passed) {
+                await executeStageHooks({
+                  stage,
+                  phase: "post",
+                  attempt: effectiveAttempt,
+                  attemptDirectory: selectedAttemptDirectory({
+                    runDirectory,
+                    stageId: stage.id,
+                    currentAttempt: attempt,
+                    currentAttemptDirectory: attemptDirectory,
+                    selectedAttempt: effectiveAttempt,
+                  }),
+                  backend,
+                  workspace,
+                  flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
+                  context: runtimeContext,
+                  eventStore,
+                  runId: runId,
+                  cancellation: dependencies.cancellation,
+                });
+                stageCompleted = true;
+                completedAttempt = effectiveAttempt;
+                break;
+              }
+              failureError = recordedGate.reason;
+            } else {
+              await injectedAgentMemory.cleanup();
+              const commandResult = await executeCommandStage({
+                configuration,
+                runId: runId,
+                stage,
+                attempt,
+                attemptDirectory,
+                runDirectory,
+                backend,
+                workspace,
+                flowMaxAttempts: loaded.flow.spec.maxAttempts,
+                flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
+                flowTimeouts: loaded.flow.spec.timeouts,
+              flowBudgets: effectiveFlowBudgets(loaded.flow),
+                context: runtimeContext,
+                eventStore,
+                inputArtifacts,
+                completedStages,
+                cancellation: dependencies.cancellation,
+              });
+              if (!commandResult.failureError) {
+                await executeStageHooks({
+                  stage,
+                  phase: "post",
+                  attempt,
+                  attemptDirectory,
+                  backend,
+                  workspace,
+                  flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
+                  context: runtimeContext,
+                  eventStore,
+                  runId: runId,
+                  cancellation: dependencies.cancellation,
+                });
+                stageCompleted = true;
+                completedAttempt = attempt;
+                break;
+              }
+              failureError =
+                redactRuntimeText(commandResult.failureError, runtimeContext) ?? "";
+            }
+          } catch (error) {
+            if (error instanceof RunCancelledError) {
+              throw error;
+            }
+            if (error instanceof BudgetExceededError) {
+              budgetExceededError = error;
+              // A stage that finished and registered its outputs before the
+              // breach keeps its completion. Only the run stops.
+              if (!error.stageCompleted) {
+                invalidateCompletedStagesFrom(
+                  completedStages,
+                  loaded.graph.order,
+                  stageIndex,
+                );
+              }
+              failureError = error.message;
+            } else {
+              const blocked =
+                error instanceof RunBlockedError
+                  ? error
+                  : (stage.type === "agent" || stage.type === "judge")
+                    ? classifyRunBlockedError({
+                        stageId: stage.id,
+                        runtime: stageRuntimeCandidates(stage)[0]?.runtime,
+                        error,
+                        context: runtimeContext,
+                      })
+                    : undefined;
+              if (blocked) {
+                if (!blocked.eventsAppended) {
+                  appendRunBlockedEvents({
+                    eventStore,
+                    runId: runId,
+                    stageId: stage.id,
+                    attempt: effectiveAttempt,
+                    blocker: blocked.blocker,
+                    context: runtimeContext,
+                  });
+                }
+                throw blocked;
+              }
+              invalidateCompletedStagesFrom(
+                completedStages,
+                loaded.graph.order,
+                stageIndex,
+              );
+              failureError = error instanceof Error ? error.message : String(error);
+            }
+          }
+
+          const error = failureError ?? "unknown error";
+          // `projectRun` deletes a stage from `completedStages` on
+          // `stage.failed`, so emitting it here would undo the completion
+          // this stage earned and make a resume repeat paid work.
+          if (!budgetExceededError?.stageCompleted) {
+            eventStore.append({
+              runId: runId,
+              stageId: stage.id,
+              attempt: effectiveAttempt,
+              type: "stage.failed",
+              payload: redactRuntimeUnknown({ error }, runtimeContext),
+            });
+          }
+          if (budgetExceededError) {
+            eventStore.append({
+              runId: runId,
+              type: "run.failed",
+              payload: redactRuntimeUnknown({
+                stageId: stage.id,
+                error,
+                reason: "budget_exceeded",
+              }, runtimeContext),
+            });
+            throw budgetExceededError;
+          }
+          const policy = applyFailedStagePolicy({
+            stage,
+            attempt: effectiveAttempt,
+            maxAttempts,
+            flowMaxAttempts: loaded.flow.spec.maxAttempts,
+            diagnosisAttempt:
+              previousFailures.filter(
+                (failure) => failure.error !== "interrupted after process restart",
+              ).length + 1,
+            error,
+            builtInRecommendation,
+            dependencies,
+            stages: loaded.flow.spec.stages,
+            graph: loaded.graph,
+            attemptsByStage,
+            previousFailuresByStage,
+            completedStages,
+            reworkEdges,
+            eventStore,
+            runId: runId,
+            context: runtimeContext,
+          });
+          if (policy.action === "retry") continue;
+          taskPlanController.rework(policy.stageIndex, policy.request);
+          reworkRequested = true;
+          break;
+        }
+
+        if (reworkRequested) continue;
+        if (!stageCompleted) {
+          const usedAttempts = attemptsByStage.get(stage.id) ?? 0;
+          throw new Error(
+            `${stage.type} failed after ${usedAttempts} of ${maxAttempts} attempts`,
+          );
+        }
+        taskPlanController.complete(stage, preparedTaskPlan, completedAttempt);
+        projection = projectRun(eventStore.list(runId));
+        await writeRunEvidenceSnapshot();
+        continue;
+      } catch (error) {
+        // Run settlement records the cancellation.
+        if (error instanceof RunCancelledError) throw error;
+        // A budget stop already recorded its stage and Run events, and a stage
+        // that completed before the breach must stay completed.
+        if (error instanceof BudgetExceededError) throw error;
+        const blocked =
+          error instanceof RunBlockedError
+            ? error
+            : stage.type === "agent"
+              ? classifyRunBlockedError({
+                  stageId: stage.id,
+                  runtime: stageRuntimeCandidates(stage)[0]?.runtime,
+                  error,
+                  context: runtimeContext,
+                })
+              : undefined;
+        if (blocked) {
+          if (!blocked.eventsAppended) {
+            appendRunBlockedEvents({
+              eventStore,
+              runId: runId,
+              stageId: stage.id,
+              attempt: attemptsByStage.get(stage.id) ?? 1,
+              blocker: blocked.blocker,
+              context: runtimeContext,
+            });
+          }
+          throw blocked;
+        }
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const failedAttempt = attemptsByStage.get(stage.id) ?? 1;
+        const terminalEvents = eventStore.list(runId);
+        if (
+          !terminalEvents.some(
+            (event) =>
+              event.type === "stage.failed" &&
+              event.stageId === stage.id &&
+              event.attempt === failedAttempt,
+          )
+        ) {
+          eventStore.append({
+            runId: runId,
+            stageId: stage.id,
+            attempt: failedAttempt,
+            type: "stage.failed",
+            payload: redactRuntimeUnknown({ error: errorMessage }, runtimeContext),
+          });
+        }
+        if (
+          !terminalEvents.some(
+            (event) =>
+              event.type === "orchestrator.decision" &&
+              event.stageId === stage.id &&
+              event.attempt === failedAttempt,
+          )
+        ) {
+          appendOrchestratorDecision({
+            eventStore,
+            runId: runId,
+            stage,
+            attempt: failedAttempt,
+            maxAttempts,
+            decision: {
+              action: "fail",
+              reason: `${stage.type} failed after ${failedAttempt} of ${maxAttempts} attempts: ${errorMessage}`,
+            },
+            context: runtimeContext,
+            error: errorMessage,
+          });
+        }
+        if (!terminalEvents.some((event) => event.type === "run.failed")) {
+          eventStore.append({
+            runId: runId,
+            type: "run.failed",
+            payload: redactRuntimeUnknown(
+              { stageId: stage.id, error: errorMessage },
+              runtimeContext,
+            ),
+          });
+        }
+        throw error;
+      }
+    }
+
+    const attempt =
+      resumeApprovalAttempt?.attempt ??
+      resumeOperatorReview?.attempt ??
+      nextAttemptForStage(projection, stage.id);
+    let effectiveAttempt = attempt;
+    let attemptDirectory = join(runDirectory, "stages", stage.id, String(attempt));
+    if (resumableAttempt && resumableStage?.status === "interrupted") {
+      appendOrchestratorDecision({
+        eventStore,
+        runId: runId,
+        stage,
+        attempt: resumableAttempt.attempt,
+        maxAttempts: maxAttemptsForStage(stage, loaded.flow.spec.maxAttempts),
+        decision: {
+          action: "fail",
+          reason: "interrupted after process restart",
+        },
+        context: runtimeContext,
+        error: "interrupted after process restart",
+      });
+      eventStore.append({
+        runId: runId,
+        stageId: stage.id,
+        attempt: resumableAttempt.attempt,
+        type: "stage.failed",
+        payload: {
+          error: "interrupted after process restart",
+          interrupted: true,
+        },
+      });
+      resumableStageById.delete(stage.id);
+      projection = projectRun(eventStore.list(runId));
+    } else if (resumableStage) {
+      resumableStageById.delete(stage.id);
+    }
+    const resumeSource = resume
+      ? resumableStage?.status ??
+        (projection.status === "blocked" ? "blocked" : "interrupted")
+      : undefined;
+    if (!resumeApprovalAttempt && !resumeOperatorReview) {
+      const stageAttempt = await beginStageAttempt({
+        eventStore,
+        runId: runId,
+        runDirectory,
+        stage,
+        attempt,
+        resumedFrom: resumeSource,
+        branchHeadSha: await currentBranchHeadSha(worktreePath),
+        ...(resume ? { directoryMode: "ensure" as const } : {}),
+      });
+      attemptDirectory = stageAttempt.attemptDirectory;
+    } else {
+      attemptDirectory = await requireContainedAttemptDirectory({
+        runDirectory,
+        attemptDirectory,
+      });
+    }
+    dependencies.cancellation?.onStageChange?.({ stageId: stage.id, attempt });
+    throwIfRunCancelled(dependencies.cancellation, { stageId: stage.id, attempt });
+
+    try {
+      if (!resumeApprovalAttempt && !resumeOperatorReview) {
+        await executeStageHooks({
+          stage,
+          phase: "pre",
+          attempt,
+          attemptDirectory,
+          backend,
+          workspace,
+          flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
+          context: runtimeContext,
+          eventStore,
+          runId: runId,
+          cancellation: dependencies.cancellation,
+        });
+      }
+
+      if (stage.type === "sync-change") {
+        await injectedAgentMemory.cleanup();
+        outcome.syncMetadata = await executeSyncChangeStage({
+          runId: runId,
+          stage,
+          attempt,
+          attemptDirectory,
+          worktreePath,
+          reworkTarget,
+          inputArtifacts,
+          context: runtimeContext,
+          eventStore,
+          completedStages,
+        });
+        await executeStageHooks({
+          stage,
+          phase: "post",
+          attempt,
+          attemptDirectory,
+          backend,
+          workspace,
+          flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
+          context: runtimeContext,
+          eventStore,
+          runId: runId,
+          cancellation: dependencies.cancellation,
+        });
+        projection = projectRun(eventStore.list(runId));
+        await writeRunEvidenceSnapshot();
+        taskPlanController.next();
+        continue;
+      }
+
+      if (stage.type === "publish-change") {
+        const published = await executePublishChangeStage({
+          runId: runId,
+          stage,
+          attempt,
+          attemptDirectory,
+          runWorkItemType,
+          flowName: loaded.flow.metadata.name,
+          repoPath,
+          worktreePath,
+          baseBranch,
+          branchName,
+          inputArtifacts,
+          backend,
+          workspace,
+          injectedAgentMemory,
+          dependencies,
+          providerStore,
+          context: runtimeContext,
+          eventStore,
+          completedStages,
+          onChangeTitleResolved: (title) => {
+            outcome.latestChangeTitle = title;
+          },
+          writeEvidenceSnapshot: writeRunEvidenceSnapshot,
+        });
+        outcome.changeRequestUrl = published.changeRequestUrl;
+        outcome.changeRequest = published.changeRequest;
+        outcome.changeRequestProvider = stage.provider ?? "github";
+        await executeStageHooks({
+          stage,
+          phase: "post",
+          attempt,
+          attemptDirectory,
+          backend,
+          workspace,
+          flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
+          context: runtimeContext,
+          eventStore,
+          runId: runId,
+          cancellation: dependencies.cancellation,
+        });
+        projection = projectRun(eventStore.list(runId));
+        await writeRunEvidenceSnapshot();
+        taskPlanController.next();
+        continue;
+      }
+
+      if (stage.type === "update-change") {
+        const updated = await executeUpdateChangeStage({
+          runId: runId,
+          stage,
+          attempt,
+          attemptDirectory,
+          runWorkItemType,
+          flowName: loaded.flow.metadata.name,
+          repoPath,
+          worktreePath,
+          reworkTarget,
+          reworkProvider,
+          inputArtifacts,
+          injectedAgentMemory,
+          dependencies,
+          providerStore,
+          context: runtimeContext,
+          eventStore,
+          completedStages,
+          onChangeTitleResolved: (title) => {
+            outcome.latestChangeTitle = title;
+          },
+          recordTitleBeforeUpdate: true,
+          writeEvidenceSnapshot: writeRunEvidenceSnapshot,
+        });
+        outcome.changeRequestUrl = updated.changeRequestUrl;
+        outcome.changeRequest = updated.changeRequest;
+        outcome.changeRequestProvider = reworkTarget?.provider ?? stage.provider ?? "github";
+        await executeStageHooks({
+          stage,
+          phase: "post",
+          attempt,
+          attemptDirectory,
+          backend,
+          workspace,
+          flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
+          context: runtimeContext,
+          eventStore,
+          runId: runId,
+          cancellation: dependencies.cancellation,
+        });
+        projection = projectRun(eventStore.list(runId));
+        await writeRunEvidenceSnapshot();
+        taskPlanController.next();
+        continue;
+      }
+
+      if (stage.type === "approval") {
+        await injectedAgentMemory.cleanup();
+        const approval = await executeApprovalStage({
+          runId: runId,
+          stage,
+          attempt,
+          flowTimeouts: loaded.flow.spec.timeouts,
+          context: runtimeContext,
+          eventStore,
+          completedStages,
+        });
+        if (approval.status === "awaiting-approval") {
+          await injectedAgentMemory.cleanup();
+          await writeRunEvidenceSnapshot();
+          return { approvalId: approval.approvalId };
+        }
+        await executeStageHooks({
+          stage,
+          phase: "post",
+          attempt,
+          attemptDirectory,
+          backend,
+          workspace,
+          flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
+          context: runtimeContext,
+          eventStore,
+          runId: runId,
+          cancellation: dependencies.cancellation,
+        });
+        projection = projectRun(eventStore.list(runId));
+        await writeRunEvidenceSnapshot();
+        taskPlanController.next();
+        continue;
+      }
+    } catch (error) {
+      // Run settlement records the cancellation.
+      if (error instanceof RunCancelledError) throw error;
+      const blocked = error instanceof RunBlockedError ? error : undefined;
+      if (blocked) {
+        if (!blocked.eventsAppended) {
+          appendRunBlockedEvents({
+            eventStore,
+            runId: runId,
+            stageId: stage.id,
+            attempt: effectiveAttempt,
+            blocker: blocked.blocker,
+            context: runtimeContext,
+          });
+        }
+        throw blocked;
+      }
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const currentStageIndex = loaded.graph.order.indexOf(stage.id);
+      if (currentStageIndex >= 0) {
+        invalidateCompletedStagesFrom(
+          completedStages,
+          loaded.graph.order,
+          currentStageIndex,
+        );
+      }
+      eventStore.append({
+        runId: runId,
+        stageId: stage.id,
+        attempt: effectiveAttempt,
+        type: "stage.failed",
+        payload: redactRuntimeUnknown({
+          error: errorMessage,
+        }, runtimeContext),
+      });
+      appendOrchestratorDecision({
+        eventStore,
+        runId: runId,
+        stage,
+        attempt: effectiveAttempt,
+        maxAttempts: 1,
+        decision: {
+          action: "fail",
+          reason: `${stage.type} failed after ${effectiveAttempt} of 1 attempts: ${errorMessage}`,
+        },
+        context: runtimeContext,
+        error: errorMessage,
+      });
+      eventStore.append({
+        runId: runId,
+        type: "run.failed",
+        payload: redactRuntimeUnknown({
+          stageId: stage.id,
+          error: errorMessage,
+        }, runtimeContext),
+      });
+      throw error;
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Settle a Run whose stages stopped on `error`: record the terminal event the
+ * stage driver did not, run the always-run finalizers, and write the final
+ * evidence. Never throws; the caller reports the original failure.
+ */
+async function settleStoppedRun(driver: StageDriver, error: unknown): Promise<void> {
+  const {
+    runId,
+    repoPath,
+    runDirectory,
+    worktreePath,
+    workItemId,
+    taskIssues,
+    loaded,
+    configuration,
+    inputArtifacts,
+    backend,
+    workspace,
+    providerStore,
+    dependencies,
+    eventStore,
+    runtimeContext,
+    injectedAgentMemory,
+    loadedSkillUsages,
+    contextKnowledge,
+    completedStages,
+    attemptsByStage,
+    reworkTarget,
+    outcome,
+    writeRunEvidenceSnapshot,
+  } = driver;
+  try {
+    let events = eventStore.list(runId);
+    const projection = projectRun(events);
+    const terminalStatus: TerminalRunStatus =
+      error instanceof RunCancelledError || projection.status === "cancelled"
+        ? "cancelled"
+        : error instanceof RunBlockedError || projection.status === "blocked"
+          ? "blocked"
+          : "failed";
+    if (error instanceof RunCancelledError) {
+      appendRunCancelledEvent({
+        eventStore,
+        runId,
+        error,
+        context: runtimeContext,
+      });
+      events = eventStore.list(runId);
+    }
+    if (
+      terminalStatus === "failed" &&
+      !events.some(
+        (event) =>
+          event.type === "run.completed" ||
+          event.type === "run.failed" ||
+          event.type === "run.blocked" ||
+          event.type === "run.cancelled",
+      )
+    ) {
+      eventStore.append({
+        runId,
+        type: "run.failed",
+        payload: redactRuntimeUnknown(
+          { error: error instanceof Error ? error.message : String(error) },
+          runtimeContext,
+        ),
+      });
+      events = eventStore.list(runId);
+    }
+    const latestFailure = [...events]
+      .reverse()
+      .find(
+        (event) =>
+          event.type === "run.failed" ||
+          event.type === "run.blocked" ||
+          event.type === "run.cancelled" ||
+          event.type === "stage.failed" ||
+          event.type === "stage.blocked",
+      );
+    const payload =
+      typeof latestFailure?.payload === "object" &&
+      latestFailure.payload !== null &&
+      !Array.isArray(latestFailure.payload)
+        ? (latestFailure.payload as Record<string, unknown>)
+        : {};
+    await runAlwaysRunFinalizers({
+      runId,
+      flowName: loaded.flow.metadata.name,
+      workItemId: workItemId,
+      stages: loaded.flow.spec.stages,
+      terminalStatus,
+      terminalStageId:
+        error instanceof RunCancelledError
+          ? error.stageId
+          : error instanceof RunBlockedError
+          ? error.blocker.stageId
+          : latestFailure?.stageId ?? (typeof payload.stageId === "string" ? payload.stageId : undefined),
+      terminalError: error instanceof Error ? error.message : String(error),
+      blocker:
+        error instanceof RunBlockedError
+          ? error.blocker
+          : undefined,
+      runDirectory,
+      repoPath,
+      backend,
+      dependencies,
+      workspace,
+      flowMaxInputTokens: loaded.flow.spec.maxInputTokens,
+      flowMaxAttempts: loaded.flow.spec.maxAttempts,
+      flowContext: loaded.flow.spec.context,
+      flowReads: loaded.flow.spec.reads,
+      flowTimeouts: loaded.flow.spec.timeouts,
+      flowBudgets: effectiveFlowBudgets(loaded.flow),
+      inputArtifacts,
+      configuration,
+      context: runtimeContext,
+      eventStore,
+      providerStore,
+      loadedSkillUsages,
+      contextKnowledge,
+      completedStages,
+      injectedAgentMemory,
+      changeRequestUrl: outcome.changeRequestUrl,
+      changeRequest: outcome.changeRequest,
+      reworkTarget,
+      syncMetadata: outcome.syncMetadata,
+      nextAttempt: (stageId) => (attemptsByStage.get(stageId) ?? 0) + 1,
+      onAttemptSelected: (stageId, attempt) => {
+        attemptsByStage.set(stageId, attempt);
+      },
+    });
+    await injectedAgentMemory.cleanup();
+    const finalEvidencePath = await writeRunEvidenceSnapshot(terminalStatus);
+    outcome.changeRequest = await refreshTerminalChangeRequestEvidence({
+      runId,
+      repoPath,
+      worktreePath,
+      changeRequest: outcome.changeRequest,
+      evidencePath: finalEvidencePath,
+      title: outcome.latestChangeTitle?.title,
+      dependencies,
+      providerStore,
+      providerName: outcome.changeRequestProvider,
+      context: runtimeContext,
+      eventStore,
+    }) ?? outcome.changeRequest;
+    outcome.changeRequestUrl = outcome.changeRequest?.url ?? outcome.changeRequestUrl;
+    await recordTaskIssueRunLinks({
+      repoPath,
+      runId,
+      status: terminalStatus,
+      evidencePath: finalEvidencePath,
+      changeRequestUrl: outcome.changeRequestUrl,
+      scope: taskIssues,
+      dependencies,
+      providerStore,
+      context: runtimeContext,
+      eventStore,
+    });
+  } catch {
+    // Preserve the original runtime failure.
+  }
+}
+
+/**
+ * Change request and sync facts a Run accumulates while its stages execute.
+ * The stage driver writes them; the entry point and its evidence snapshots
+ * read them.
+ */
+/**
+ * Everything one Run's stages execute against. A fresh Run and a resumed Run
+ * build it differently; the stage driver runs them the same way.
+ */
+interface StageDriver {
+  runId: string;
+  repoPath: string;
+  runDirectory: string;
+  worktreePath: string;
+  branchName: string;
+  baseBranch: string;
+  runWorkItemType?: string;
+  workItemId?: string;
+  taskIssues?: ResolvedTaskIssueScope;
+  loaded: LoadedFlow;
+  configuration: FlowConfiguration;
+  inputArtifacts: Map<string, InputArtifact>;
+  backend: ExecutionBackend;
+  workspace: WorkspaceHandle;
+  providerStore: ProviderConnectionStore;
+  dependencies: RunFlowDependencies;
+  eventStore: EventStore;
+  runtimeContext: RuntimeContext;
+  injectedAgentMemory: InjectedAgentMemoryScope;
+  loadedSkillUsages: StageSkillUsage[];
+  contextKnowledge: ContextKnowledgeEntry[];
+  agentSessions: Map<string, string>;
+  completedStages: string[];
+  gateResults: GateResult[];
+  attemptsByStage: Map<string, number>;
+  previousFailuresByStage: Map<string, PreviousFailure[]>;
+  reworkEdges: ReworkEdge[];
+  taskPlanStates: Map<string, TaskPlanLoopState>;
+  reworkTarget?: ReworkTargetState;
+  reworkProvider?: ScmProvider;
+  outcome: RunOutcomeState;
+  /** The Run as recorded before the driver starts. */
+  projection: ProjectedRun;
+  writeRunEvidenceSnapshot: (status?: EvidenceRunStatus) => Promise<string>;
+}
+
+interface RunOutcomeState {
+  changeRequestUrl?: string;
+  changeRequest?: ChangeRequest;
+  changeRequestProvider?: "github" | "github-cli";
+  syncMetadata?: SyncMetadata;
+  latestChangeTitle?: ChangeTitleMetadata;
+}
+
 export async function runFlow(
   input: RunFlowInput,
   dependencies: RunFlowDependencies = {},
@@ -13772,11 +15094,7 @@ async function runFlowOnce(
   });
 
   const completedStages: string[] = [];
-  let changeRequestUrl: string | undefined;
-  let changeRequest: ChangeRequest | undefined;
-  let changeRequestProvider: "github" | "github-cli" | undefined;
-  let syncMetadata: SyncMetadata | undefined;
-  let latestChangeTitle: ChangeTitleMetadata | undefined;
+  const outcome: RunOutcomeState = {};
   const gateResults: GateResult[] = [];
   const attemptsByStage = new Map<string, number>();
   const previousFailuresByStage = new Map<string, PreviousFailure[]>();
@@ -13833,16 +15151,52 @@ async function runFlowOnce(
       taskScope: taskScopeSelection,
       taskIssues,
       planningApproval: input.planningApproval,
-      changeTitle: latestChangeTitle,
-      changeRequest,
+      changeTitle: outcome.latestChangeTitle,
+      changeRequest: outcome.changeRequest,
       reworkTarget,
-      syncMetadata,
+      syncMetadata: outcome.syncMetadata,
       reproducibility,
       toolchainPreflight,
       ...(projection.riskClassification
         ? { riskClassification: projection.riskClassification }
         : {}),
     });
+  };
+
+  const driver: StageDriver = {
+    runId,
+    repoPath,
+    runDirectory,
+    worktreePath,
+    branchName,
+    baseBranch,
+    runWorkItemType,
+    workItemId: input.workItemId,
+    taskIssues,
+    loaded,
+    configuration,
+    inputArtifacts,
+    backend,
+    workspace,
+    providerStore,
+    dependencies,
+    eventStore,
+    runtimeContext,
+    injectedAgentMemory,
+    loadedSkillUsages,
+    contextKnowledge,
+    agentSessions,
+    completedStages,
+    gateResults,
+    attemptsByStage,
+    previousFailuresByStage,
+    reworkEdges,
+    taskPlanStates,
+    reworkTarget,
+    reworkProvider,
+    outcome,
+    projection: projectRun(eventStore.list(runId)),
+    writeRunEvidenceSnapshot,
   };
 
   try {
@@ -13859,867 +15213,20 @@ async function runFlowOnce(
       cancellation: dependencies.cancellation,
     });
 
-    const taskPlanController = createTaskPlanExecutionController({
-      startIndex: 0,
-      states: taskPlanStates,
-      inputArtifacts,
-      stages: loaded.flow.spec.stages,
-      graph: loaded.graph,
-      completedStages,
-      eventStore,
-      runId,
-      context: runtimeContext,
-    });
-    while (!taskPlanController.done) {
-      const stageIndex = taskPlanController.stageIndex;
-      const stageId = taskPlanController.stageId;
-      const stage = loaded.flow.spec.stages.find((candidate) => candidate.id === stageId);
-      if (!stage) {
-        taskPlanController.next();
-        continue;
-      }
-      if (stage.alwaysRun) {
-        taskPlanController.next();
-        continue;
-      }
-
-      const taskPlanStage = taskPlanController.prepare(stage);
-      if (!taskPlanStage.run) continue;
-      const preparedTaskPlan = taskPlanStage.prepared;
-
-      if (stage.type === "agent" || stage.type === "judge" || stage.type === "command" || stage.type === "gate") {
-        const maxAttempts = maxAttemptsForStage(stage, loaded.flow.spec.maxAttempts);
-        const previousFailures = previousFailuresByStage.get(stage.id) ?? [];
-        previousFailuresByStage.set(stage.id, previousFailures);
-        let reworkRequested = false;
-        let stageCompleted = false;
-        let completedAttempt: number | undefined;
-
-        while ((attemptsByStage.get(stage.id) ?? 0) < maxAttempts) {
-          const attempt = (attemptsByStage.get(stage.id) ?? 0) + 1;
-          let effectiveAttempt = attempt;
-          attemptsByStage.set(stage.id, attempt);
-          const { attemptDirectory } = await prepareStageAttempt({
-            begin: {
-              eventStore,
-              runId,
-              runDirectory,
-              stage,
-              attempt,
-              branchHeadSha: await currentBranchHeadSha(worktreePath),
-            },
-            prepare:
-              stage.type === "agent" || stage.type === "judge" || (stage.type === "gate" && stage.mode === "review")
-                ? async () => await prepareStageInstructionFilesBeforeAttempt({
-                    stage,
-                    controls: resolveStageContextControls(loaded.flow, stage),
-                    injectedAgentMemory,
-                  })
-                : undefined,
-            onStageChange: () =>
-              dependencies.cancellation?.onStageChange?.({
-                stageId: stage.id,
-                attempt,
-              }),
-            assertNotCancelled: () =>
-              throwIfRunCancelled(dependencies.cancellation, {
-                stageId: stage.id,
-                attempt,
-              }),
-          });
-
-          let failureError: string | undefined;
-          let budgetExceededError: BudgetExceededError | undefined;
-          let builtInRecommendation: OrchestratorRecommendation | undefined;
-          try {
-            await executeStageHooks({
-              stage,
-              phase: "pre",
-              attempt,
-              attemptDirectory,
-              backend,
-              workspace,
-              flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-              context: runtimeContext,
-              eventStore,
-              runId,
-              cancellation: dependencies.cancellation,
-            });
-
-            if (stage.type === "judge") {
-              const contextControls = resolveStageContextControls(loaded.flow, stage);
-              const readPolicy = resolveStageReadPolicy(loaded.flow.spec.reads, stage);
-              const result = await withStageInstructionFiles({
-                stage,
-                controls: contextControls,
-                attemptDirectory,
-                workspace,
-                injectedAgentMemory,
-                run: async () => await executeAgentStage({
-                  runId,
-                  stage,
-                  attempt,
-                  attemptDirectory,
-                  runDirectory,
-                  repoPath,
-                  backend,
-                  dependencies,
-                  workspace,
-                  flowName: loaded.flow.metadata.name,
-                  flowMaxInputTokens: loaded.flow.spec.maxInputTokens,
-                  flowMaxAttempts: loaded.flow.spec.maxAttempts,
-                  flowTimeouts: loaded.flow.spec.timeouts,
-                  flowQuestions: loaded.flow.spec.questions,
-                  flowBudgets: effectiveFlowBudgets(loaded.flow),
-                  inputArtifacts,
-                  configuration,
-                  context: runtimeContext,
-                  eventStore,
-                  providerStore,
-                  loadedSkillUsages,
-                  contextControls,
-                  readPolicy,
-                  contextKnowledge,
-                  previousFailures,
-                  taskPlanPrompt: preparedTaskPlan?.promptContext,
-                  agentSessions,
-                  completedStages,
-                  completeStage: false,
-                  onAttemptSelected: (selectedAttempt) => {
-                    effectiveAttempt = selectedAttempt;
-                    attemptsByStage.set(stage.id, selectedAttempt);
-                  },
-                }),
-              });
-              effectiveAttempt = result.selectedAttempt;
-              const judgeOutput = await readJudgeOutput({
-                stage,
-                attempt: effectiveAttempt,
-                attemptDirectory: selectedAttemptDirectory({
-                  runDirectory,
-                  stageId: stage.id,
-                  currentAttempt: attempt,
-                  currentAttemptDirectory: attemptDirectory,
-                  selectedAttempt: effectiveAttempt,
-                }),
-                context: runtimeContext,
-              });
-              if (!judgeOutput.result) {
-                failureError = judgeOutput.reason;
-                throw new Error(failureError);
-              }
-              eventStore.append({
-                runId,
-                stageId: stage.id,
-                attempt: effectiveAttempt,
-                type: "judge.completed",
-                payload: redactRuntimeUnknown({
-                  verdict: judgeOutput.result.verdict,
-                  findings: judgeOutput.result.findings,
-                  evidence: judgeOutput.result.evidence,
-                  reworkTarget: judgeOutput.result.reworkTarget,
-                  reworkInstructions: judgeOutput.result.reworkInstructions,
-                  humanReviewReason: judgeOutput.result.humanReviewReason,
-                  outputPath: judgeOutput.outputPath,
-                  criteria: stage.criteria,
-                }, runtimeContext),
-              });
-              if (judgeOutput.result.verdict !== "PASS") {
-                builtInRecommendation = judgeRecommendation({
-                  stage,
-                  result: judgeOutput.result,
-                  graph: loaded.graph,
-                  validReworkStages: validReworkStagesForStage(stage.id, loaded.graph),
-                });
-                failureError = `judge returned ${judgeOutput.result.verdict}`;
-                throw new Error(failureError);
-              }
-              markStageCompleted(completedStages, stage.id);
-              appendSuccessfulStageCompletion({
-                eventStore,
-                runId,
-                stage,
-                attempt: effectiveAttempt,
-                maxAttempts,
-                context: runtimeContext,
-                payload: {
-                  outputs: stageOutputIds(stage),
-                  verdict: judgeOutput.result.verdict,
-                  criteria: stage.criteria,
-                },
-              });
-              await executeStageHooks({
-                stage,
-                phase: "post",
-                attempt: effectiveAttempt,
-                attemptDirectory: selectedAttemptDirectory({
-                  runDirectory,
-                  stageId: stage.id,
-                  currentAttempt: attempt,
-                  currentAttemptDirectory: attemptDirectory,
-                  selectedAttempt: effectiveAttempt,
-                }),
-                backend,
-                workspace,
-                flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-                context: runtimeContext,
-                eventStore,
-                runId,
-                cancellation: dependencies.cancellation,
-              });
-              stageCompleted = true;
-              completedAttempt = effectiveAttempt;
-              break;
-            }
-
-            if (stage.type === "agent") {
-              const contextControls = resolveStageContextControls(loaded.flow, stage);
-              const readPolicy = resolveStageReadPolicy(loaded.flow.spec.reads, stage);
-              const result = await withStageInstructionFiles({
-                stage,
-                controls: contextControls,
-                attemptDirectory,
-                workspace,
-                injectedAgentMemory,
-                run: async () => await executeAgentStage({
-                  runId,
-                  stage,
-                  attempt,
-                  attemptDirectory,
-                  runDirectory,
-                  repoPath,
-                  backend,
-                  dependencies,
-                  workspace,
-                  flowName: loaded.flow.metadata.name,
-                  flowMaxInputTokens: loaded.flow.spec.maxInputTokens,
-                  flowMaxAttempts: loaded.flow.spec.maxAttempts,
-                  flowTimeouts: loaded.flow.spec.timeouts,
-                  flowQuestions: loaded.flow.spec.questions,
-                  flowBudgets: effectiveFlowBudgets(loaded.flow),
-                  inputArtifacts,
-                  configuration,
-                  context: runtimeContext,
-                  eventStore,
-                  providerStore,
-                  loadedSkillUsages,
-                  contextControls,
-                  readPolicy,
-                  contextKnowledge,
-                  previousFailures,
-                  taskPlanPrompt: preparedTaskPlan?.promptContext,
-                  agentSessions,
-                  completedStages,
-                  onAttemptSelected: (selectedAttempt) => {
-                    effectiveAttempt = selectedAttempt;
-                    attemptsByStage.set(stage.id, selectedAttempt);
-                    dependencies.cancellation?.onStageChange?.({
-                      stageId: stage.id,
-                      attempt: selectedAttempt,
-                    });
-                  },
-                }),
-              });
-              effectiveAttempt = result.selectedAttempt;
-              await executeStageHooks({
-                stage,
-                phase: "post",
-                attempt: effectiveAttempt,
-                attemptDirectory: selectedAttemptDirectory({
-                  runDirectory,
-                  stageId: stage.id,
-                  currentAttempt: attempt,
-                  currentAttemptDirectory: attemptDirectory,
-                  selectedAttempt: effectiveAttempt,
-                }),
-                backend,
-                workspace,
-                flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-                context: runtimeContext,
-                eventStore,
-                runId,
-                cancellation: dependencies.cancellation,
-              });
-              stageCompleted = true;
-              completedAttempt = effectiveAttempt;
-              break;
-            }
-
-            if (stage.type === "gate") {
-              const contextControls = resolveStageContextControls(loaded.flow, stage);
-              const readPolicy = resolveStageReadPolicy(loaded.flow.spec.reads, stage);
-              const runGate = async () => await executeGateStage({
-                runId,
-                attempt,
-                stage,
-                repoPath,
-                backend,
-                dependencies,
-                workspace,
-                flowName: loaded.flow.metadata.name,
-                flowMaxInputTokens: loaded.flow.spec.maxInputTokens,
-                flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-                flowTimeouts: loaded.flow.spec.timeouts,
-                flowBudgets: effectiveFlowBudgets(loaded.flow),
-                inputArtifacts,
-                configuration,
-                attemptDirectory,
-                context: runtimeContext,
-                eventStore,
-                providerStore,
-                loadedSkillUsages,
-                contextControls,
-                readPolicy,
-                contextKnowledge,
-                previousFailures,
-                taskPlanPrompt: preparedTaskPlan?.promptContext,
-                agentSessions,
-              });
-              const { result: gateResult, budgetFailure } = stage.mode === "review"
-                ? await withStageInstructionFiles({
-                    stage,
-                    controls: contextControls,
-                    attemptDirectory,
-                    workspace,
-                    injectedAgentMemory,
-                    run: runGate,
-                  })
-                : await (async () => {
-                    await injectedAgentMemory.cleanup();
-                    return await runGate();
-                  })();
-              const recordedGate = recordGateStageResult({
-                runId,
-                stage,
-                attempt,
-                maxAttempts,
-                gateResult,
-                gateResults,
-                completedStages,
-                eventStore,
-                context: runtimeContext,
-              });
-              effectiveAttempt = recordedGate.gateAttempt;
-              if (
-                !recordedGate.passed &&
-                (stage.mode === "review" || stage.mode === "review-aggregate")
-              ) {
-                builtInRecommendation = reviewGateVerdictRecommendation({
-                  stage,
-                  gateResult,
-                  graph: loaded.graph,
-                  validReworkStages: validReworkStagesForStage(
-                    stage.id,
-                    loaded.graph,
-                  ),
-                });
-              }
-              if (budgetFailure) {
-                if (recordedGate.passed) {
-                  budgetFailure.stageCompleted = true;
-                }
-                throw budgetFailure;
-              }
-              if (recordedGate.passed) {
-                await executeStageHooks({
-                  stage,
-                  phase: "post",
-                  attempt: effectiveAttempt,
-                  attemptDirectory: selectedAttemptDirectory({
-                    runDirectory,
-                    stageId: stage.id,
-                    currentAttempt: attempt,
-                    currentAttemptDirectory: attemptDirectory,
-                    selectedAttempt: effectiveAttempt,
-                  }),
-                  backend,
-                  workspace,
-                  flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-                  context: runtimeContext,
-                  eventStore,
-                  runId,
-                  cancellation: dependencies.cancellation,
-                });
-                stageCompleted = true;
-                completedAttempt = effectiveAttempt;
-                break;
-              }
-              failureError = recordedGate.reason;
-              throw new Error(failureError);
-            }
-
-            await injectedAgentMemory.cleanup();
-            const commandResult = await executeCommandStage({
-              configuration,
-              runId,
-              stage,
-              attempt,
-              attemptDirectory,
-              runDirectory,
-              backend,
-              workspace,
-              flowMaxAttempts: loaded.flow.spec.maxAttempts,
-              flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-              flowTimeouts: loaded.flow.spec.timeouts,
-              flowBudgets: effectiveFlowBudgets(loaded.flow),
-              context: runtimeContext,
-              eventStore,
-              inputArtifacts,
-              completedStages,
-              cancellation: dependencies.cancellation,
-            });
-            if (!commandResult.failureError) {
-              await executeStageHooks({
-                stage,
-                phase: "post",
-                attempt,
-                attemptDirectory,
-                backend,
-                workspace,
-                flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-                context: runtimeContext,
-                eventStore,
-                runId,
-                cancellation: dependencies.cancellation,
-              });
-              stageCompleted = true;
-              completedAttempt = attempt;
-              break;
-            }
-            failureError =
-              redactRuntimeText(
-                commandResult.failureError,
-                runtimeContext,
-              ) ?? "";
-          } catch (error) {
-            if (error instanceof RunCancelledError) {
-              throw error;
-            }
-            if (error instanceof BudgetExceededError) {
-              budgetExceededError = error;
-              failureError = error.message;
-              // A stage that finished and registered its outputs before the
-              // breach keeps its completion. Only the run stops.
-              if (!error.stageCompleted) {
-                invalidateCompletedStagesFrom(completedStages, loaded.graph.order, stageIndex);
-              }
-            } else {
-              const blocked =
-                error instanceof RunBlockedError
-                  ? error
-                  : (stage.type === "agent" || stage.type === "judge")
-                    ? classifyRunBlockedError({
-                        stageId: stage.id,
-                        runtime: stageRuntimeCandidates(stage)[0]?.runtime,
-                        error,
-                        context: runtimeContext,
-                      })
-                    : undefined;
-              if (blocked) {
-                if (!blocked.eventsAppended) {
-                  appendRunBlockedEvents({
-                    eventStore,
-                    runId,
-                    stageId: stage.id,
-                    attempt: effectiveAttempt,
-                    blocker: blocked.blocker,
-                    context: runtimeContext,
-                  });
-                }
-                throw blocked;
-              }
-              invalidateCompletedStagesFrom(completedStages, loaded.graph.order, stageIndex);
-              failureError = error instanceof Error ? error.message : String(error);
-            }
-          }
-
-          const error = failureError ?? "unknown error";
-          // `projectRun` deletes a stage from `completedStages` on
-          // `stage.failed`, so emitting it here would undo the completion this
-          // stage earned and make a resume repeat paid work.
-          if (!budgetExceededError?.stageCompleted) {
-            eventStore.append({
-              runId,
-              stageId: stage.id,
-              attempt: effectiveAttempt,
-              type: "stage.failed",
-              payload: redactRuntimeUnknown({ error }, runtimeContext),
-            });
-          }
-          if (budgetExceededError) {
-            eventStore.append({
-              runId,
-              type: "run.failed",
-              payload: redactRuntimeUnknown({
-                stageId: stage.id,
-                error,
-                reason: "budget_exceeded",
-              }, runtimeContext),
-            });
-            throw budgetExceededError;
-          }
-
-          const policy = applyFailedStagePolicy({
-            stage,
-            attempt: effectiveAttempt,
-            maxAttempts,
-            flowMaxAttempts: loaded.flow.spec.maxAttempts,
-            error,
-            builtInRecommendation,
-            dependencies,
-            stages: loaded.flow.spec.stages,
-            graph: loaded.graph,
-            attemptsByStage,
-            previousFailuresByStage,
-            completedStages,
-            reworkEdges,
-            eventStore,
-            runId,
-            context: runtimeContext,
-          });
-          if (policy.action === "retry") continue;
-          taskPlanController.rework(policy.stageIndex, policy.request);
-          reworkRequested = true;
-          break;
-        }
-        if (reworkRequested) {
-          continue;
-        }
-        if (!stageCompleted) {
-          const usedAttempts = attemptsByStage.get(stage.id) ?? 0;
-          const reason = `${stage.type} failed after ${usedAttempts} of ${maxAttempts} attempts`;
-          eventStore.append({
-            runId,
-            type: "run.failed",
-            payload: redactRuntimeUnknown({
-              stageId: stage.id,
-              error: reason,
-            }, runtimeContext),
-          });
-          throw new Error(reason);
-        }
-        taskPlanController.complete(stage, preparedTaskPlan, completedAttempt);
-        continue;
-      }
-
-      const attempt = 1;
-      const { attemptDirectory } = await beginStageAttempt({
-        eventStore,
+    const paused = await driveStages(driver, { startIndex: 0 });
+    if (paused) {
+      eventStore.close();
+      return {
         runId,
-        runDirectory,
-        stage,
-        attempt,
-        branchHeadSha: await currentBranchHeadSha(worktreePath),
-      });
-      dependencies.cancellation?.onStageChange?.({ stageId: stage.id, attempt });
-      throwIfRunCancelled(dependencies.cancellation, { stageId: stage.id, attempt });
-
-      try {
-        await executeStageHooks({
-          stage,
-          phase: "pre",
-          attempt,
-          attemptDirectory,
-          backend,
-          workspace,
-          flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-          context: runtimeContext,
-          eventStore,
-          runId,
-          cancellation: dependencies.cancellation,
-        });
-
-        if (stage.type === "sync-change") {
-          await injectedAgentMemory.cleanup();
-          syncMetadata = await executeSyncChangeStage({
-            runId,
-            stage,
-            attempt,
-            attemptDirectory,
-            worktreePath,
-            reworkTarget,
-            inputArtifacts,
-            context: runtimeContext,
-            eventStore,
-            completedStages,
-          });
-          await executeStageHooks({
-            stage,
-            phase: "post",
-            attempt,
-            attemptDirectory,
-            backend,
-            workspace,
-            flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-            context: runtimeContext,
-            eventStore,
-            runId,
-            cancellation: dependencies.cancellation,
-          });
-          taskPlanController.next();
-          continue;
-        }
-
-        if (stage.type === "publish-change") {
-          const published = await executePublishChangeStage({
-            runId,
-            stage,
-            attempt,
-            attemptDirectory,
-            runWorkItemType,
-            flowName: loaded.flow.metadata.name,
-            repoPath,
-            worktreePath,
-            baseBranch,
-            branchName,
-            inputArtifacts,
-            backend,
-            workspace,
-            injectedAgentMemory,
-            dependencies,
-            providerStore,
-            context: runtimeContext,
-            eventStore,
-            completedStages,
-            onChangeTitleResolved: (title) => {
-              latestChangeTitle = title;
-            },
-            writeEvidenceSnapshot: async () => {
-              const events = eventStore.list(runId);
-              const projection = projectRun(events);
-              return await writeEvidence({
-                flowName: loaded.flow.metadata.name,
-                runId,
-                branchName,
-                baseBranch,
-                repoPath,
-                worktreePath,
-                runDirectory,
-                completedStages,
-                gates: gateResults,
-                agentRuntimes: collectAgentRuntimeEvidence(loaded.flow.spec.stages),
-                executionBackend: backend.describeExecution?.(),
-                stageContextControls: collectStageContextEvidence(loaded.flow),
-                mcpServerAttempts: collectMcpServerAttemptEvidence(events),
-                stageReadPolicies: collectStageReadPolicyEvidence(loaded.flow),
-                stageTimeouts: collectStageTimeoutEvidence(loaded.flow),
-                conformancePolicies: collectConformancePolicies(loaded.flow.spec.stages),
-                runtimeUsage: projection.runtimeUsage,
-                runtimeInputBreakdown: projection.runtimeInputBreakdown,
-                repoIndexQueries: projection.repoIndexQueries,
-                knowledgeRetrievals: projection.knowledgeRetrievals,
-                commandAttempts: collectCommandAttemptEvidence({
-                  runDirectory,
-                  stages: loaded.flow.spec.stages,
-                  events,
-                }),
-                hookAttempts: collectHookAttemptEvidence({ runDirectory, events }),
-                loadedSkills: loadedSkillUsages,
-                orchestratorDecisions: projection.orchestratorDecisions,
-                verificationDiagnoses: projection.verificationDiagnoses,
-                operatorQuestions: projection.questions,
-                inputs: inputArtifacts,
-                configuration,
-                context: runtimeContext,
-                taskScope: taskScopeSelection,
-                taskIssues,
-                planningApproval: input.planningApproval,
-                changeTitle: latestChangeTitle,
-                ...(projection.riskClassification
-                  ? { riskClassification: projection.riskClassification }
-                  : {}),
-              });
-            },
-          });
-          changeRequestUrl = published.changeRequestUrl;
-          changeRequest = published.changeRequest;
-          changeRequestProvider = stage.provider ?? "github";
-          await executeStageHooks({
-            stage,
-            phase: "post",
-            attempt,
-            attemptDirectory,
-            backend,
-            workspace,
-            flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-            context: runtimeContext,
-            eventStore,
-            runId,
-            cancellation: dependencies.cancellation,
-          });
-          taskPlanController.next();
-          continue;
-        }
-
-        if (stage.type === "update-change") {
-          const updated = await executeUpdateChangeStage({
-            runId,
-            stage,
-            attempt,
-            attemptDirectory,
-            runWorkItemType,
-            flowName: loaded.flow.metadata.name,
-            repoPath,
-            worktreePath,
-            reworkTarget,
-            reworkProvider,
-            inputArtifacts,
-            injectedAgentMemory,
-            dependencies,
-            providerStore,
-            context: runtimeContext,
-            eventStore,
-            completedStages,
-            onChangeTitleResolved: (title) => {
-              latestChangeTitle = title;
-            },
-            recordTitleBeforeUpdate: false,
-            writeEvidenceSnapshot: async () => {
-              const events = eventStore.list(runId);
-              const projection = projectRun(events);
-              return await writeEvidence({
-                flowName: loaded.flow.metadata.name,
-                runId,
-                branchName,
-                baseBranch,
-                repoPath,
-                worktreePath,
-                runDirectory,
-                completedStages,
-                gates: gateResults,
-                agentRuntimes: collectAgentRuntimeEvidence(loaded.flow.spec.stages),
-                executionBackend: backend.describeExecution?.(),
-                stageContextControls: collectStageContextEvidence(loaded.flow),
-                mcpServerAttempts: collectMcpServerAttemptEvidence(events),
-                stageReadPolicies: collectStageReadPolicyEvidence(loaded.flow),
-                stageTimeouts: collectStageTimeoutEvidence(loaded.flow),
-                conformancePolicies: collectConformancePolicies(loaded.flow.spec.stages),
-                runtimeUsage: projection.runtimeUsage,
-                runtimeInputBreakdown: projection.runtimeInputBreakdown,
-                repoIndexQueries: projection.repoIndexQueries,
-                knowledgeRetrievals: projection.knowledgeRetrievals,
-                commandAttempts: collectCommandAttemptEvidence({
-                  runDirectory,
-                  stages: loaded.flow.spec.stages,
-                  events,
-                }),
-                hookAttempts: collectHookAttemptEvidence({ runDirectory, events }),
-                loadedSkills: loadedSkillUsages,
-                orchestratorDecisions: projection.orchestratorDecisions,
-                verificationDiagnoses: projection.verificationDiagnoses,
-                operatorQuestions: projection.questions,
-                inputs: inputArtifacts,
-                configuration,
-                context: runtimeContext,
-                taskScope: taskScopeSelection,
-                taskIssues,
-                planningApproval: input.planningApproval,
-                changeTitle: latestChangeTitle,
-                reworkTarget,
-                syncMetadata,
-              });
-            },
-          });
-          changeRequestUrl = updated.changeRequestUrl;
-          changeRequest = updated.changeRequest;
-          changeRequestProvider = reworkTarget?.provider ?? stage.provider ?? "github";
-          await executeStageHooks({
-            stage,
-            phase: "post",
-            attempt,
-            attemptDirectory,
-            backend,
-            workspace,
-            flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-            context: runtimeContext,
-            eventStore,
-            runId,
-            cancellation: dependencies.cancellation,
-          });
-          taskPlanController.next();
-          continue;
-        }
-
-        if (stage.type === "approval") {
-          await injectedAgentMemory.cleanup();
-          const approval = await executeApprovalStage({
-            runId,
-            stage,
-            attempt,
-            flowTimeouts: loaded.flow.spec.timeouts,
-            context: runtimeContext,
-            eventStore,
-            completedStages,
-          });
-          if (approval.status === "awaiting-approval") {
-            await injectedAgentMemory.cleanup();
-            await writeRunEvidenceSnapshot();
-            eventStore.close();
-            return {
-              runId,
-              branchName,
-              worktreePath,
-              status: "awaiting-approval",
-              approvalId: approval.approvalId,
-              changeRequestUrl,
-              changeRequest,
-              previousHeadSha: reworkTarget?.previousHeadSha,
-              updatedHeadSha: reworkTarget?.updatedHeadSha,
-            };
-          }
-          await executeStageHooks({
-            stage,
-            phase: "post",
-            attempt,
-            attemptDirectory,
-            backend,
-            workspace,
-            flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-            context: runtimeContext,
-            eventStore,
-            runId,
-            cancellation: dependencies.cancellation,
-          });
-        }
-      } catch (error) {
-        if (error instanceof RunCancelledError) {
-          throw error;
-        }
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        invalidateCompletedStagesFrom(completedStages, loaded.graph.order, stageIndex);
-        eventStore.append({
-          runId,
-          stageId: stage.id,
-          attempt,
-          type: "stage.failed",
-          payload: redactRuntimeUnknown({
-            error: errorMessage,
-          }, runtimeContext),
-        });
-        appendOrchestratorDecision({
-          eventStore,
-          runId,
-          stage,
-          attempt,
-          maxAttempts: 1,
-          decision: {
-            action: "fail",
-            reason: `${stage.type} failed after ${attempt} of 1 attempts: ${errorMessage}`,
-          },
-          context: runtimeContext,
-          error: errorMessage,
-        });
-        eventStore.append({
-          runId,
-          type: "run.failed",
-          payload: redactRuntimeUnknown({
-            stageId: stage.id,
-            error: errorMessage,
-          }, runtimeContext),
-        });
-        throw error;
-      }
-      taskPlanController.next();
+        branchName,
+        worktreePath,
+        status: "awaiting-approval",
+        approvalId: paused.approvalId,
+        changeRequestUrl: outcome.changeRequestUrl,
+        changeRequest: outcome.changeRequest,
+        previousHeadSha: reworkTarget?.previousHeadSha,
+        updatedHeadSha: reworkTarget?.updatedHeadSha,
+      };
     }
     throwIfRunCancelled(dependencies.cancellation);
     await executeFlowHooks({
@@ -14735,137 +15242,7 @@ async function runFlowOnce(
       cancellation: dependencies.cancellation,
     });
   } catch (error) {
-    try {
-      let events = eventStore.list(runId);
-      const projection = projectRun(events);
-      const terminalStatus: TerminalRunStatus =
-        error instanceof RunCancelledError || projection.status === "cancelled"
-          ? "cancelled"
-          : error instanceof RunBlockedError || projection.status === "blocked"
-            ? "blocked"
-            : "failed";
-      if (error instanceof RunCancelledError) {
-        appendRunCancelledEvent({
-          eventStore,
-          runId,
-          error,
-          context: runtimeContext,
-        });
-        events = eventStore.list(runId);
-      }
-      if (
-        terminalStatus === "failed" &&
-        !events.some(
-          (event) =>
-            event.type === "run.completed" ||
-            event.type === "run.failed" ||
-            event.type === "run.blocked" ||
-            event.type === "run.cancelled",
-        )
-      ) {
-        eventStore.append({
-          runId,
-          type: "run.failed",
-          payload: redactRuntimeUnknown(
-            { error: error instanceof Error ? error.message : String(error) },
-            runtimeContext,
-          ),
-        });
-        events = eventStore.list(runId);
-      }
-      const latestFailure = [...events]
-        .reverse()
-        .find(
-          (event) =>
-            event.type === "run.failed" ||
-            event.type === "run.blocked" ||
-            event.type === "run.cancelled" ||
-            event.type === "stage.failed" ||
-            event.type === "stage.blocked",
-        );
-      const payload =
-        typeof latestFailure?.payload === "object" &&
-        latestFailure.payload !== null &&
-        !Array.isArray(latestFailure.payload)
-          ? (latestFailure.payload as Record<string, unknown>)
-          : {};
-      await runAlwaysRunFinalizers({
-        runId,
-        flowName: loaded.flow.metadata.name,
-        workItemId: input.workItemId,
-        stages: loaded.flow.spec.stages,
-        terminalStatus,
-        terminalStageId:
-          error instanceof RunCancelledError
-            ? error.stageId
-            : error instanceof RunBlockedError
-            ? error.blocker.stageId
-            : latestFailure?.stageId ?? (typeof payload.stageId === "string" ? payload.stageId : undefined),
-        terminalError: error instanceof Error ? error.message : String(error),
-        blocker:
-          error instanceof RunBlockedError
-            ? error.blocker
-            : undefined,
-        runDirectory,
-        repoPath,
-        backend,
-        dependencies,
-        workspace,
-        flowMaxInputTokens: loaded.flow.spec.maxInputTokens,
-        flowMaxAttempts: loaded.flow.spec.maxAttempts,
-        flowContext: loaded.flow.spec.context,
-        flowReads: loaded.flow.spec.reads,
-        flowTimeouts: loaded.flow.spec.timeouts,
-        flowBudgets: effectiveFlowBudgets(loaded.flow),
-        inputArtifacts,
-        configuration,
-        context: runtimeContext,
-        eventStore,
-        providerStore,
-        loadedSkillUsages,
-        contextKnowledge,
-        completedStages,
-        injectedAgentMemory,
-        changeRequestUrl,
-        changeRequest,
-        reworkTarget,
-        syncMetadata,
-        nextAttempt: (stageId) => (attemptsByStage.get(stageId) ?? 0) + 1,
-        onAttemptSelected: (stageId, attempt) => {
-          attemptsByStage.set(stageId, attempt);
-        },
-      });
-      await injectedAgentMemory.cleanup();
-      const finalEvidencePath = await writeRunEvidenceSnapshot(terminalStatus);
-      changeRequest = await refreshTerminalChangeRequestEvidence({
-        runId,
-        repoPath,
-        worktreePath,
-        changeRequest,
-        evidencePath: finalEvidencePath,
-        title: latestChangeTitle?.title,
-        dependencies,
-        providerStore,
-        providerName: changeRequestProvider,
-        context: runtimeContext,
-        eventStore,
-      }) ?? changeRequest;
-      changeRequestUrl = changeRequest?.url ?? changeRequestUrl;
-      await recordTaskIssueRunLinks({
-        repoPath,
-        runId,
-        status: terminalStatus,
-        evidencePath: finalEvidencePath,
-        changeRequestUrl,
-        scope: taskIssues,
-        dependencies,
-        providerStore,
-        context: runtimeContext,
-        eventStore,
-      });
-    } catch {
-      // Preserve the original runtime failure.
-    }
+    await settleStoppedRun(driver, error);
     eventStore.close();
     throw error;
   }
@@ -14909,10 +15286,10 @@ async function runFlowOnce(
     contextKnowledge,
     completedStages,
     injectedAgentMemory,
-    changeRequestUrl,
-    changeRequest,
+    changeRequestUrl: outcome.changeRequestUrl,
+    changeRequest: outcome.changeRequest,
     reworkTarget,
-    syncMetadata,
+    syncMetadata: outcome.syncMetadata,
     nextAttempt: (stageId) => (attemptsByStage.get(stageId) ?? 0) + 1,
     onAttemptSelected: (stageId, attempt) => {
       attemptsByStage.set(stageId, attempt);
@@ -14935,26 +15312,26 @@ async function runFlowOnce(
     });
   }
   const finalEvidencePath = await writeRunEvidenceSnapshot("completed");
-  changeRequest = await refreshTerminalChangeRequestEvidence({
+  outcome.changeRequest = await refreshTerminalChangeRequestEvidence({
     runId,
     repoPath,
     worktreePath,
-    changeRequest,
+    changeRequest: outcome.changeRequest,
     evidencePath: finalEvidencePath,
-    title: latestChangeTitle?.title,
+    title: outcome.latestChangeTitle?.title,
     dependencies,
     providerStore,
-    providerName: changeRequestProvider,
+    providerName: outcome.changeRequestProvider,
     context: runtimeContext,
     eventStore,
-  }) ?? changeRequest;
-  changeRequestUrl = changeRequest?.url ?? changeRequestUrl;
+  }) ?? outcome.changeRequest;
+  outcome.changeRequestUrl = outcome.changeRequest?.url ?? outcome.changeRequestUrl;
   await recordTaskIssueRunLinks({
     repoPath,
     runId,
     status: "completed",
     evidencePath: finalEvidencePath,
-    changeRequestUrl,
+    changeRequestUrl: outcome.changeRequestUrl,
     scope: taskIssues,
     dependencies,
     providerStore,
@@ -14979,8 +15356,8 @@ async function runFlowOnce(
         repoPath,
         branchName,
         worktreePath,
-        changeRequestUrl,
-        changeRequest,
+        changeRequestUrl: outcome.changeRequestUrl,
+        changeRequest: outcome.changeRequest,
         trigger: input.trigger,
         priorRunId: input.priorRunId,
         changeRequestTarget: reworkTarget
@@ -14992,7 +15369,7 @@ async function runFlowOnce(
               updatedHeadSha: reworkTarget.updatedHeadSha,
             }
           : undefined,
-        sync: syncMetadata,
+        sync: outcome.syncMetadata,
         gates: gateResults,
         completedStages,
         taskScope: taskScopeSelection
@@ -15024,8 +15401,8 @@ async function runFlowOnce(
       runId,
       type: "run.completed",
       payload: redactRuntimeUnknown({
-        changeRequestUrl,
-        changeRequest,
+        changeRequestUrl: outcome.changeRequestUrl,
+        changeRequest: outcome.changeRequest,
         trigger: input.trigger,
         priorRunId: input.priorRunId,
         changeRequestTarget: reworkTarget
@@ -15037,7 +15414,7 @@ async function runFlowOnce(
               updatedHeadSha: reworkTarget.updatedHeadSha,
             }
           : undefined,
-        sync: syncMetadata,
+        sync: outcome.syncMetadata,
         taskScope: taskScopeSelection
           ? taskScopeEventPayload(taskScopeSelection)
           : undefined,
@@ -15057,8 +15434,8 @@ async function runFlowOnce(
     runId,
     branchName,
     worktreePath,
-    changeRequestUrl,
-    changeRequest,
+    changeRequestUrl: outcome.changeRequestUrl,
+    changeRequest: outcome.changeRequest,
     previousHeadSha: reworkTarget?.previousHeadSha,
     updatedHeadSha: reworkTarget?.updatedHeadSha,
   };
@@ -15776,18 +16153,19 @@ async function resumeRunOnce(
     const { attemptsByStage, previousFailuresByStage, reworkEdges } =
       rehydrateStageExecutionState(events, loaded.graph.order);
     const baseBranch = projection.baseBranch ?? "HEAD";
-    let changeRequestUrl = projection.changeRequestUrl;
-    let changeRequest = projection.changeRequest as ChangeRequest | undefined;
-    let syncMetadata = projection.sync as SyncMetadata | undefined;
-    let latestChangeTitle: ChangeTitleMetadata | undefined;
+    const outcome: RunOutcomeState = {
+      changeRequestUrl: projection.changeRequestUrl,
+      changeRequest: projection.changeRequest as ChangeRequest | undefined,
+      syncMetadata: projection.sync as SyncMetadata | undefined,
+    };
     const gateResults: GateResult[] = [...projection.gates];
     const loadedSkillUsages: StageSkillUsage[] =
       loadedSkillUsagesFromEvents(events);
     const contextKnowledge: ContextKnowledgeEntry[] = [];
     const reworkTarget = projectedReworkTarget(projection.changeRequestTarget);
-    let changeRequestProvider: "github" | "github-cli" | undefined =
+    outcome.changeRequestProvider =
       reworkTarget?.provider ??
-      (changeRequest
+      (outcome.changeRequest
         ? firstChangeRequestStageProvider(loaded.flow.spec.stages)
         : undefined);
     if (reworkTarget) {
@@ -15903,10 +16281,10 @@ async function resumeRunOnce(
         context: runtimeContext,
         taskScope: resumedTaskScope,
         taskIssues,
-        changeTitle: latestChangeTitle,
-        changeRequest,
+        changeTitle: outcome.latestChangeTitle,
+        changeRequest: outcome.changeRequest,
         reworkTarget,
-        syncMetadata,
+        syncMetadata: outcome.syncMetadata,
         reproducibility,
         toolchainPreflight,
         ...(projection.riskClassification
@@ -15922,1306 +16300,63 @@ async function resumeRunOnce(
       eventStore,
       context: runtimeContext,
     });
-    const finalizeResumedTerminal = async (terminal: {
-      status: "blocked" | "failed";
-      stageId: string;
-      error: string;
-      blocker?: RunBlocker;
-    }): Promise<void> => {
-      await runAlwaysRunFinalizers({
-        runId: input.runId,
-        flowName: loaded.flow.metadata.name,
-        workItemId: projection.workItemId,
-        stages: loaded.flow.spec.stages,
-        terminalStatus: terminal.status,
-        terminalStageId: terminal.blocker?.stageId ?? terminal.stageId,
-        terminalError: terminal.error,
-        blocker: terminal.blocker,
-        runDirectory,
-        repoPath,
-        backend,
-        dependencies,
-        workspace,
-        flowMaxInputTokens: loaded.flow.spec.maxInputTokens,
-        flowMaxAttempts: loaded.flow.spec.maxAttempts,
-        flowContext: loaded.flow.spec.context,
-        flowReads: loaded.flow.spec.reads,
-        flowTimeouts: loaded.flow.spec.timeouts,
-        flowBudgets: effectiveFlowBudgets(loaded.flow),
-        inputArtifacts,
-        configuration,
-        context: runtimeContext,
-        eventStore,
-        providerStore,
-        loadedSkillUsages,
-        contextKnowledge,
-        completedStages,
-        injectedAgentMemory,
-        changeRequestUrl,
-        changeRequest,
-        reworkTarget,
-        syncMetadata,
-        nextAttempt: (finalizerStageId) =>
-          nextAttemptForStage(
-            projectRun(eventStore.list(input.runId)),
-            finalizerStageId,
-          ),
-      });
-      await injectedAgentMemory.cleanup();
-      const finalEvidencePath = await writeRunEvidenceSnapshot(terminal.status);
-      changeRequest = await refreshTerminalChangeRequestEvidence({
-        runId: input.runId,
-        repoPath,
-        worktreePath,
-        changeRequest,
-        evidencePath: finalEvidencePath,
-        title: latestChangeTitle?.title,
-        dependencies,
-        providerStore,
-        providerName: changeRequestProvider,
-        context: runtimeContext,
-        eventStore,
-      }) ?? changeRequest;
-      changeRequestUrl = changeRequest?.url ?? changeRequestUrl;
-      await recordTaskIssueRunLinks({
-        repoPath,
-        runId: input.runId,
-        status: terminal.status,
-        evidencePath: finalEvidencePath,
-        changeRequestUrl,
-        scope: taskIssues,
-        dependencies,
-        providerStore,
-        context: runtimeContext,
-        eventStore,
-      });
-    };
-
-    const taskPlanController = createTaskPlanExecutionController({
-      startIndex,
-      states: taskPlanStates,
-      inputArtifacts,
-      stages: loaded.flow.spec.stages,
-      graph: loaded.graph,
-      completedStages,
-      eventStore,
+    const driver: StageDriver = {
       runId: input.runId,
-      context: runtimeContext,
-    });
-    while (!taskPlanController.done) {
-      const stageIndex = taskPlanController.stageIndex;
-      const stageId = taskPlanController.stageId;
-      const stage = loaded.flow.spec.stages.find((candidate) => candidate.id === stageId);
-      if (!stage) {
-        taskPlanController.next();
-        continue;
-      }
-      if (stage.alwaysRun) {
-        taskPlanController.next();
-        continue;
-      }
-      const taskPlanStage = taskPlanController.prepare(stage);
-      if (!taskPlanStage.run) continue;
-      const preparedTaskPlan = taskPlanStage.prepared;
-      const resumableStage = resumableStageById.get(stage.id);
-      const resumableAttempt = resumableStage?.attempts.at(-1);
-      const resumeApprovalAttempt =
-        stage.type === "approval" && resumableStage?.status === "awaiting-approval"
-          ? resumableAttempt
-          : undefined;
-      const resumeOperatorReview =
-        stage.type === "gate" &&
-        stage.mode === "review" &&
-        resumableStage?.status === "blocked" &&
-        submittedOperatorReview?.stageId === stage.id
-          ? submittedOperatorReview
-          : undefined;
-
-      if (stage.type === "agent" || stage.type === "judge" || stage.type === "command" || stage.type === "gate") {
-        const resumableAttempt = resumableStage?.attempts.at(-1);
-        if (resumableAttempt && resumableStage?.status === "interrupted") {
-          appendOrchestratorDecision({
-            eventStore,
-            runId: input.runId,
-            stage,
-            attempt: resumableAttempt.attempt,
-            maxAttempts: maxAttemptsForStage(stage, loaded.flow.spec.maxAttempts),
-            decision: { action: "fail", reason: "interrupted after process restart" },
-            context: runtimeContext,
-            error: "interrupted after process restart",
-          });
-          eventStore.append({
-            runId: input.runId,
-            stageId: stage.id,
-            attempt: resumableAttempt.attempt,
-            type: "stage.failed",
-            payload: {
-              error: "interrupted after process restart",
-              interrupted: true,
-            },
-          });
-          const failures = previousFailuresByStage.get(stage.id) ?? [];
-          failures.push({
-            attempt: resumableAttempt.attempt,
-            error: "interrupted after process restart",
-          });
-          previousFailuresByStage.set(stage.id, failures);
-          projection = projectRun(eventStore.list(input.runId));
-        }
-        if (resumableStage) resumableStageById.delete(stage.id);
-        const resumeSource =
-          resumableStage?.status ??
-          (projection.status === "blocked" ? "blocked" : "interrupted");
-        const maxAttempts = maxAttemptsForStage(stage, loaded.flow.spec.maxAttempts);
-        const previousFailures = previousFailuresByStage.get(stage.id) ?? [];
-        previousFailuresByStage.set(stage.id, previousFailures);
-        let reworkRequested = false;
-        let stageCompleted = false;
-        let completedAttempt: number | undefined;
-        let continuationAttemptAvailable = resumableStage !== undefined;
-
-        try {
-          if (resumeOperatorReview && stage.type === "gate") {
-            const recordedGate = recordGateStageResult({
-              runId: input.runId,
-              stage,
-              attempt: resumeOperatorReview.attempt ?? 1,
-              maxAttempts,
-              gateResult: resumeOperatorReview,
-              gateResults,
-              completedStages,
-              eventStore,
-              context: runtimeContext,
-            });
-            completedAttempt = recordedGate.gateAttempt;
-            attemptsByStage.set(
-              stage.id,
-              Math.max(attemptsByStage.get(stage.id) ?? 0, recordedGate.gateAttempt),
-            );
-            if (resumeOperatorReview.operatorReview) {
-              eventStore.append({
-                runId: input.runId,
-                stageId: stage.id,
-                attempt: recordedGate.gateAttempt,
-                type: "operator.review.resolved",
-                payload: redactRuntimeUnknown(
-                  {
-                    gateResultId: resumeOperatorReview.id,
-                    actor: resumeOperatorReview.operatorReview.actor,
-                    submittedAt: resumeOperatorReview.operatorReview.submittedAt,
-                    blocker: resumeOperatorReview.operatorReview.blocker,
-                    resolution: recordedGate.passed
-                      ? "blocker_overridden"
-                      : "review_failed",
-                  },
-                  runtimeContext,
-                ),
-              });
-            }
-            if (!recordedGate.passed) {
-              throw new Error(recordedGate.reason);
-            }
-            const operatorAttemptDirectory = join(
-              runDirectory,
-              "stages",
-              stage.id,
-              String(recordedGate.gateAttempt),
-            );
-            await executeStageHooks({
-              stage,
-              phase: "post",
-              attempt: recordedGate.gateAttempt,
-              attemptDirectory: operatorAttemptDirectory,
-              backend,
-              workspace,
-              flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-              context: runtimeContext,
-              eventStore,
-              runId: input.runId,
-            });
-            stageCompleted = true;
-          }
-
-          while (
-            !stageCompleted &&
-            ((attemptsByStage.get(stage.id) ?? 0) < maxAttempts ||
-              continuationAttemptAvailable)
-          ) {
-            continuationAttemptAvailable = false;
-            const attempt = (attemptsByStage.get(stage.id) ?? 0) + 1;
-            let effectiveAttempt = attempt;
-            attemptsByStage.set(stage.id, attempt);
-            const { attemptDirectory } = await prepareStageAttempt({
-              begin: {
-                eventStore,
-                runId: input.runId,
-                runDirectory,
-                stage,
-                attempt,
-                resumedFrom: resumeSource,
-                branchHeadSha: await currentBranchHeadSha(worktreePath),
-                directoryMode: "ensure",
-              },
-              prepare:
-                stage.type === "agent" || stage.type === "judge" || (stage.type === "gate" && stage.mode === "review")
-                  ? async () => await prepareStageInstructionFilesBeforeAttempt({
-                      stage,
-                      controls: resolveStageContextControls(loaded.flow, stage),
-                      injectedAgentMemory,
-                    })
-                  : undefined,
-              onStageChange: () =>
-                dependencies.cancellation?.onStageChange?.({
-                  stageId: stage.id,
-                  attempt,
-                }),
-              assertNotCancelled: () =>
-                throwIfRunCancelled(dependencies.cancellation, {
-                  stageId: stage.id,
-                  attempt,
-                }),
-            });
-
-            let failureError: string | undefined;
-            let budgetExceededError: BudgetExceededError | undefined;
-            let builtInRecommendation: OrchestratorRecommendation | undefined;
-            try {
-              await executeStageHooks({
-                stage,
-                phase: "pre",
-                attempt,
-                attemptDirectory,
-                backend,
-                workspace,
-                flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-                context: runtimeContext,
-                eventStore,
-                runId: input.runId,
-              });
-
-              if (stage.type === "judge") {
-                const contextControls = resolveStageContextControls(loaded.flow, stage);
-                const readPolicy = resolveStageReadPolicy(loaded.flow.spec.reads, stage);
-                const result = await withStageInstructionFiles({
-                  stage,
-                  controls: contextControls,
-                  attemptDirectory,
-                  workspace,
-                  injectedAgentMemory,
-                  run: async () => await executeAgentStage({
-                    runId: input.runId,
-                    stage,
-                    attempt,
-                    attemptDirectory,
-                    runDirectory,
-                    repoPath,
-                    backend,
-                    dependencies,
-                    workspace,
-                    flowName: loaded.flow.metadata.name,
-                    flowMaxInputTokens: loaded.flow.spec.maxInputTokens,
-                    flowMaxAttempts: loaded.flow.spec.maxAttempts,
-                    flowTimeouts: loaded.flow.spec.timeouts,
-                    flowQuestions: loaded.flow.spec.questions,
-                    flowBudgets: effectiveFlowBudgets(loaded.flow),
-                    inputArtifacts,
-                    configuration,
-                    context: runtimeContext,
-                    eventStore,
-                    providerStore,
-                    loadedSkillUsages,
-                    contextControls,
-                    readPolicy,
-                    contextKnowledge,
-                    previousFailures,
-                    taskPlanPrompt: preparedTaskPlan?.promptContext,
-                    agentSessions,
-                    completedStages,
-                    completeStage: false,
-                    resumedFrom: resumeSource,
-                    onAttemptSelected: (selectedAttempt) => {
-                      effectiveAttempt = selectedAttempt;
-                      attemptsByStage.set(stage.id, selectedAttempt);
-                    },
-                  }),
-                });
-                effectiveAttempt = result.selectedAttempt;
-                const judgeOutput = await readJudgeOutput({
-                  stage,
-                  attempt: effectiveAttempt,
-                  attemptDirectory: selectedAttemptDirectory({
-                    runDirectory,
-                    stageId: stage.id,
-                    currentAttempt: attempt,
-                    currentAttemptDirectory: attemptDirectory,
-                    selectedAttempt: effectiveAttempt,
-                  }),
-                  context: runtimeContext,
-                });
-                if (!judgeOutput.result) throw new Error(judgeOutput.reason);
-                eventStore.append({
-                  runId: input.runId,
-                  stageId: stage.id,
-                  attempt: effectiveAttempt,
-                  type: "judge.completed",
-                  payload: redactRuntimeUnknown({
-                    verdict: judgeOutput.result.verdict,
-                    findings: judgeOutput.result.findings,
-                    evidence: judgeOutput.result.evidence,
-                    reworkTarget: judgeOutput.result.reworkTarget,
-                    reworkInstructions: judgeOutput.result.reworkInstructions,
-                    humanReviewReason: judgeOutput.result.humanReviewReason,
-                    outputPath: judgeOutput.outputPath,
-                    criteria: stage.criteria,
-                  }, runtimeContext),
-                });
-                if (judgeOutput.result.verdict !== "PASS") {
-                  builtInRecommendation = judgeRecommendation({
-                    stage,
-                    result: judgeOutput.result,
-                    graph: loaded.graph,
-                    validReworkStages: validReworkStagesForStage(stage.id, loaded.graph),
-                  });
-                  throw new Error(`judge returned ${judgeOutput.result.verdict}`);
-                }
-                markStageCompleted(completedStages, stage.id);
-                appendSuccessfulStageCompletion({
-                  eventStore,
-                  runId: input.runId,
-                  stage,
-                  attempt: effectiveAttempt,
-                  maxAttempts,
-                  context: runtimeContext,
-                  payload: {
-                    outputs: stageOutputIds(stage),
-                    verdict: judgeOutput.result.verdict,
-                    criteria: stage.criteria,
-                  },
-                });
-                await executeStageHooks({
-                  stage,
-                  phase: "post",
-                  attempt: effectiveAttempt,
-                  attemptDirectory: selectedAttemptDirectory({
-                    runDirectory,
-                    stageId: stage.id,
-                    currentAttempt: attempt,
-                    currentAttemptDirectory: attemptDirectory,
-                    selectedAttempt: effectiveAttempt,
-                  }),
-                  backend,
-                  workspace,
-                  flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-                  context: runtimeContext,
-                  eventStore,
-                  runId: input.runId,
-                });
-                stageCompleted = true;
-                completedAttempt = effectiveAttempt;
-                break;
-              }
-
-              if (stage.type === "agent") {
-                const contextControls = resolveStageContextControls(loaded.flow, stage);
-              const readPolicy = resolveStageReadPolicy(loaded.flow.spec.reads, stage);
-                const operatorQuestion = answeredOperatorQuestion?.stageId === stage.id
-                  ? answeredOperatorQuestion : undefined;
-                // A timeout failure is one continuation failure, not a persistent retry veto.
-                if (operatorQuestion?.answer?.failStage) answeredOperatorQuestion = undefined;
-                const result = await withStageInstructionFiles({
-                  stage,
-                  controls: contextControls,
-                  attemptDirectory,
-                  workspace,
-                  injectedAgentMemory,
-                  run: async () => await executeAgentStage({
-                    runId: input.runId,
-                    stage,
-                    attempt,
-                    attemptDirectory,
-                    runDirectory,
-                    repoPath,
-                    backend,
-                    dependencies,
-                    workspace,
-                    flowName: loaded.flow.metadata.name,
-                    flowMaxInputTokens: loaded.flow.spec.maxInputTokens,
-                    flowMaxAttempts: loaded.flow.spec.maxAttempts,
-                    flowTimeouts: loaded.flow.spec.timeouts,
-                    flowQuestions: loaded.flow.spec.questions,
-                    flowBudgets: effectiveFlowBudgets(loaded.flow),
-                    inputArtifacts,
-                    configuration,
-                    context: runtimeContext,
-                    eventStore,
-                    providerStore,
-                    loadedSkillUsages,
-                    contextControls,
-                    readPolicy,
-                    contextKnowledge,
-                    previousFailures,
-                    operatorQuestion,
-                    taskPlanPrompt: preparedTaskPlan?.promptContext,
-                    agentSessions,
-                    completedStages,
-                    resumedFrom: resumeSource,
-                    onAttemptSelected: (selectedAttempt) => {
-                      effectiveAttempt = selectedAttempt;
-                      attemptsByStage.set(stage.id, selectedAttempt);
-                      dependencies.cancellation?.onStageChange?.({
-                        stageId: stage.id,
-                        attempt: selectedAttempt,
-                      });
-                    },
-                  }),
-                });
-                effectiveAttempt = result.selectedAttempt;
-                await executeStageHooks({
-                  stage,
-                  phase: "post",
-                  attempt: effectiveAttempt,
-                  attemptDirectory: selectedAttemptDirectory({
-                    runDirectory,
-                    stageId: stage.id,
-                    currentAttempt: attempt,
-                    currentAttemptDirectory: attemptDirectory,
-                    selectedAttempt: effectiveAttempt,
-                  }),
-                  backend,
-                  workspace,
-                  flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-                  context: runtimeContext,
-                  eventStore,
-                  runId: input.runId,
-                });
-                stageCompleted = true;
-                completedAttempt = effectiveAttempt;
-                break;
-              }
-
-              if (stage.type === "gate") {
-                const contextControls = resolveStageContextControls(loaded.flow, stage);
-              const readPolicy = resolveStageReadPolicy(loaded.flow.spec.reads, stage);
-                const runGate = async () => await executeGateStage({
-                  runId: input.runId,
-                  attempt,
-                  stage,
-                  repoPath,
-                  backend,
-                  dependencies,
-                  workspace,
-                  flowName: loaded.flow.metadata.name,
-                  flowMaxInputTokens: loaded.flow.spec.maxInputTokens,
-                  flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-                  flowTimeouts: loaded.flow.spec.timeouts,
-                  flowBudgets: effectiveFlowBudgets(loaded.flow),
-                  inputArtifacts,
-                  configuration,
-                  attemptDirectory,
-                  context: runtimeContext,
-                  eventStore,
-                  providerStore,
-                  loadedSkillUsages,
-                  contextControls,
-                  readPolicy,
-                  contextKnowledge,
-                  previousFailures,
-                  taskPlanPrompt: preparedTaskPlan?.promptContext,
-                  agentSessions,
-                });
-                const { result: gateResult, budgetFailure } = stage.mode === "review"
-                  ? await withStageInstructionFiles({
-                      stage,
-                      controls: contextControls,
-                      attemptDirectory,
-                      workspace,
-                      injectedAgentMemory,
-                      run: runGate,
-                    })
-                  : await (async () => {
-                      await injectedAgentMemory.cleanup();
-                      return await runGate();
-                    })();
-                const recordedGate = recordGateStageResult({
-                  runId: input.runId,
-                  stage,
-                  attempt,
-                  maxAttempts,
-                  gateResult,
-                  gateResults,
-                  completedStages,
-                  eventStore,
-                  context: runtimeContext,
-                });
-                effectiveAttempt = recordedGate.gateAttempt;
-                attemptsByStage.set(stage.id, effectiveAttempt);
-                if (
-                  !recordedGate.passed &&
-                  (stage.mode === "review" || stage.mode === "review-aggregate")
-                ) {
-                  builtInRecommendation = reviewGateVerdictRecommendation({
-                    stage,
-                    gateResult,
-                    graph: loaded.graph,
-                    validReworkStages: validReworkStagesForStage(
-                      stage.id,
-                      loaded.graph,
-                    ),
-                  });
-                }
-                if (budgetFailure) {
-                  if (recordedGate.passed) {
-                    budgetFailure.stageCompleted = true;
-                  }
-                  throw budgetFailure;
-                }
-                if (recordedGate.passed) {
-                  await executeStageHooks({
-                    stage,
-                    phase: "post",
-                    attempt: effectiveAttempt,
-                    attemptDirectory: selectedAttemptDirectory({
-                      runDirectory,
-                      stageId: stage.id,
-                      currentAttempt: attempt,
-                      currentAttemptDirectory: attemptDirectory,
-                      selectedAttempt: effectiveAttempt,
-                    }),
-                    backend,
-                    workspace,
-                    flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-                    context: runtimeContext,
-                    eventStore,
-                    runId: input.runId,
-                    cancellation: dependencies.cancellation,
-                  });
-                  stageCompleted = true;
-                  completedAttempt = effectiveAttempt;
-                  break;
-                }
-                failureError = recordedGate.reason;
-              } else {
-                await injectedAgentMemory.cleanup();
-                const commandResult = await executeCommandStage({
-                  configuration,
-                  runId: input.runId,
-                  stage,
-                  attempt,
-                  attemptDirectory,
-                  runDirectory,
-                  backend,
-                  workspace,
-                  flowMaxAttempts: loaded.flow.spec.maxAttempts,
-                  flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-                  flowTimeouts: loaded.flow.spec.timeouts,
-                flowBudgets: effectiveFlowBudgets(loaded.flow),
-                  context: runtimeContext,
-                  eventStore,
-                  inputArtifacts,
-                  completedStages,
-                  cancellation: dependencies.cancellation,
-                });
-                if (!commandResult.failureError) {
-                  await executeStageHooks({
-                    stage,
-                    phase: "post",
-                    attempt,
-                    attemptDirectory,
-                    backend,
-                    workspace,
-                    flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-                    context: runtimeContext,
-                    eventStore,
-                    runId: input.runId,
-                  });
-                  stageCompleted = true;
-                  completedAttempt = attempt;
-                  break;
-                }
-                failureError =
-                  redactRuntimeText(commandResult.failureError, runtimeContext) ?? "";
-              }
-            } catch (error) {
-              if (error instanceof RunCancelledError) {
-                throw error;
-              }
-              if (error instanceof BudgetExceededError) {
-                budgetExceededError = error;
-                // A stage that finished and registered its outputs before the
-                // breach keeps its completion. Only the run stops.
-                if (!error.stageCompleted) {
-                  invalidateCompletedStagesFrom(
-                    completedStages,
-                    loaded.graph.order,
-                    stageIndex,
-                  );
-                }
-                failureError = error.message;
-              } else {
-                const blocked =
-                  error instanceof RunBlockedError
-                    ? error
-                    : (stage.type === "agent" || stage.type === "judge")
-                      ? classifyRunBlockedError({
-                          stageId: stage.id,
-                          runtime: stageRuntimeCandidates(stage)[0]?.runtime,
-                          error,
-                          context: runtimeContext,
-                        })
-                      : undefined;
-                if (blocked) {
-                  if (!blocked.eventsAppended) {
-                    appendRunBlockedEvents({
-                      eventStore,
-                      runId: input.runId,
-                      stageId: stage.id,
-                      attempt: effectiveAttempt,
-                      blocker: blocked.blocker,
-                      context: runtimeContext,
-                    });
-                  }
-                  throw blocked;
-                }
-                invalidateCompletedStagesFrom(
-                  completedStages,
-                  loaded.graph.order,
-                  stageIndex,
-                );
-                failureError = error instanceof Error ? error.message : String(error);
-              }
-            }
-
-            const error = failureError ?? "unknown error";
-            // `projectRun` deletes a stage from `completedStages` on
-            // `stage.failed`, so emitting it here would undo the completion
-            // this stage earned and make a resume repeat paid work.
-            if (!budgetExceededError?.stageCompleted) {
-              eventStore.append({
-                runId: input.runId,
-                stageId: stage.id,
-                attempt: effectiveAttempt,
-                type: "stage.failed",
-                payload: redactRuntimeUnknown({ error }, runtimeContext),
-              });
-            }
-            if (budgetExceededError) {
-              eventStore.append({
-                runId: input.runId,
-                type: "run.failed",
-                payload: redactRuntimeUnknown({
-                  stageId: stage.id,
-                  error,
-                  reason: "budget_exceeded",
-                }, runtimeContext),
-              });
-              throw budgetExceededError;
-            }
-            const policy = applyFailedStagePolicy({
-              stage,
-              attempt: effectiveAttempt,
-              maxAttempts,
-              flowMaxAttempts: loaded.flow.spec.maxAttempts,
-              diagnosisAttempt:
-                previousFailures.filter(
-                  (failure) => failure.error !== "interrupted after process restart",
-                ).length + 1,
-              error,
-              builtInRecommendation,
-              dependencies,
-              stages: loaded.flow.spec.stages,
-              graph: loaded.graph,
-              attemptsByStage,
-              previousFailuresByStage,
-              completedStages,
-              reworkEdges,
-              eventStore,
-              runId: input.runId,
-              context: runtimeContext,
-            });
-            if (policy.action === "retry") continue;
-            taskPlanController.rework(policy.stageIndex, policy.request);
-            reworkRequested = true;
-            break;
-          }
-
-          if (reworkRequested) continue;
-          if (!stageCompleted) {
-            const usedAttempts = attemptsByStage.get(stage.id) ?? 0;
-            throw new Error(
-              `${stage.type} failed after ${usedAttempts} of ${maxAttempts} attempts`,
-            );
-          }
-          taskPlanController.complete(stage, preparedTaskPlan, completedAttempt);
-          projection = projectRun(eventStore.list(input.runId));
-          await writeRunEvidenceSnapshot();
-          continue;
-        } catch (error) {
-          if (error instanceof RunCancelledError) {
-            appendRunCancelledEvent({
-              eventStore,
-              runId: input.runId,
-              error,
-              context: runtimeContext,
-            });
-            await injectedAgentMemory.cleanup();
-            const finalEvidencePath = await writeRunEvidenceSnapshot("cancelled");
-            await recordTaskIssueRunLinks({
-              repoPath,
-              runId: input.runId,
-              status: "cancelled",
-              evidencePath: finalEvidencePath,
-              changeRequestUrl,
-              scope: taskIssues,
-              dependencies,
-              providerStore,
-              context: runtimeContext,
-              eventStore,
-            });
-            throw error;
-          }
-          const blocked =
-            error instanceof RunBlockedError
-              ? error
-              : stage.type === "agent"
-                ? classifyRunBlockedError({
-                    stageId: stage.id,
-                    runtime: stageRuntimeCandidates(stage)[0]?.runtime,
-                    error,
-                    context: runtimeContext,
-                  })
-                : undefined;
-          if (blocked) {
-            if (!blocked.eventsAppended) {
-              appendRunBlockedEvents({
-                eventStore,
-                runId: input.runId,
-                stageId: stage.id,
-                attempt: attemptsByStage.get(stage.id) ?? 1,
-                blocker: blocked.blocker,
-                context: runtimeContext,
-              });
-            }
-            await finalizeResumedTerminal({
-              status: "blocked",
-              stageId: stage.id,
-              error: blocked.message,
-              blocker: blocked.blocker,
-            });
-            throw blocked;
-          }
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          const failedAttempt = attemptsByStage.get(stage.id) ?? 1;
-          const terminalEvents = eventStore.list(input.runId);
-          if (
-            !terminalEvents.some(
-              (event) =>
-                event.type === "stage.failed" &&
-                event.stageId === stage.id &&
-                event.attempt === failedAttempt,
-            )
-          ) {
-            eventStore.append({
-              runId: input.runId,
-              stageId: stage.id,
-              attempt: failedAttempt,
-              type: "stage.failed",
-              payload: redactRuntimeUnknown({ error: errorMessage }, runtimeContext),
-            });
-          }
-          if (
-            !terminalEvents.some(
-              (event) =>
-                event.type === "orchestrator.decision" &&
-                event.stageId === stage.id &&
-                event.attempt === failedAttempt,
-            )
-          ) {
-            appendOrchestratorDecision({
-              eventStore,
-              runId: input.runId,
-              stage,
-              attempt: failedAttempt,
-              maxAttempts,
-              decision: {
-                action: "fail",
-                reason: `${stage.type} failed after ${failedAttempt} of ${maxAttempts} attempts: ${errorMessage}`,
-              },
-              context: runtimeContext,
-              error: errorMessage,
-            });
-          }
-          if (!terminalEvents.some((event) => event.type === "run.failed")) {
-            eventStore.append({
-              runId: input.runId,
-              type: "run.failed",
-              payload: redactRuntimeUnknown(
-                { stageId: stage.id, error: errorMessage },
-                runtimeContext,
-              ),
-            });
-          }
-          await finalizeResumedTerminal({
-            status: "failed",
-            stageId: stage.id,
-            error: errorMessage,
-          });
-          throw error;
-        }
-      }
-
-      const attempt =
-        resumeApprovalAttempt?.attempt ??
-        resumeOperatorReview?.attempt ??
-        nextAttemptForStage(projection, stage.id);
-      let effectiveAttempt = attempt;
-      let attemptDirectory = join(runDirectory, "stages", stage.id, String(attempt));
-      if (resumableAttempt && resumableStage?.status === "interrupted") {
-        appendOrchestratorDecision({
-          eventStore,
-          runId: input.runId,
-          stage,
-          attempt: resumableAttempt.attempt,
-          maxAttempts: maxAttemptsForStage(stage, loaded.flow.spec.maxAttempts),
-          decision: {
-            action: "fail",
-            reason: "interrupted after process restart",
-          },
-          context: runtimeContext,
-          error: "interrupted after process restart",
-        });
-        eventStore.append({
-          runId: input.runId,
-          stageId: stage.id,
-          attempt: resumableAttempt.attempt,
-          type: "stage.failed",
-          payload: {
-            error: "interrupted after process restart",
-            interrupted: true,
-          },
-        });
-        resumableStageById.delete(stage.id);
-        projection = projectRun(eventStore.list(input.runId));
-      } else if (resumableStage) {
-        resumableStageById.delete(stage.id);
-      }
-      const resumeSource =
-        resumableStage?.status ??
-        (projection.status === "blocked" ? "blocked" : "interrupted");
-      if (!resumeApprovalAttempt && !resumeOperatorReview) {
-        const stageAttempt = await beginStageAttempt({
-          eventStore,
-          runId: input.runId,
-          runDirectory,
-          stage,
-          attempt,
-          resumedFrom: resumeSource,
-          branchHeadSha: await currentBranchHeadSha(worktreePath),
-          directoryMode: "ensure",
-        });
-        attemptDirectory = stageAttempt.attemptDirectory;
-      } else {
-        attemptDirectory = await requireContainedAttemptDirectory({
-          runDirectory,
-          attemptDirectory,
-        });
-      }
-      dependencies.cancellation?.onStageChange?.({ stageId: stage.id, attempt });
-      throwIfRunCancelled(dependencies.cancellation, { stageId: stage.id, attempt });
-
-      try {
-        if (!resumeApprovalAttempt && !resumeOperatorReview) {
-          await executeStageHooks({
-            stage,
-            phase: "pre",
-            attempt,
-            attemptDirectory,
-            backend,
-            workspace,
-            flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-            context: runtimeContext,
-            eventStore,
-            runId: input.runId,
-            cancellation: dependencies.cancellation,
-          });
-        }
-
-        if (stage.type === "sync-change") {
-          await injectedAgentMemory.cleanup();
-          syncMetadata = await executeSyncChangeStage({
-            runId: input.runId,
-            stage,
-            attempt,
-            attemptDirectory,
-            worktreePath,
-            reworkTarget,
-            inputArtifacts,
-            context: runtimeContext,
-            eventStore,
-            completedStages,
-          });
-          await executeStageHooks({
-            stage,
-            phase: "post",
-            attempt,
-            attemptDirectory,
-            backend,
-            workspace,
-            flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-            context: runtimeContext,
-            eventStore,
-            runId: input.runId,
-          });
-          projection = projectRun(eventStore.list(input.runId));
-          await writeRunEvidenceSnapshot();
-          taskPlanController.next();
-          continue;
-        }
-
-        if (stage.type === "publish-change") {
-          const published = await executePublishChangeStage({
-            runId: input.runId,
-            stage,
-            attempt,
-            attemptDirectory,
-            runWorkItemType,
-            flowName: loaded.flow.metadata.name,
-            repoPath,
-            worktreePath,
-            baseBranch,
-            branchName,
-            inputArtifacts,
-            backend,
-            workspace,
-            injectedAgentMemory,
-            dependencies,
-            providerStore,
-            context: runtimeContext,
-            eventStore,
-            completedStages,
-            onChangeTitleResolved: (title) => {
-              latestChangeTitle = title;
-            },
-            writeEvidenceSnapshot: writeRunEvidenceSnapshot,
-          });
-          changeRequestUrl = published.changeRequestUrl;
-          changeRequest = published.changeRequest;
-          changeRequestProvider = stage.provider ?? "github";
-          await executeStageHooks({
-            stage,
-            phase: "post",
-            attempt,
-            attemptDirectory,
-            backend,
-            workspace,
-            flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-            context: runtimeContext,
-            eventStore,
-            runId: input.runId,
-          });
-          projection = projectRun(eventStore.list(input.runId));
-          await writeRunEvidenceSnapshot();
-          taskPlanController.next();
-          continue;
-        }
-
-        if (stage.type === "update-change") {
-          const updated = await executeUpdateChangeStage({
-            runId: input.runId,
-            stage,
-            attempt,
-            attemptDirectory,
-            runWorkItemType,
-            flowName: loaded.flow.metadata.name,
-            repoPath,
-            worktreePath,
-            reworkTarget,
-            reworkProvider,
-            inputArtifacts,
-            injectedAgentMemory,
-            dependencies,
-            providerStore,
-            context: runtimeContext,
-            eventStore,
-            completedStages,
-            onChangeTitleResolved: (title) => {
-              latestChangeTitle = title;
-            },
-            recordTitleBeforeUpdate: true,
-            writeEvidenceSnapshot: writeRunEvidenceSnapshot,
-          });
-          changeRequestUrl = updated.changeRequestUrl;
-          changeRequest = updated.changeRequest;
-          changeRequestProvider = reworkTarget?.provider ?? stage.provider ?? "github";
-          await executeStageHooks({
-            stage,
-            phase: "post",
-            attempt,
-            attemptDirectory,
-            backend,
-            workspace,
-            flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-            context: runtimeContext,
-            eventStore,
-            runId: input.runId,
-          });
-          projection = projectRun(eventStore.list(input.runId));
-          await writeRunEvidenceSnapshot();
-          taskPlanController.next();
-          continue;
-        }
-
-        if (stage.type === "approval") {
-          await injectedAgentMemory.cleanup();
-          const approval = await executeApprovalStage({
-            runId: input.runId,
-            stage,
-            attempt,
-            flowTimeouts: loaded.flow.spec.timeouts,
-            context: runtimeContext,
-            eventStore,
-            completedStages,
-          });
-          if (approval.status === "awaiting-approval") {
-            await injectedAgentMemory.cleanup();
-            await writeRunEvidenceSnapshot();
-            return {
-              runId: input.runId,
-              branchName,
-              worktreePath,
-              status: "awaiting-approval",
-              approvalId: approval.approvalId,
-              changeRequestUrl,
-              changeRequest,
-              previousHeadSha: reworkTarget?.previousHeadSha,
-              updatedHeadSha: reworkTarget?.updatedHeadSha,
-            };
-          }
-          await executeStageHooks({
-            stage,
-            phase: "post",
-            attempt,
-            attemptDirectory,
-            backend,
-            workspace,
-            flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
-            context: runtimeContext,
-            eventStore,
-            runId: input.runId,
-          });
-          projection = projectRun(eventStore.list(input.runId));
-          await writeRunEvidenceSnapshot();
-          taskPlanController.next();
-          continue;
-        }
-      } catch (error) {
-        if (error instanceof RunCancelledError) {
-          appendRunCancelledEvent({
-            eventStore,
-            runId: input.runId,
-            error,
-            context: runtimeContext,
-          });
-          await injectedAgentMemory.cleanup();
-          const finalEvidencePath = await writeRunEvidenceSnapshot("cancelled");
-          await recordTaskIssueRunLinks({
-            repoPath,
-            runId: input.runId,
-            status: "cancelled",
-            evidencePath: finalEvidencePath,
-            changeRequestUrl,
-            scope: taskIssues,
-            dependencies,
-            providerStore,
-            context: runtimeContext,
-            eventStore,
-          });
-          throw error;
-        }
-        const blocked = error instanceof RunBlockedError ? error : undefined;
-        if (blocked) {
-          if (!blocked.eventsAppended) {
-            appendRunBlockedEvents({
-              eventStore,
-              runId: input.runId,
-              stageId: stage.id,
-              attempt: effectiveAttempt,
-              blocker: blocked.blocker,
-              context: runtimeContext,
-            });
-          }
-          await runAlwaysRunFinalizers({
-            runId: input.runId,
-            flowName: loaded.flow.metadata.name,
-            workItemId: projection.workItemId,
-            stages: loaded.flow.spec.stages,
-            terminalStatus: "blocked",
-            terminalStageId: blocked.blocker.stageId ?? stage.id,
-            terminalError: blocked.message,
-            blocker: blocked.blocker,
-            runDirectory,
-            repoPath,
-            backend,
-            dependencies,
-            workspace,
-            flowMaxInputTokens: loaded.flow.spec.maxInputTokens,
-            flowMaxAttempts: loaded.flow.spec.maxAttempts,
-            flowContext: loaded.flow.spec.context,
-            flowReads: loaded.flow.spec.reads,
-            flowTimeouts: loaded.flow.spec.timeouts,
-            flowBudgets: effectiveFlowBudgets(loaded.flow),
-            inputArtifacts,
-            configuration,
-            context: runtimeContext,
-            eventStore,
-            providerStore,
-            loadedSkillUsages,
-            contextKnowledge,
-            completedStages,
-            injectedAgentMemory,
-            changeRequestUrl,
-            changeRequest,
-            reworkTarget,
-            syncMetadata,
-            nextAttempt: (finalizerStageId) =>
-              nextAttemptForStage(projectRun(eventStore.list(input.runId)), finalizerStageId),
-          });
-          await injectedAgentMemory.cleanup();
-          const finalEvidencePath = await writeRunEvidenceSnapshot("blocked");
-          changeRequest = await refreshTerminalChangeRequestEvidence({
-            runId: input.runId,
-            repoPath,
-            worktreePath,
-            changeRequest,
-            evidencePath: finalEvidencePath,
-            title: latestChangeTitle?.title,
-            dependencies,
-            providerStore,
-            providerName: changeRequestProvider,
-            context: runtimeContext,
-            eventStore,
-          }) ?? changeRequest;
-          changeRequestUrl = changeRequest?.url ?? changeRequestUrl;
-          await recordTaskIssueRunLinks({
-            repoPath,
-            runId: input.runId,
-            status: "blocked",
-            evidencePath: finalEvidencePath,
-            changeRequestUrl,
-            scope: taskIssues,
-            dependencies,
-            providerStore,
-            context: runtimeContext,
-            eventStore,
-          });
-          throw blocked;
-        }
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        const currentStageIndex = loaded.graph.order.indexOf(stage.id);
-        if (currentStageIndex >= 0) {
-          invalidateCompletedStagesFrom(
-            completedStages,
-            loaded.graph.order,
-            currentStageIndex,
-          );
-        }
-        eventStore.append({
-          runId: input.runId,
-          stageId: stage.id,
-          attempt: effectiveAttempt,
-          type: "stage.failed",
-          payload: redactRuntimeUnknown({
-            error: errorMessage,
-          }, runtimeContext),
-        });
-        appendOrchestratorDecision({
-          eventStore,
-          runId: input.runId,
-          stage,
-          attempt: effectiveAttempt,
-          maxAttempts: 1,
-          decision: {
-            action: "fail",
-            reason: `${stage.type} failed after ${effectiveAttempt} of 1 attempts: ${errorMessage}`,
-          },
-          context: runtimeContext,
-          error: errorMessage,
-        });
-        eventStore.append({
-          runId: input.runId,
-          type: "run.failed",
-          payload: redactRuntimeUnknown({
-            stageId: stage.id,
-            error: errorMessage,
-          }, runtimeContext),
-        });
-        await runAlwaysRunFinalizers({
-          runId: input.runId,
-          flowName: loaded.flow.metadata.name,
-          workItemId: projection.workItemId,
-          stages: loaded.flow.spec.stages,
-          terminalStatus: "failed",
-          terminalStageId: stage.id,
-          terminalError: errorMessage,
-          runDirectory,
-          repoPath,
-          backend,
-          dependencies,
-          workspace,
-          flowMaxInputTokens: loaded.flow.spec.maxInputTokens,
-          flowMaxAttempts: loaded.flow.spec.maxAttempts,
-          flowContext: loaded.flow.spec.context,
-          flowReads: loaded.flow.spec.reads,
-          flowTimeouts: loaded.flow.spec.timeouts,
-          flowBudgets: effectiveFlowBudgets(loaded.flow),
-          inputArtifacts,
-          configuration,
-          context: runtimeContext,
-          eventStore,
-          providerStore,
-          loadedSkillUsages,
-          contextKnowledge,
-          completedStages,
-          injectedAgentMemory,
-          changeRequestUrl,
-          changeRequest,
-          reworkTarget,
-          syncMetadata,
-          nextAttempt: (finalizerStageId) =>
-            nextAttemptForStage(projectRun(eventStore.list(input.runId)), finalizerStageId),
-        });
-        await injectedAgentMemory.cleanup();
-        const finalEvidencePath = await writeRunEvidenceSnapshot("failed");
-        changeRequest = await refreshTerminalChangeRequestEvidence({
-          runId: input.runId,
-          repoPath,
-          worktreePath,
-          changeRequest,
-          evidencePath: finalEvidencePath,
-          title: latestChangeTitle?.title,
-          dependencies,
-          providerStore,
-          providerName: changeRequestProvider,
-          context: runtimeContext,
-          eventStore,
-        }) ?? changeRequest;
-        changeRequestUrl = changeRequest?.url ?? changeRequestUrl;
-        await recordTaskIssueRunLinks({
-          repoPath,
-          runId: input.runId,
-          status: "failed",
-          evidencePath: finalEvidencePath,
-          changeRequestUrl,
-          scope: taskIssues,
-          dependencies,
-          providerStore,
-          context: runtimeContext,
-          eventStore,
-        });
-        throw error;
-      }
-    }
-
+      repoPath,
+      runDirectory,
+      worktreePath,
+      branchName,
+      baseBranch,
+      runWorkItemType,
+      workItemId: projection.workItemId,
+      taskIssues,
+      loaded,
+      configuration,
+      inputArtifacts,
+      backend,
+      workspace,
+      providerStore,
+      dependencies,
+      eventStore,
+      runtimeContext,
+      injectedAgentMemory,
+      loadedSkillUsages,
+      contextKnowledge,
+      agentSessions,
+      completedStages,
+      gateResults,
+      attemptsByStage,
+      previousFailuresByStage,
+      reworkEdges,
+      taskPlanStates,
+      reworkTarget,
+      reworkProvider,
+      outcome,
+      projection,
+      writeRunEvidenceSnapshot,
+    };
     try {
+      const paused = await driveStages(driver, {
+        startIndex,
+        resume: {
+          stages: resumableStageById,
+          operatorReview: submittedOperatorReview,
+          answeredOperatorQuestion,
+        },
+      });
+      if (paused) {
+        return {
+          runId: input.runId,
+          branchName,
+          worktreePath,
+          status: "awaiting-approval",
+          approvalId: paused.approvalId,
+          changeRequestUrl: outcome.changeRequestUrl,
+          changeRequest: outcome.changeRequest,
+          previousHeadSha: reworkTarget?.previousHeadSha,
+          updatedHeadSha: reworkTarget?.updatedHeadSha,
+        };
+      }
       await executeFlowHooks({
         hooks: loaded.flow.spec.hooks?.postRun ?? [],
         phase: "postRun",
@@ -17235,43 +16370,7 @@ async function resumeRunOnce(
         cancellation: dependencies.cancellation,
       });
     } catch (error) {
-      if (error instanceof RunCancelledError) {
-        appendRunCancelledEvent({
-          eventStore,
-          runId: input.runId,
-          error,
-          context: runtimeContext,
-        });
-        await injectedAgentMemory.cleanup();
-        const finalEvidencePath = await writeRunEvidenceSnapshot("cancelled");
-        await recordTaskIssueRunLinks({
-          repoPath,
-          runId: input.runId,
-          status: "cancelled",
-          evidencePath: finalEvidencePath,
-          changeRequestUrl,
-          scope: taskIssues,
-          dependencies,
-          providerStore,
-          context: runtimeContext,
-          eventStore,
-        });
-        throw error;
-      }
-      await injectedAgentMemory.cleanup();
-      const finalEvidencePath = await writeRunEvidenceSnapshot("failed");
-      await recordTaskIssueRunLinks({
-        repoPath,
-        runId: input.runId,
-        status: "failed",
-        evidencePath: finalEvidencePath,
-        changeRequestUrl,
-        scope: taskIssues,
-        dependencies,
-        providerStore,
-        context: runtimeContext,
-        eventStore,
-      });
+      await settleStoppedRun(driver, error);
       throw error;
     }
 
@@ -17301,10 +16400,10 @@ async function resumeRunOnce(
       contextKnowledge,
       completedStages,
       injectedAgentMemory,
-      changeRequestUrl,
-      changeRequest,
+      changeRequestUrl: outcome.changeRequestUrl,
+      changeRequest: outcome.changeRequest,
       reworkTarget,
-      syncMetadata,
+      syncMetadata: outcome.syncMetadata,
       nextAttempt: (finalizerStageId) =>
         nextAttemptForStage(projectRun(eventStore.list(input.runId)), finalizerStageId),
     });
@@ -17324,26 +16423,26 @@ async function resumeRunOnce(
       });
     }
     const finalEvidencePath = await writeRunEvidenceSnapshot("completed");
-    changeRequest = await refreshTerminalChangeRequestEvidence({
+    outcome.changeRequest = await refreshTerminalChangeRequestEvidence({
       runId: input.runId,
       repoPath,
       worktreePath,
-      changeRequest,
+      changeRequest: outcome.changeRequest,
       evidencePath: finalEvidencePath,
-      title: latestChangeTitle?.title,
+      title: outcome.latestChangeTitle?.title,
       dependencies,
       providerStore,
-      providerName: changeRequestProvider,
+      providerName: outcome.changeRequestProvider,
       context: runtimeContext,
       eventStore,
-    }) ?? changeRequest;
-    changeRequestUrl = changeRequest?.url ?? changeRequestUrl;
+    }) ?? outcome.changeRequest;
+    outcome.changeRequestUrl = outcome.changeRequest?.url ?? outcome.changeRequestUrl;
     await recordTaskIssueRunLinks({
       repoPath,
       runId: input.runId,
       status: "completed",
       evidencePath: finalEvidencePath,
-      changeRequestUrl,
+      changeRequestUrl: outcome.changeRequestUrl,
       scope: taskIssues,
       dependencies,
       providerStore,
@@ -17367,8 +16466,8 @@ async function resumeRunOnce(
           repoPath,
           branchName,
           worktreePath,
-          changeRequestUrl,
-          changeRequest,
+          changeRequestUrl: outcome.changeRequestUrl,
+          changeRequest: outcome.changeRequest,
           trigger: projection.trigger,
           priorRunId: projection.priorRunId,
           changeRequestTarget: reworkTarget
@@ -17380,7 +16479,7 @@ async function resumeRunOnce(
                 updatedHeadSha: reworkTarget.updatedHeadSha,
               }
             : undefined,
-          sync: syncMetadata,
+          sync: outcome.syncMetadata,
           gates: gateResults,
           completedStages,
           taskScope: resumedTaskScope,
@@ -17410,8 +16509,8 @@ async function resumeRunOnce(
         runId: input.runId,
         type: "run.completed",
         payload: redactRuntimeUnknown({
-          changeRequestUrl,
-          changeRequest,
+          changeRequestUrl: outcome.changeRequestUrl,
+          changeRequest: outcome.changeRequest,
           trigger: projection.trigger,
           priorRunId: projection.priorRunId,
           changeRequestTarget: reworkTarget
@@ -17423,7 +16522,7 @@ async function resumeRunOnce(
                 updatedHeadSha: reworkTarget.updatedHeadSha,
               }
             : undefined,
-          sync: syncMetadata,
+          sync: outcome.syncMetadata,
           taskScope: resumedTaskScope,
           taskIssues,
         }, runtimeContext),
@@ -17440,8 +16539,8 @@ async function resumeRunOnce(
       runId: input.runId,
       branchName,
       worktreePath,
-      changeRequestUrl,
-      changeRequest,
+      changeRequestUrl: outcome.changeRequestUrl,
+      changeRequest: outcome.changeRequest,
       previousHeadSha: reworkTarget?.previousHeadSha,
       updatedHeadSha: reworkTarget?.updatedHeadSha,
     };
