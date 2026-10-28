@@ -1,3 +1,5 @@
+import type { TypedRunEventPayloads, TypedRunEventType } from "./payloads.js";
+
 export type RunEventType =
   | "run.admitted"
   | "run.created"
@@ -104,15 +106,28 @@ export type RunEventType =
   | "ci-repair.decision"
   | "ci-repair.completed";
 
-export interface NewRunEvent {
-  runId: string;
-  stageId?: string;
-  attempt?: number;
-  type: RunEventType;
-  payload: unknown;
-  createdAt?: string;
-}
+export type RunEventPayload<T extends RunEventType> =
+  T extends TypedRunEventType ? TypedRunEventPayloads[T] : unknown;
 
+/**
+ * An event to append. For event types with a declared payload shape
+ * (`TypedRunEventPayloads`) the payload is checked against it.
+ */
+export type NewRunEvent<T extends RunEventType = RunEventType> = {
+  [K in T]: {
+    runId: string;
+    stageId?: string;
+    attempt?: number;
+    type: K;
+    payload: RunEventPayload<K>;
+    createdAt?: string;
+  };
+}[T];
+
+/**
+ * A stored event. Its payload is whatever was persisted, so readers decode it
+ * with `decodeRunEvent` instead of trusting its shape.
+ */
 export interface StoredRunEvent {
   sequence: number;
   runId: string;

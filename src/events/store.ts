@@ -59,7 +59,7 @@ export class EventStore {
     `);
   }
 
-  append(event: NewRunEvent): StoredRunEvent {
+  append<T extends RunEventType>(event: NewRunEvent<T>): StoredRunEvent {
     const createdAt = event.createdAt ?? new Date().toISOString();
     const result = this.#database
       .prepare(`

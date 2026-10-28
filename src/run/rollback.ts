@@ -3,9 +3,8 @@ import { access } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { EventStore } from "../events/store.js";
 import type { StoredRunEvent } from "../events/types.js";
-import { eventStorePath, projectRun, runDirectoryPath } from "./project.js";
+import { projectRun, runDirectoryPath } from "./project.js";
 import {
   resumeRun as resumeRunFlow,
   type ResumeRunInput,
@@ -14,6 +13,7 @@ import {
 import { buildRunTrace, type RunCheckpoint } from "./trace.js";
 import { withRunContinuationClaim } from "./control.js";
 
+import { openRunEventStore } from "../events/run-events.js";
 const execFileAsync = promisify(execFile);
 
 export const ROLLBACK_WORKTREE_POLICIES = ["preserve", "cleanup"] as const;
@@ -547,7 +547,7 @@ export function rollbackDecisionPolicy(
 export async function recordRollbackDecision(
   input: RecordRollbackDecisionInput,
 ): Promise<RecordRollbackDecisionResult> {
-  const store = new EventStore(eventStorePath(input.repoPath));
+  const store = openRunEventStore(input.repoPath);
   try {
     const events = store.list(input.runId);
     if (events.length === 0) {
@@ -593,7 +593,7 @@ export async function applyRollbackDecision(
   input: ApplyRollbackDecisionInput,
 ): Promise<ApplyRollbackDecisionResult> {
   const repoPath = resolve(input.repoPath);
-  const store = new EventStore(eventStorePath(repoPath));
+  const store = openRunEventStore(repoPath);
   try {
     const events = store.list(input.runId);
     if (events.length === 0) {

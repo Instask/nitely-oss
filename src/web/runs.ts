@@ -29,13 +29,11 @@ import {
   type ConformancePolicy,
   type ConformanceReport,
 } from "../conformance/report.js";
-import { EventStore } from "../events/store.js";
 import type { StoredRunEvent } from "../events/types.js";
 import { loadFlow, parseFlowDocument } from "../flow/load.js";
 import type { Effort, Stage } from "../flow/schema.js";
 import type { RuntimeEffortStatus } from "../run/execution/effort.js";
 import {
-  eventStorePath,
   getProjectedRun,
   getProjectedRunLogs,
   listRunEvents,
@@ -97,6 +95,7 @@ import { WebInputError, WebNotFoundError } from "./errors.js";
 import { redactForWeb, redactUnknownForWeb } from "./redaction.js";
 import { isPathInside } from "../path-containment.js";
 
+import { openRunEventStore } from "../events/run-events.js";
 export const WEB_RUN_STATUSES = [
   "completed",
   "running",
@@ -2047,7 +2046,7 @@ function tryRunEventsForRuns(
 
 function tryRunEvents(repoPath: string, runId: string): StoredRunEvent[] {
   try {
-    const store = new EventStore(eventStorePath(repoPath));
+    const store = openRunEventStore(repoPath);
     try {
       return store.list(runId);
     } finally {
@@ -2142,7 +2141,7 @@ function listRunIds(repoPath: string): Promise<string[]> {
   const scan = (async () => {
     let stored: string[] = [];
     try {
-      const events = new EventStore(eventStorePath(repoPath));
+      const events = openRunEventStore(repoPath);
       try { stored = events.listRunIds(); } finally { events.close(); }
     } catch { /* Legacy repositories may have no event store. */ }
     let entries: string[] = [];

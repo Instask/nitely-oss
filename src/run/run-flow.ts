@@ -125,6 +125,13 @@ import {
 } from "../context-kg/store.js";
 import { EventStore } from "../events/store.js";
 import type { StoredRunEvent } from "../events/types.js";
+import type {
+  TaskPlanProgressPayload,
+  TypedRunEventType,
+} from "../events/payloads.js";
+import { decodeRunEvent } from "../events/decode.js";
+
+type TaskPlanEventType = Extract<TypedRunEventType, `task.plan.${string}`>;
 import { ensureContextKnowledgeProposalNotification } from "../web/context-knowledge-notifications.js";
 import { loadFlow, parseFlowDocument, type FlowGraph } from "../flow/load.js";
 import { normalizeRunOverrides, type RunOverrides } from "../flow/overrides.js";
@@ -372,6 +379,7 @@ import {
 } from "./stage-execution.js";
 import { isPathInside } from "../path-containment.js";
 
+import { openEventStoreAt } from "../events/run-events.js";
 export { createCodexExecArgs } from "./execution/local.js";
 
 const execFileAsync = promisify(execFile);
@@ -1539,8 +1547,9 @@ function redactRuntimeText(
   return redactText(value, context.redactionSecrets);
 }
 
-function redactRuntimeUnknown(value: unknown, context: RuntimeContext): unknown {
-  return redactUnknown(value, context.redactionSecrets);
+function redactRuntimeUnknown<T>(value: T, context: RuntimeContext): T {
+  // Redaction replaces secret substrings inside strings and keeps the shape.
+  return redactUnknown(value, context.redactionSecrets) as T;
 }
 
 function assertSafePathSegment(kind: string, value: string): void {
@@ -10362,7 +10371,7 @@ function ensureTaskPlanLoopState(input: {
 function taskPlanProgressPayload(
   state: TaskPlanLoopState,
   currentTask?: TaskPlanTask,
-): Record<string, unknown> {
+): TaskPlanProgressPayload {
   const progress = taskPlanProgress(
     state.plan,
     state.completedTaskIds,
@@ -10663,37 +10672,6 @@ function taskPlanEventInputId(
   return inputId;
 }
 
-function taskPlanHistoryFromPayload(value: unknown): TaskPlanHistoryEntry[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const entries: TaskPlanHistoryEntry[] = [];
-  for (const item of value) {
-    if (typeof item !== "object" || item === null || Array.isArray(item)) {
-      return undefined;
-    }
-    const record = item as Record<string, unknown>;
-    const taskId = typeof record.taskId === "string" ? record.taskId : undefined;
-    const status = record.status;
-    if (
-      !taskId ||
-      (status !== "pending" &&
-        status !== "in_progress" &&
-        status !== "completed" &&
-        status !== "blocked")
-    ) {
-      return undefined;
-    }
-    entries.push({
-      taskId,
-      status,
-      ...(typeof record.stageId === "string" ? { stageId: record.stageId } : {}),
-      ...(typeof record.attempt === "number" ? { attempt: record.attempt } : {}),
-      ...(typeof record.message === "string" ? { message: record.message } : {}),
-      ...(typeof record.createdAt === "string" ? { createdAt: record.createdAt } : {}),
-    });
-  }
-  return entries;
-}
-
 function rehydrateTaskPlanLoopStates(input: {
   stages: Stage[];
   inputArtifacts: Map<string, InputArtifact>;
@@ -10732,32 +10710,22 @@ function rehydrateTaskPlanLoopStates(input: {
   }
 
   for (const { event, inputId } of taskPlanEvents) {
-    const payload = eventPayloadRecord(event);
+    const payload = decodeRunEvent(event, event.type as TaskPlanEventType) ?? {};
     const state = states.get(inputId);
     if (!state) continue;
 
-    if (Array.isArray(payload.completedTaskIds)) {
-      state.completedTaskIds = new Set(
-        payload.completedTaskIds.filter(
-          (taskId): taskId is string => typeof taskId === "string",
-        ),
-      );
+    if (payload.completedTaskIds) {
+      state.completedTaskIds = new Set(payload.completedTaskIds);
     }
-    if (typeof payload.iteration === "number" && Number.isInteger(payload.iteration)) {
+    if (payload.iteration !== undefined) {
       state.iteration = payload.iteration;
     }
-    if (
-      typeof payload.maxIterations === "number" &&
-      Number.isInteger(payload.maxIterations) &&
-      payload.maxIterations > 0
-    ) {
+    if (payload.maxIterations !== undefined) {
       state.maxIterations = payload.maxIterations;
     }
-    const history = taskPlanHistoryFromPayload(payload.history);
-    if (history) state.history = history;
+    if (payload.history) state.history = payload.history;
 
-    const currentTaskId =
-      typeof payload.currentTaskId === "string" ? payload.currentTaskId : undefined;
+    const currentTaskId = payload.currentTaskId;
     if (
       event.type === "task.plan.task.completed" ||
       event.type === "task.plan.completed"
@@ -13278,7 +13246,7 @@ async function exportRunTraceAfterRun(
       runId,
       listEvents: () => {
         const store = (dependencies.createEventStore ??
-          ((path: string) => new EventStore(path)))(eventStorePath(resolve(repoPath)));
+          ((path: string) => openEventStoreAt(path)))(eventStorePath(resolve(repoPath)));
         try {
           return store.list(runId);
         } finally {
@@ -13480,7 +13448,7 @@ async function runFlowOnce(
     expectedSkillContentHashes: input.expectedSkillContentHashes,
   };
   const eventStore = (dependencies.createEventStore ??
-    ((path: string) => new EventStore(path)))(eventStorePath(repoPath));
+    ((path: string) => openEventStoreAt(path)))(eventStorePath(repoPath));
   let inputArtifacts: Map<string, InputArtifact>;
   try {
     runtimeContext.knowledgeSnapshots = await pinExternalKnowledgeForRun({
@@ -15205,8 +15173,7 @@ function rehydrateStageExecutionState(
       );
     }
     if (event.type === "stage.failed" && event.stageId) {
-      const payload = eventPayloadRecord(event);
-      const error = typeof payload.error === "string" ? payload.error : "unknown error";
+      const error = decodeRunEvent(event, "stage.failed")?.error ?? "unknown error";
       const failures = previousFailuresByStage.get(event.stageId) ?? [];
       failures.push({ attempt: event.attempt ?? 1, error });
       previousFailuresByStage.set(event.stageId, failures);
@@ -15363,7 +15330,7 @@ async function resumeRunOnce(
   validateRunId(input.runId);
   const runDirectory = runDirectoryPath(repoPath, input.runId);
   const eventStore = (dependencies.createEventStore ??
-    ((path: string) => new EventStore(path)))(eventStorePath(repoPath));
+    ((path: string) => openEventStoreAt(path)))(eventStorePath(repoPath));
   try {
     const events = eventStore.list(input.runId);
     if (events.length === 0) {

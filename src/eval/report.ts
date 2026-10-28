@@ -1,6 +1,5 @@
 import { existsSync } from "node:fs";
 
-import { EventStore } from "../events/store.js";
 import type { StoredRunEvent } from "../events/types.js";
 import { eventStorePath } from "../run/project.js";
 import {
@@ -16,6 +15,7 @@ import {
   type ReviewerCohortMetrics,
 } from "./reviewer.js";
 
+import { openEventStoreAt } from "../events/run-events.js";
 const UUID_V4_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -972,7 +972,7 @@ export function loadEvalRunSamples(input: {
 }): EvalRunSample[] {
   const path = eventStorePath(input.repoPath);
   if (!existsSync(path)) return [];
-  const store = new EventStore(path);
+  const store = openEventStoreAt(path);
   try {
     const cases = new Map(
       input.manifest.cases.map((evalCase) => [evalCase.id, evalCase]),

@@ -2,10 +2,9 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
-import { EventStore } from "../events/store.js";
-import { eventStorePath } from "../run/project.js";
 import { WebInputError, WebNotFoundError } from "./errors.js";
 
+import { openRunEventStore } from "../events/run-events.js";
 export type NotificationSeverity = "info" | "warning" | "blocker";
 export type NotificationStatus = "pending" | "resolved";
 export type NotificationAction =
@@ -582,7 +581,7 @@ export async function recordNotificationDecision(
   }
 
   if (notification.runId) {
-    const store = new EventStore(eventStorePath(repoPath));
+    const store = openRunEventStore(repoPath);
     try {
       if (store.list(notification.runId).length > 0) {
         store.append({

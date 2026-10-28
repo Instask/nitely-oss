@@ -17,8 +17,7 @@ import {
   evaluateWorkItemRunStarts,
   formatRunEligibilityError,
 } from "../run/eligibility.js";
-import { projectRun, eventStorePath } from "../run/project.js";
-import { EventStore } from "../events/store.js";
+import { projectRun } from "../run/project.js";
 import type { ProviderConnectionStore } from "../providers/types.js";
 import type { ChangeRequestTarget, ScmProvider } from "../scm/types.js";
 import { createTask } from "../work-items/adapters/dev-pr-store.js";
@@ -27,6 +26,7 @@ import {
   prepareWorkItemRunCandidate,
 } from "../work-items/access.js";
 
+import { openRunEventStore } from "../events/run-events.js";
 const execFileAsync = promisify(execFile);
 
 const demoProviderStore: ProviderConnectionStore = {
@@ -233,7 +233,7 @@ function evidencePath(repoPath: string, runId: string): string {
 }
 
 function projectionFor(repoPath: string, runId: string) {
-  const store = new EventStore(eventStorePath(repoPath));
+  const store = openRunEventStore(repoPath);
   try {
     return projectRun(store.list(runId));
   } finally {

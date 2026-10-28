@@ -24,6 +24,7 @@ import {
   type ProjectedRunStatus,
 } from "../run/project.js";
 
+import { openEventStoreAt } from "../events/run-events.js";
 export interface EvidenceArtifactMetadata {
   id: string;
   name?: string;
@@ -356,7 +357,7 @@ async function runEventArtifactProjection(
     return [];
   }
 
-  const store = new EventStore(path);
+  const store = openEventStoreAt(path);
   try {
     const events = store.list(runId);
     return events.length > 0
@@ -569,7 +570,7 @@ export async function listEvidenceRuns(repoPath: string): Promise<EvidenceRunRec
   const eventPath = eventStorePath(resolvedRepoPath);
   const eventRunIds: string[] = [];
   if (await pathExists(eventPath)) {
-    const store = new EventStore(eventPath);
+    const store = openEventStoreAt(eventPath);
     try {
       for (const runId of store.listRunIds()) {
         validateRunId(runId);

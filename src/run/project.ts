@@ -4,8 +4,15 @@ import { isEffort, type RuntimeEffortStatus } from "./execution/effort.js";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { EventStore } from "../events/store.js";
 import type { StoredRunEvent } from "../events/types.js";
+import {
+  asNumber,
+  asRecord,
+  asString,
+  asStringArray,
+  decodeRunEvent,
+  type DecodedRunEventPayloads,
+} from "../events/decode.js";
 import type { StageCostClass } from "../flow/schema.js";
 import {
   attemptShareOfCodexUsage,
@@ -44,6 +51,9 @@ import {
 } from "./execution/sandbox.js";
 import { isPathInside } from "../path-containment.js";
 
+import { openRunEventStore } from "../events/run-events.js";
+
+export { eventStorePath } from "../events/open.js";
 export type ProjectedRunStatus =
   | "created"
   | "running"
@@ -928,16 +938,6 @@ export function validateRunId(runId: string): void {
   }
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function asString(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
-}
-
 function applyProjectedEffort(attempt: ProjectedAttempt, payload: Record<string, unknown>): void {
   const status = asString(payload.effortStatus);
   if (status === "configured" || status === "default" || status === "not-applicable") {
@@ -949,17 +949,17 @@ function applyProjectedEffort(attempt: ProjectedAttempt, payload: Record<string,
   if (native) attempt.nativeEffort = native;
 }
 
-function asRunBlocker(value: unknown): ProjectedRunBlocker | undefined {
-  const record = asRecord(value);
-  const reason = asString(record.reason);
-  if (!reason) return undefined;
+function projectedBlocker(
+  blocker: DecodedRunEventPayloads["run.blocked"] | undefined,
+): ProjectedRunBlocker | undefined {
+  if (!blocker) return undefined;
   return {
-    reason,
-    stageId: asString(record.stageId),
-    runtime: asString(record.runtime),
-    message: asString(record.message),
-    retryAfter: asString(record.retryAfter),
-    questionId: asString(record.questionId),
+    reason: blocker.reason,
+    stageId: blocker.stageId,
+    runtime: blocker.runtime,
+    message: blocker.message,
+    retryAfter: blocker.retryAfter,
+    questionId: blocker.questionId,
   };
 }
 
@@ -1031,10 +1031,6 @@ function questionPolicyFields(
       ? { expiresAt: new Date(asked + timeoutMs).toISOString() }
       : {}),
   };
-}
-
-function asNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function asNonNegativeNumber(value: unknown): number | undefined {
@@ -1112,12 +1108,6 @@ function asRuntimeUsage(value: unknown): ProjectedRuntimeUsage | undefined {
     usage.provenance !== undefined ||
     usage.raw !== undefined
     ? usage
-    : undefined;
-}
-
-function asStringArray(value: unknown): string[] | undefined {
-  return Array.isArray(value)
-    ? value.filter((entry): entry is string => typeof entry === "string")
     : undefined;
 }
 
@@ -1305,73 +1295,45 @@ function asContextKnowledgeEntry(
   };
 }
 
-function asTaskPlanTask(value: unknown): ProjectedTaskPlanTask | undefined {
-  const record = asRecord(value);
-  const id = asString(record.id);
-  const title = asString(record.title);
-  if (!id || !title) return undefined;
-  return {
-    id,
-    title,
-    status: asString(record.status),
-    dependencies: asStringArray(record.dependencies),
-    paths: asStringArray(record.paths),
-    notes: asString(record.notes),
-  };
-}
-
-function asTaskPlanHistoryEntry(
-  value: unknown,
-): ProjectedTaskPlanHistoryEntry | undefined {
-  const record = asRecord(value);
-  const taskId = asString(record.taskId);
-  const status = asString(record.status);
-  if (!taskId || !status) return undefined;
-  return {
-    taskId,
-    status,
-    stageId: asString(record.stageId),
-    attempt: asNumber(record.attempt),
-    message: asString(record.message),
-    createdAt: asString(record.createdAt),
-  };
-}
-
-function asTaskPlanHistory(value: unknown): ProjectedTaskPlanHistoryEntry[] {
-  return Array.isArray(value)
-    ? value
-        .map(asTaskPlanHistoryEntry)
-        .filter((entry): entry is ProjectedTaskPlanHistoryEntry => entry !== undefined)
-    : [];
-}
+type DecodedTaskPlanProgressPayload =
+  DecodedRunEventPayloads["task.plan.loop.continues"] &
+  DecodedRunEventPayloads["task.plan.final.deferred"];
 
 function taskPlanProjectionFromPayload(
-  payload: Record<string, unknown>,
+  payload: DecodedTaskPlanProgressPayload,
   createdAt: string,
   previous?: ProjectedTaskPlanLoop,
 ): ProjectedTaskPlanLoop | undefined {
-  const inputId = asString(payload.inputId) ?? previous?.inputId;
+  const inputId = payload.inputId ?? previous?.inputId;
   if (!inputId) return undefined;
-  const currentTask = asTaskPlanTask(payload.currentTask) ?? previous?.currentTask;
+  const currentTask: ProjectedTaskPlanTask | undefined = payload.currentTask
+    ? {
+        id: payload.currentTask.id,
+        title: payload.currentTask.title,
+        status: payload.currentTask.status,
+        dependencies: payload.currentTask.dependencies,
+        paths: payload.currentTask.paths,
+        notes: payload.currentTask.notes,
+      }
+    : previous?.currentTask;
   return {
     inputId,
-    version: asString(payload.version) ?? previous?.version,
+    version: payload.version ?? previous?.version,
     currentTask,
     currentTaskId:
-      asString(payload.currentTaskId) ?? currentTask?.id ?? previous?.currentTaskId,
+      payload.currentTaskId ?? currentTask?.id ?? previous?.currentTaskId,
     completedTaskIds:
-      asStringArray(payload.completedTaskIds) ?? previous?.completedTaskIds ?? [],
+      payload.completedTaskIds ?? previous?.completedTaskIds ?? [],
     remainingTaskIds:
-      asStringArray(payload.remainingTaskIds) ?? previous?.remainingTaskIds ?? [],
-    completedCount: asNumber(payload.completedCount) ?? previous?.completedCount ?? 0,
-    remainingCount: asNumber(payload.remainingCount) ?? previous?.remainingCount ?? 0,
-    totalTaskCount:
-      asNumber(payload.totalTaskCount) ?? previous?.totalTaskCount ?? 0,
-    iteration: asNumber(payload.iteration) ?? previous?.iteration,
-    maxIterations: asNumber(payload.maxIterations) ?? previous?.maxIterations,
-    history: asTaskPlanHistory(payload.history),
+      payload.remainingTaskIds ?? previous?.remainingTaskIds ?? [],
+    completedCount: payload.completedCount ?? previous?.completedCount ?? 0,
+    remainingCount: payload.remainingCount ?? previous?.remainingCount ?? 0,
+    totalTaskCount: payload.totalTaskCount ?? previous?.totalTaskCount ?? 0,
+    iteration: payload.iteration ?? previous?.iteration,
+    maxIterations: payload.maxIterations ?? previous?.maxIterations,
+    history: payload.history ?? [],
     selectedAt: previous?.selectedAt ?? createdAt,
-    targetStage: asString(payload.targetStage) ?? previous?.targetStage,
+    targetStage: payload.targetStage ?? previous?.targetStage,
     deferredAt: previous?.deferredAt,
     completedAt: previous?.completedAt,
   };
@@ -1944,13 +1906,6 @@ function projectAttemptStatus(stage: ProjectedStage): void {
   stage.status = attempt.status;
 }
 
-function approvalIdForEvent(event: StoredRunEvent, payload: Record<string, unknown>): string | undefined {
-  const approvalId = asString(payload.approvalId);
-  if (approvalId) return approvalId;
-  if (!event.stageId || !event.attempt) return undefined;
-  return `${event.stageId}-${event.attempt}`;
-}
-
 export function projectRun(
   events: StoredRunEvent[],
   options: ProjectRunOptions = {},
@@ -2187,15 +2142,16 @@ export function projectRun(
       event.type === "task.plan.loop.continues" ||
       event.type === "task.plan.final.ready"
     ) {
+      const decoded = decodeRunEvent(event, event.type) ?? {};
       const taskPlan = taskPlanProjectionFromPayload(
-        payload,
+        decoded,
         event.createdAt,
         projection.taskPlan,
       );
       if (taskPlan) {
         projection.taskPlan =
           event.type === "task.plan.loop.continues" &&
-          asString(payload.reopenedTaskId)
+          decodeRunEvent(event, "task.plan.loop.continues")?.reopenedTaskId
             ? {
                 ...taskPlan,
                 completedAt: undefined,
@@ -2208,7 +2164,7 @@ export function projectRun(
 
     if (event.type === "task.plan.final.deferred") {
       const taskPlan = taskPlanProjectionFromPayload(
-        payload,
+        decodeRunEvent(event, "task.plan.final.deferred") ?? {},
         event.createdAt,
         projection.taskPlan,
       );
@@ -2223,7 +2179,7 @@ export function projectRun(
 
     if (event.type === "task.plan.completed") {
       const taskPlan = taskPlanProjectionFromPayload(
-        payload,
+        decodeRunEvent(event, "task.plan.completed") ?? {},
         event.createdAt,
         projection.taskPlan,
       );
@@ -2505,21 +2461,22 @@ export function projectRun(
     }
 
     if (event.type === "approval.requested" && event.stageId && event.attempt) {
-      const approvalId = approvalIdForEvent(event, payload);
-      if (!approvalId) continue;
+      const requested = decodeRunEvent(event, "approval.requested");
+      if (!requested) continue;
+      const approvalId = requested.approvalId;
       const existing = approvals.find((approval) => approval.id === approvalId);
       const approval: ProjectedApproval = {
         id: approvalId,
         stageId: event.stageId,
         attempt: event.attempt,
-        prompt: asString(payload.prompt) ?? "",
+        prompt: requested.prompt ?? "",
         status: existing?.status ?? "pending",
         requestedAt: existing?.requestedAt ?? event.createdAt,
         resolvedAt: existing?.resolvedAt,
         actor: existing?.actor,
         decision: existing?.decision,
         reviewedArtifactIds:
-          existing?.reviewedArtifactIds ?? asStringArray(payload.reviewedArtifactIds),
+          existing?.reviewedArtifactIds ?? requested.reviewedArtifactIds,
       };
       if (existing) {
         approvals[approvals.indexOf(existing)] = approval;
@@ -2535,23 +2492,23 @@ export function projectRun(
     }
 
     if (event.type === "approval.resolved" && event.stageId && event.attempt) {
-      const approvalId = approvalIdForEvent(event, payload);
-      if (!approvalId) continue;
-      const approved = payload.approved === true || asString(payload.decision) === "approved";
-      const status: ProjectedApprovalStatus = approved ? "approved" : "denied";
+      const resolved = decodeRunEvent(event, "approval.resolved");
+      if (!resolved) continue;
+      const approvalId = resolved.approvalId;
+      const status: ProjectedApprovalStatus = resolved.approved ? "approved" : "denied";
       const existing = approvals.find((approval) => approval.id === approvalId);
       const approval: ProjectedApproval = {
         id: approvalId,
         stageId: event.stageId,
         attempt: event.attempt,
-        prompt: existing?.prompt ?? asString(payload.prompt) ?? "",
+        prompt: existing?.prompt ?? resolved.prompt ?? "",
         status,
         requestedAt: existing?.requestedAt ?? event.createdAt,
         resolvedAt: event.createdAt,
-        actor: asString(payload.actor),
+        actor: resolved.actor,
         decision: status,
         reviewedArtifactIds:
-          asStringArray(payload.reviewedArtifactIds) ?? existing?.reviewedArtifactIds,
+          resolved.reviewedArtifactIds ?? existing?.reviewedArtifactIds,
       };
       if (existing) {
         approvals[approvals.indexOf(existing)] = approval;
@@ -2652,7 +2609,7 @@ export function projectRun(
       const attempt = ensureAttempt(stage, event.attempt);
       attempt.status = "failed";
       attempt.failedAt = event.createdAt;
-      attempt.error = asString(payload.error);
+      attempt.error = decodeRunEvent(event, "stage.failed")?.error;
       stage.status = "failed";
       stage.blocker = undefined;
       completedStages.delete(event.stageId);
@@ -2662,7 +2619,7 @@ export function projectRun(
     if (event.type === "stage.blocked" && event.stageId && event.attempt) {
       const stage = ensureStage(stages, event.stageId);
       const attempt = ensureAttempt(stage, event.attempt);
-      const blocker = asRunBlocker(payload);
+      const blocker = projectedBlocker(decodeRunEvent(event, "stage.blocked"));
       attempt.status = "blocked";
       attempt.blockedAt = event.createdAt;
       attempt.blocker = blocker;
@@ -2708,16 +2665,17 @@ export function projectRun(
     }
 
     if (event.type === "run.completed") {
+      const completed = decodeRunEvent(event, "run.completed") ?? {};
       setRunTerminal("completed", event.createdAt);
       projection.blocker = undefined;
       projection.changeRequestUrl =
-        asString(payload.changeRequestUrl) ?? asString(payload.url) ?? projection.changeRequestUrl;
-      projection.changeRequest = payload.changeRequest ?? projection.changeRequest;
+        completed.changeRequestUrl ?? completed.url ?? projection.changeRequestUrl;
+      projection.changeRequest = completed.changeRequest ?? projection.changeRequest;
       projection.changeRequestTarget =
-        payload.changeRequestTarget ?? projection.changeRequestTarget;
-      projection.sync = payload.sync ?? projection.sync;
-      projection.trigger = payload.trigger ?? projection.trigger;
-      projection.priorRunId = asString(payload.priorRunId) ?? projection.priorRunId;
+        completed.changeRequestTarget ?? projection.changeRequestTarget;
+      projection.sync = completed.sync ?? projection.sync;
+      projection.trigger = completed.trigger ?? projection.trigger;
+      projection.priorRunId = completed.priorRunId ?? projection.priorRunId;
       continue;
     }
 
@@ -2736,15 +2694,16 @@ export function projectRun(
       projection.status = "running";
       projection.blocker = undefined;
       projection.resumeFailure = undefined;
-      if (typeof payload.budgets === "object" && payload.budgets !== null) {
-        projection.budgets = payload.budgets;
+      const resumed = decodeRunEvent(event, "run.resumed");
+      if (resumed?.budgets !== undefined) {
+        projection.budgets = resumed.budgets;
       }
       continue;
     }
 
     if (event.type === "run.blocked") {
       setRunTerminal("blocked", event.createdAt);
-      projection.blocker = asRunBlocker(payload);
+      projection.blocker = projectedBlocker(decodeRunEvent(event, "run.blocked"));
       continue;
     }
 
@@ -2759,10 +2718,11 @@ export function projectRun(
       // A resume that threw before (or while) the runner took over. The run's
       // own status is left as the runner last recorded it; this only explains
       // why the Resume the operator asked for did not happen.
+      const failure = decodeRunEvent(event, "run.resume.failed");
       projection.resumeFailure = {
-        message: asString(payload.message) ?? "resume failed",
+        message: failure?.message ?? "resume failed",
         failedAt: event.createdAt,
-        ...(asString(payload.actor) ? { actor: asString(payload.actor) } : {}),
+        ...(failure?.actor ? { actor: failure.actor } : {}),
       };
       continue;
     }
@@ -2854,10 +2814,6 @@ export function projectRun(
   return projection;
 }
 
-export function eventStorePath(repoPath: string): string {
-  return join(repoPath, ".nitely", "events.db");
-}
-
 export function runDirectoryPath(repoPath: string, runId: string): string {
   validateRunId(runId);
   return join(repoPath, ".nitely", "runs", runId);
@@ -2879,12 +2835,8 @@ function resolveAttemptDirectory(
   return resolvedAttemptDirectory;
 }
 
-function openStore(repoPath: string): EventStore {
-  return new EventStore(eventStorePath(repoPath));
-}
-
 export async function listProjectedRuns(repoPath: string): Promise<ProjectedRun[]> {
-  const store = openStore(repoPath);
+  const store = openRunEventStore(repoPath);
   try {
     return store.listRunIds().map((runId) => projectRun(store.list(runId)));
   } finally {
@@ -2903,7 +2855,7 @@ export function listRunEvents(
   repoPath: string,
   runIds: Iterable<string>,
 ): Map<string, StoredRunEvent[]> {
-  const store = openStore(repoPath);
+  const store = openRunEventStore(repoPath);
   try {
     const byRun = new Map<string, StoredRunEvent[]>();
     for (const runId of runIds) {
@@ -2981,7 +2933,7 @@ export async function getProjectedRun(
   options: { staleAware?: boolean } = {},
 ): Promise<ProjectedRun> {
   validateRunId(runId);
-  const store = openStore(repoPath);
+  const store = openRunEventStore(repoPath);
   try {
     const events = store.list(runId);
     if (events.length === 0) {

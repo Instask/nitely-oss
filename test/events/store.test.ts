@@ -79,13 +79,13 @@ describe("EventStore", () => {
     store.append({
       runId: "run-1",
       type: "run.completed",
-      payload: { result: "success" },
+      payload: { changeRequestUrl: "https://example.test/pr/1" },
     });
 
     expect(store.latest("run-1")).toEqual(
       expect.objectContaining({
         type: "run.completed",
-        payload: { result: "success" },
+        payload: { changeRequestUrl: "https://example.test/pr/1" },
       }),
     );
     expect(store.latest("missing")).toBeUndefined();
