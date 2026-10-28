@@ -54,7 +54,11 @@ import type {
 import type { SpecReadinessGateResult } from "../spec-artifacts/readiness.js";
 import type { StoredWorkItemRunStatePatch } from "../work-items/access.js";
 import type { ChangeRequestStatusFetcher } from "./completion.js";
-import { claimRunContinuation } from "../run/control.js";
+import {
+  claimRunContinuation,
+  latestRunEventSequence,
+  recordRunnerFailure,
+} from "../run/control.js";
 import {
   cooldownUntilForRunInput,
   runtimeKey,
@@ -593,53 +597,6 @@ function assertAdmittedRunId(expectedRunId: string, actualRunId: string): void {
   }
 }
 
-function terminalProjectionAfterRunnerError(
-  repoPath: string,
-  runId: string,
-  error: unknown,
-  terminalAfterSequence?: number,
-): ProjectedRun {
-  const eventStore = openRunEventStore(repoPath);
-  try {
-    const events = eventStore.list(runId);
-    const projection = projectRun(events);
-    const terminalRecorded =
-      terminalAfterSequence === undefined
-        ? projection.status === "completed" ||
-          projection.status === "failed" ||
-          projection.status === "blocked" ||
-          projection.status === "cancelled"
-        : events.some(
-            (event) =>
-              event.sequence > terminalAfterSequence &&
-              (event.type === "run.completed" ||
-                event.type === "run.failed" ||
-                event.type === "run.blocked" ||
-                event.type === "run.cancelled"),
-          );
-    if (terminalRecorded) {
-      return projection;
-    }
-    eventStore.append({
-      runId,
-      type: "run.failed",
-      payload: { error: error instanceof Error ? error.message : String(error) },
-    });
-    return projectRun(eventStore.list(runId));
-  } finally {
-    eventStore.close();
-  }
-}
-
-function latestRunEventSequence(repoPath: string, runId: string): number {
-  const eventStore = openRunEventStore(repoPath);
-  try {
-    return eventStore.latest(runId)?.sequence ?? 0;
-  } finally {
-    eventStore.close();
-  }
-}
-
 async function settleResumedRunResult(input: {
   repoPath: string;
   task: WorkItemRecord;
@@ -848,12 +805,12 @@ async function resumeDueUsageLimitRuns(input: {
           repoPath: input.repoPath,
           task: candidate.task,
           runId: candidate.blocked.runId,
-          projection: terminalProjectionAfterRunnerError(
-            input.repoPath,
-            candidate.blocked.runId,
+          projection: recordRunnerFailure({
+            repoPath: input.repoPath,
+            runId: candidate.blocked.runId,
             error,
-            resumeStartedAfterSequence,
-          ),
+            afterSequence: resumeStartedAfterSequence,
+          }),
           summary: input.summary,
         });
       }
@@ -896,7 +853,7 @@ async function resumeStandaloneQuestionRuns(input: {
           ...(input.executionBackend ? { executionBackend: input.executionBackend } : {}),
         });
       } catch (error) {
-        terminalProjectionAfterRunnerError(input.repoPath, runId, error, afterSequence);
+        recordRunnerFailure({ repoPath: input.repoPath, runId, error, afterSequence });
       }
     } finally {
       release();
@@ -1166,11 +1123,11 @@ export async function runSchedulerOnce(
             repoPath,
             task: startedTask,
             runId: admission.runId,
-            projection: terminalProjectionAfterRunnerError(
+            projection: recordRunnerFailure({
               repoPath,
-              admission.runId,
+              runId: admission.runId,
               error,
-            ),
+            }),
             summary,
           });
         }

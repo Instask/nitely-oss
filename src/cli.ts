@@ -67,12 +67,8 @@ import {
   type RecordRollbackDecisionResult,
   type ApplyRollbackDecisionResult,
 } from "./run/rollback.js";
-import {
-  listApprovals,
-  resolveApproval,
-  type ResolveApprovalInput,
-} from "./run/approvals.js";
-import { denyRunApproval, withRunContinuationClaim } from "./run/control.js";
+import { listApprovals } from "./run/approvals.js";
+import { decideRunApproval, withRunContinuationClaim } from "./run/control.js";
 import {
   answerQuestion,
   listQuestions,
@@ -228,8 +224,7 @@ export interface CliDependencies {
   listFactoryWorkItems?: typeof listUnifiedWorkItems;
   getRunStatus?: (repoPath: string, runId: string) => Promise<ProjectedRun>;
   listApprovals?: (repoPath: string, runId: string) => Promise<ProjectedApproval[]>;
-  resolveApproval?: (input: ResolveApprovalInput) => Promise<ProjectedApproval>;
-  denyRunApproval?: typeof denyRunApproval;
+  decideRunApproval?: typeof decideRunApproval;
   listQuestions?: (
     repoPath: string,
     runId: string,
@@ -2073,6 +2068,59 @@ function printStageDryRun(
   io.stdout("ACTION dry-run only; no worktree, publish, or external PR will be created");
 }
 
+const runApprovalDecisionCommand: NitelyCliCommand["run"] = async ({
+  argv,
+  io,
+  dependencies,
+}) => {
+  const runId = argv[1];
+  const approvalId = argv[2];
+  if (!runId || !approvalId) {
+    io.stderr(
+      `Usage: nitely ${argv[0]} <run-id> <approval-id> [--repo <path>] [--actor <name>]`,
+    );
+    return 1;
+  }
+  let repoPath = ".";
+  let actor: string | undefined;
+  for (let index = 3; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--repo") {
+      repoPath = argv[++index] ?? "";
+      continue;
+    }
+    if (arg === "--actor") {
+      actor = argv[++index] ?? "";
+      continue;
+    }
+    io.stderr(`Unknown ${argv[0]} option: ${arg}`);
+    return 1;
+  }
+  if (!repoPath) {
+    io.stderr("Missing value for --repo");
+    return 1;
+  }
+  if (actor === "") {
+    io.stderr("Missing value for --actor");
+    return 1;
+  }
+  try {
+    // A denial is terminal: it fails the Run and settles its Work item.
+    const approval = await (dependencies.decideRunApproval ?? decideRunApproval)({
+      repoPath,
+      runId,
+      approvalId,
+      decision: argv[0] === "approve" ? "approved" : "denied",
+      ...(actor ? { actor } : {}),
+    });
+    io.stdout(`APPROVAL ${approval.id} ${approval.status}`);
+    return 0;
+  } catch (error) {
+    io.stderr(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+};
+
 const CLI_COMMANDS: NitelyCliCommand[] = [
   {
     name: "doctor",
@@ -2792,110 +2840,14 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
     usage: [
       "  approve <run-id> <approval-id> [--actor <name>]",
     ],
-    run: async ({ argv, io, dependencies }) => {
-      const runId = argv[1];
-      const approvalId = argv[2];
-      if (!runId || !approvalId) {
-        io.stderr(
-          `Usage: nitely ${argv[0]} <run-id> <approval-id> [--repo <path>] [--actor <name>]`,
-        );
-        return 1;
-      }
-      let repoPath = ".";
-      let actor: string | undefined;
-      for (let index = 3; index < argv.length; index += 1) {
-        const arg = argv[index];
-        if (arg === "--repo") {
-          repoPath = argv[++index] ?? "";
-          continue;
-        }
-        if (arg === "--actor") {
-          actor = argv[++index] ?? "";
-          continue;
-        }
-        io.stderr(`Unknown ${argv[0]} option: ${arg}`);
-        return 1;
-      }
-      if (!repoPath) {
-        io.stderr("Missing value for --repo");
-        return 1;
-      }
-      if (actor === "") {
-        io.stderr("Missing value for --actor");
-        return 1;
-      }
-      try {
-        const approvalInput = { repoPath, runId, approvalId, ...(actor ? { actor } : {}) };
-        // A denial is terminal: it fails the Run and settles its Work item.
-        const approval = argv[0] === "approve"
-          ? await (dependencies.resolveApproval ?? resolveApproval)({
-              ...approvalInput,
-              decision: "approved",
-            })
-          : await (dependencies.denyRunApproval ?? denyRunApproval)(approvalInput);
-        io.stdout(`APPROVAL ${approval.id} ${approval.status}`);
-        return 0;
-      } catch (error) {
-        io.stderr(error instanceof Error ? error.message : String(error));
-        return 1;
-      }
-
-    },
+    run: runApprovalDecisionCommand,
   },
   {
     name: "deny",
     usage: [
       "  deny <run-id> <approval-id> [--actor <name>]",
     ],
-    run: async ({ argv, io, dependencies }) => {
-      const runId = argv[1];
-      const approvalId = argv[2];
-      if (!runId || !approvalId) {
-        io.stderr(
-          `Usage: nitely ${argv[0]} <run-id> <approval-id> [--repo <path>] [--actor <name>]`,
-        );
-        return 1;
-      }
-      let repoPath = ".";
-      let actor: string | undefined;
-      for (let index = 3; index < argv.length; index += 1) {
-        const arg = argv[index];
-        if (arg === "--repo") {
-          repoPath = argv[++index] ?? "";
-          continue;
-        }
-        if (arg === "--actor") {
-          actor = argv[++index] ?? "";
-          continue;
-        }
-        io.stderr(`Unknown ${argv[0]} option: ${arg}`);
-        return 1;
-      }
-      if (!repoPath) {
-        io.stderr("Missing value for --repo");
-        return 1;
-      }
-      if (actor === "") {
-        io.stderr("Missing value for --actor");
-        return 1;
-      }
-      try {
-        const approvalInput = { repoPath, runId, approvalId, ...(actor ? { actor } : {}) };
-        // A denial is terminal: it fails the Run and settles its Work item.
-        const approval = argv[0] === "approve"
-          ? await (dependencies.resolveApproval ?? resolveApproval)({
-              ...approvalInput,
-              decision: "approved",
-            })
-          : await (dependencies.denyRunApproval ?? denyRunApproval)(approvalInput);
-        io.stdout(`APPROVAL ${approval.id} ${approval.status}`);
-        return 0;
-      } catch (error) {
-        io.stderr(error instanceof Error ? error.message : String(error));
-        return 1;
-      }
-
-    },
+    run: runApprovalDecisionCommand,
   },
   {
     name: "questions",
