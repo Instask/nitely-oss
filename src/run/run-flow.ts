@@ -130,8 +130,6 @@ import type {
   TypedRunEventType,
 } from "../events/payloads.js";
 import { decodeRunEvent } from "../events/decode.js";
-
-type TaskPlanEventType = Extract<TypedRunEventType, `task.plan.${string}`>;
 import { ensureContextKnowledgeProposalNotification } from "../web/context-knowledge-notifications.js";
 import { loadFlow, parseFlowDocument, type FlowGraph } from "../flow/load.js";
 import { normalizeRunOverrides, type RunOverrides } from "../flow/overrides.js";
@@ -380,6 +378,9 @@ import {
 import { isPathInside } from "../path-containment.js";
 
 import { openEventStoreAt } from "../events/run-events.js";
+
+type TaskPlanEventType = Extract<TypedRunEventType, `task.plan.${string}`>;
+
 export { createCodexExecArgs } from "./execution/local.js";
 
 const execFileAsync = promisify(execFile);
