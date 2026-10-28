@@ -6564,6 +6564,78 @@ describe("runFlow", () => {
     } finally { store.close(); }
   });
 
+  it.skipIf(process.platform !== "linux")(
+    "cancels a stage hook that a resumed run started",
+    async () => {
+      const repo = await createRepo();
+      const marker = join(repo, "hook-started");
+      const flowPath = join(repo, "flows", "resume-hook-cancellation.json");
+      await writeJson(flowPath, {
+        apiVersion: "nitely.dev/v1alpha1",
+        kind: "Flow",
+        metadata: { name: "resume-hook-cancellation" },
+        spec: {
+          stages: [
+            { id: "build", type: "command", command: "printf plan", inputs: [], outputs: ["site-plan"] },
+            { id: "approve-plan", type: "approval", prompt: "Approve the plan", inputs: ["site-plan"], outputs: [] },
+            {
+              id: "publish",
+              type: "command",
+              command: "printf published",
+              inputs: ["site-plan"],
+              outputs: ["test-report"],
+              hooks: {
+                pre: [
+                  {
+                    id: "slow-precheck",
+                    command: nodeEval(
+                      [
+                        "require('node:fs').writeFileSync(" + JSON.stringify(marker) + ", 'started');",
+                        "setTimeout(() => {}, 30000);",
+                      ].join(" "),
+                    ),
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      });
+      await runFlow({ flowPath, repoPath: repo, inputs: {} }, { createRunId: () => "run-resume-hook" });
+      await resolveApproval({
+        repoPath: repo,
+        runId: "run-resume-hook",
+        approvalId: "approve-plan-1",
+        decision: "approved",
+      });
+
+      const controller = new AbortController();
+      const request = { actor: "operator", reason: "stop", source: "test" };
+      const execution = resumeRun(
+        { repoPath: repo, runId: "run-resume-hook" },
+        { cancellation: { signal: controller.signal, getRequest: () => request } },
+      );
+      const settled = execution.then(() => undefined, () => undefined);
+      await Promise.race([waitForFile(marker, 20_000), settled]);
+      const startedAt = Date.now();
+      controller.abort(request);
+
+      await expect(execution).rejects.toThrow(/stop|cancelled/);
+      // The hook sleeps for 30 seconds; only a hook that received the signal
+      // lets the resumed run stop this quickly.
+      expect(Date.now() - startedAt).toBeLessThan(20_000);
+      const store = new EventStore(join(repo, ".nitely", "events.db"));
+      try {
+        const events = store.list("run-resume-hook");
+        expect(projectRun(events).status).toBe("cancelled");
+        expect(events.some((event) => event.type === "stage.completed" && event.stageId === "publish")).toBe(false);
+      } finally {
+        store.close();
+      }
+    },
+    30_000,
+  );
+
   it("pauses at an approval stage and does not start downstream stages", async () => {
     const repo = await createRepo();
     const flowPath = join(repo, "flows", "approval-pause.json");
