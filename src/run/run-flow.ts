@@ -13208,6 +13208,12 @@ interface StageCursor {
   };
 }
 
+/**
+ * Execute a Run's stages from `cursor` until they complete, pause on an
+ * approval, or stop. Returns the approval it paused on. When it stops it
+ * records the stage's own events and throws; `settleStoppedRun` settles the
+ * Run.
+ */
 async function driveStages(
   driver: StageDriver,
   cursor: StageCursor,
@@ -13257,7 +13263,7 @@ async function driveStages(
     graph: loaded.graph,
     completedStages,
     eventStore,
-    runId: runId,
+    runId,
     context: runtimeContext,
   });
   while (!taskPlanController.done) {
@@ -13294,7 +13300,7 @@ async function driveStages(
       if (resumableAttempt && resumableStage?.status === "interrupted") {
         appendOrchestratorDecision({
           eventStore,
-          runId: runId,
+          runId,
           stage,
           attempt: resumableAttempt.attempt,
           maxAttempts: maxAttemptsForStage(stage, loaded.flow.spec.maxAttempts),
@@ -13303,7 +13309,7 @@ async function driveStages(
           error: "interrupted after process restart",
         });
         eventStore.append({
-          runId: runId,
+          runId,
           stageId: stage.id,
           attempt: resumableAttempt.attempt,
           type: "stage.failed",
@@ -13336,7 +13342,7 @@ async function driveStages(
       try {
         if (resumeOperatorReview && stage.type === "gate") {
           const recordedGate = recordGateStageResult({
-            runId: runId,
+            runId,
             stage,
             attempt: resumeOperatorReview.attempt ?? 1,
             maxAttempts,
@@ -13353,7 +13359,7 @@ async function driveStages(
           );
           if (resumeOperatorReview.operatorReview) {
             eventStore.append({
-              runId: runId,
+              runId,
               stageId: stage.id,
               attempt: recordedGate.gateAttempt,
               type: "operator.review.resolved",
@@ -13390,7 +13396,7 @@ async function driveStages(
             flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
             context: runtimeContext,
             eventStore,
-            runId: runId,
+            runId,
             cancellation: dependencies.cancellation,
           });
           stageCompleted = true;
@@ -13408,7 +13414,7 @@ async function driveStages(
           const { attemptDirectory } = await prepareStageAttempt({
             begin: {
               eventStore,
-              runId: runId,
+              runId,
               runDirectory,
               stage,
               attempt,
@@ -13450,7 +13456,7 @@ async function driveStages(
               flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
               context: runtimeContext,
               eventStore,
-              runId: runId,
+              runId,
               cancellation: dependencies.cancellation,
             });
 
@@ -13464,7 +13470,7 @@ async function driveStages(
                 workspace,
                 injectedAgentMemory,
                 run: async () => await executeAgentStage({
-                  runId: runId,
+                  runId,
                   stage,
                   attempt,
                   attemptDirectory,
@@ -13515,7 +13521,7 @@ async function driveStages(
               });
               if (!judgeOutput.result) throw new Error(judgeOutput.reason);
               eventStore.append({
-                runId: runId,
+                runId,
                 stageId: stage.id,
                 attempt: effectiveAttempt,
                 type: "judge.completed",
@@ -13542,7 +13548,7 @@ async function driveStages(
               markStageCompleted(completedStages, stage.id);
               appendSuccessfulStageCompletion({
                 eventStore,
-                runId: runId,
+                runId,
                 stage,
                 attempt: effectiveAttempt,
                 maxAttempts,
@@ -13569,7 +13575,7 @@ async function driveStages(
                 flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
                 context: runtimeContext,
                 eventStore,
-                runId: runId,
+                runId,
                 cancellation: dependencies.cancellation,
               });
               stageCompleted = true;
@@ -13591,7 +13597,7 @@ async function driveStages(
                 workspace,
                 injectedAgentMemory,
                 run: async () => await executeAgentStage({
-                  runId: runId,
+                  runId,
                   stage,
                   attempt,
                   attemptDirectory,
@@ -13648,7 +13654,7 @@ async function driveStages(
                 flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
                 context: runtimeContext,
                 eventStore,
-                runId: runId,
+                runId,
                 cancellation: dependencies.cancellation,
               });
               stageCompleted = true;
@@ -13660,7 +13666,7 @@ async function driveStages(
               const contextControls = resolveStageContextControls(loaded.flow, stage);
             const readPolicy = resolveStageReadPolicy(loaded.flow.spec.reads, stage);
               const runGate = async () => await executeGateStage({
-                runId: runId,
+                runId,
                 attempt,
                 stage,
                 repoPath,
@@ -13700,7 +13706,7 @@ async function driveStages(
                     return await runGate();
                   })();
               const recordedGate = recordGateStageResult({
-                runId: runId,
+                runId,
                 stage,
                 attempt,
                 maxAttempts,
@@ -13749,7 +13755,7 @@ async function driveStages(
                   flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
                   context: runtimeContext,
                   eventStore,
-                  runId: runId,
+                  runId,
                   cancellation: dependencies.cancellation,
                 });
                 stageCompleted = true;
@@ -13761,7 +13767,7 @@ async function driveStages(
               await injectedAgentMemory.cleanup();
               const commandResult = await executeCommandStage({
                 configuration,
-                runId: runId,
+                runId,
                 stage,
                 attempt,
                 attemptDirectory,
@@ -13789,7 +13795,7 @@ async function driveStages(
                   flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
                   context: runtimeContext,
                   eventStore,
-                  runId: runId,
+                  runId,
                   cancellation: dependencies.cancellation,
                 });
                 stageCompleted = true;
@@ -13831,7 +13837,7 @@ async function driveStages(
                 if (!blocked.eventsAppended) {
                   appendRunBlockedEvents({
                     eventStore,
-                    runId: runId,
+                    runId,
                     stageId: stage.id,
                     attempt: effectiveAttempt,
                     blocker: blocked.blocker,
@@ -13855,7 +13861,7 @@ async function driveStages(
           // this stage earned and make a resume repeat paid work.
           if (!budgetExceededError?.stageCompleted) {
             eventStore.append({
-              runId: runId,
+              runId,
               stageId: stage.id,
               attempt: effectiveAttempt,
               type: "stage.failed",
@@ -13864,7 +13870,7 @@ async function driveStages(
           }
           if (budgetExceededError) {
             eventStore.append({
-              runId: runId,
+              runId,
               type: "run.failed",
               payload: redactRuntimeUnknown({
                 stageId: stage.id,
@@ -13893,7 +13899,7 @@ async function driveStages(
             completedStages,
             reworkEdges,
             eventStore,
-            runId: runId,
+            runId,
             context: runtimeContext,
           });
           if (policy.action === "retry") continue;
@@ -13934,7 +13940,7 @@ async function driveStages(
           if (!blocked.eventsAppended) {
             appendRunBlockedEvents({
               eventStore,
-              runId: runId,
+              runId,
               stageId: stage.id,
               attempt: attemptsByStage.get(stage.id) ?? 1,
               blocker: blocked.blocker,
@@ -13955,7 +13961,7 @@ async function driveStages(
           )
         ) {
           eventStore.append({
-            runId: runId,
+            runId,
             stageId: stage.id,
             attempt: failedAttempt,
             type: "stage.failed",
@@ -13972,7 +13978,7 @@ async function driveStages(
         ) {
           appendOrchestratorDecision({
             eventStore,
-            runId: runId,
+            runId,
             stage,
             attempt: failedAttempt,
             maxAttempts,
@@ -13986,7 +13992,7 @@ async function driveStages(
         }
         if (!terminalEvents.some((event) => event.type === "run.failed")) {
           eventStore.append({
-            runId: runId,
+            runId,
             type: "run.failed",
             payload: redactRuntimeUnknown(
               { stageId: stage.id, error: errorMessage },
@@ -14007,7 +14013,7 @@ async function driveStages(
     if (resumableAttempt && resumableStage?.status === "interrupted") {
       appendOrchestratorDecision({
         eventStore,
-        runId: runId,
+        runId,
         stage,
         attempt: resumableAttempt.attempt,
         maxAttempts: maxAttemptsForStage(stage, loaded.flow.spec.maxAttempts),
@@ -14019,7 +14025,7 @@ async function driveStages(
         error: "interrupted after process restart",
       });
       eventStore.append({
-        runId: runId,
+        runId,
         stageId: stage.id,
         attempt: resumableAttempt.attempt,
         type: "stage.failed",
@@ -14040,7 +14046,7 @@ async function driveStages(
     if (!resumeApprovalAttempt && !resumeOperatorReview) {
       const stageAttempt = await beginStageAttempt({
         eventStore,
-        runId: runId,
+        runId,
         runDirectory,
         stage,
         attempt,
@@ -14070,7 +14076,7 @@ async function driveStages(
           flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
           context: runtimeContext,
           eventStore,
-          runId: runId,
+          runId,
           cancellation: dependencies.cancellation,
         });
       }
@@ -14078,7 +14084,7 @@ async function driveStages(
       if (stage.type === "sync-change") {
         await injectedAgentMemory.cleanup();
         outcome.syncMetadata = await executeSyncChangeStage({
-          runId: runId,
+          runId,
           stage,
           attempt,
           attemptDirectory,
@@ -14099,7 +14105,7 @@ async function driveStages(
           flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
           context: runtimeContext,
           eventStore,
-          runId: runId,
+          runId,
           cancellation: dependencies.cancellation,
         });
         projection = projectRun(eventStore.list(runId));
@@ -14110,7 +14116,7 @@ async function driveStages(
 
       if (stage.type === "publish-change") {
         const published = await executePublishChangeStage({
-          runId: runId,
+          runId,
           stage,
           attempt,
           attemptDirectory,
@@ -14147,7 +14153,7 @@ async function driveStages(
           flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
           context: runtimeContext,
           eventStore,
-          runId: runId,
+          runId,
           cancellation: dependencies.cancellation,
         });
         projection = projectRun(eventStore.list(runId));
@@ -14158,7 +14164,7 @@ async function driveStages(
 
       if (stage.type === "update-change") {
         const updated = await executeUpdateChangeStage({
-          runId: runId,
+          runId,
           stage,
           attempt,
           attemptDirectory,
@@ -14194,7 +14200,7 @@ async function driveStages(
           flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
           context: runtimeContext,
           eventStore,
-          runId: runId,
+          runId,
           cancellation: dependencies.cancellation,
         });
         projection = projectRun(eventStore.list(runId));
@@ -14206,7 +14212,7 @@ async function driveStages(
       if (stage.type === "approval") {
         await injectedAgentMemory.cleanup();
         const approval = await executeApprovalStage({
-          runId: runId,
+          runId,
           stage,
           attempt,
           flowTimeouts: loaded.flow.spec.timeouts,
@@ -14229,7 +14235,7 @@ async function driveStages(
           flowMaxToolOutputTokens: loaded.flow.spec.maxToolOutputTokens,
           context: runtimeContext,
           eventStore,
-          runId: runId,
+          runId,
           cancellation: dependencies.cancellation,
         });
         projection = projectRun(eventStore.list(runId));
@@ -14245,7 +14251,7 @@ async function driveStages(
         if (!blocked.eventsAppended) {
           appendRunBlockedEvents({
             eventStore,
-            runId: runId,
+            runId,
             stageId: stage.id,
             attempt: effectiveAttempt,
             blocker: blocked.blocker,
@@ -14264,7 +14270,7 @@ async function driveStages(
         );
       }
       eventStore.append({
-        runId: runId,
+        runId,
         stageId: stage.id,
         attempt: effectiveAttempt,
         type: "stage.failed",
@@ -14274,7 +14280,7 @@ async function driveStages(
       });
       appendOrchestratorDecision({
         eventStore,
-        runId: runId,
+        runId,
         stage,
         attempt: effectiveAttempt,
         maxAttempts: 1,
@@ -14286,7 +14292,7 @@ async function driveStages(
         error: errorMessage,
       });
       eventStore.append({
-        runId: runId,
+        runId,
         type: "run.failed",
         payload: redactRuntimeUnknown({
           stageId: stage.id,
