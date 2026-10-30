@@ -475,3 +475,86 @@ describe("createCodexExecCapture", () => {
     expect(readCodexExecActivity(text)).toBeUndefined();
   });
 });
+
+describe("createCodexExecCapture failure reasons", () => {
+  function captured(events: unknown[]): Array<Record<string, unknown>> {
+    const capture = createCodexExecCapture({ now: () => 1 });
+    capture.write(execStream(events));
+    return capture.text().trim().split("\n").map((text) => JSON.parse(text));
+  }
+
+  it("keeps the message of error and turn.failed events and drops every other field", () => {
+    const reason =
+      "The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account.";
+    expect(captured([
+      {
+        type: "error",
+        message: reason,
+        request: { prompt: "must be dropped" },
+        headers: { authorization: "must be dropped" },
+        body: "must be dropped",
+      },
+      { type: "turn.failed", error: { message: reason, codex_error_info: { body: "must be dropped" } } },
+    ])).toEqual([
+      { type: "error", message: reason, observedAt: 1 },
+      { type: "turn.failed", error: { message: reason }, observedAt: 1 },
+    ]);
+  });
+
+  it("redacts secrets before truncating a long message to 500 characters", () => {
+    const [event] = captured([
+      {
+        type: "error",
+        message: `prefix\u0000Authorization: Bearer xyz123secret ${SECRET} ${"x".repeat(5000)}`,
+      },
+    ]);
+    const kept = event?.message as string;
+    expect(kept).toContain("[REDACTED]");
+    expect(kept).not.toContain("xyz123secret");
+    expect(kept).not.toContain(SECRET);
+    expect(kept).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f]/);
+    expect(kept).toHaveLength(501);
+    expect(kept.endsWith("…")).toBe(true);
+  });
+
+  it("drops a message that is not a string", () => {
+    expect(captured([
+      { type: "error", message: { nested: "drop me" } },
+      { type: "turn.failed", error: { message: 42 } },
+    ])).toEqual([
+      { type: "error", observedAt: 1 },
+      { type: "turn.failed", observedAt: 1 },
+    ]);
+  });
+
+  it("keeps an error item's message and never adds one to other items", () => {
+    const [errorItem, commandItem] = captured([
+      { type: "item.completed", item: { id: "item_0", type: "error", message: "stream disconnected" } },
+      { type: "item.completed", item: { id: "item_1", type: "command_execution", message: "drop me", status: "completed" } },
+    ]);
+    expect(errorItem?.item).toEqual({ id: "item_0", type: "error", message: "stream disconnected" });
+    expect(commandItem?.item).toEqual({ id: "item_1", type: "command_execution", status: "completed" });
+  });
+
+  it("leaves usage accounting unchanged when failure messages are present", () => {
+    const turn = [
+      { type: "turn.started" },
+      { type: "turn.completed", usage: { input_tokens: 400, cached_input_tokens: 100, output_tokens: 20 } },
+    ];
+    const plain = createCodexExecCapture({ now: () => 1 });
+    plain.write(execStream([{ type: "thread.started", thread_id: THREAD }, ...turn]));
+    const withFailure = createCodexExecCapture({ now: () => 1 });
+    withFailure.write(execStream([
+      { type: "thread.started", thread_id: THREAD },
+      { type: "item.completed", item: { id: "item_0", type: "error", message: "reconnecting" } },
+      ...turn,
+      { type: "error", message: "provider rejected the request" },
+      { type: "turn.failed", error: { message: "provider rejected the request" } },
+    ]));
+
+    const expected = readCodexExecActivity(plain.text());
+    expect(expected).toMatchObject({ inputTokens: 400, outputTokens: 20, cachedInputTokens: 100 });
+    const actual = readCodexExecActivity(withFailure.text());
+    expect({ ...actual, provenance: undefined }).toEqual({ ...expected, provenance: undefined });
+  });
+});

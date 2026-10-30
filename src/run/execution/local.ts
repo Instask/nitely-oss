@@ -36,7 +36,11 @@ import type {
   RunCommandOptions,
   WorkspaceHandle,
 } from "./types.js";
-import { createCodexExecCapture, readCodexExecActivity } from "./codex-activity.js";
+import {
+  createCodexExecCapture,
+  describeCodexFailure,
+  readCodexExecActivity,
+} from "./codex-activity.js";
 import { withCodexRolloutCalls } from "./codex-rollout.js";
 import {
   codexConfigOverrides,
@@ -683,6 +687,7 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
       id: "codex",
       effort: effortContractFor("codex"),
       networkAccess: "required",
+      describeFailure: ({ stdout }) => describeCodexFailure({ stdout }),
       // Codex reads skills, plugins, packages, and rules from $CODEX_HOME.
       // An isolated CODEX_HOME that holds only auth.json and config.toml keeps
       // login and model configuration while leaving every pack behind.
