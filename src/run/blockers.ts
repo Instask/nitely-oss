@@ -20,7 +20,6 @@ function stringField(value: unknown, key: string): string | undefined {
 }
 
 function combinedRuntimeOutput(error: unknown): string {
-  if (typeof error === "string") return error.trim();
   const parts = [
     error instanceof Error ? error.message : undefined,
     stringField(error, "code"),
@@ -84,20 +83,17 @@ export function classifyAgentRuntimeBlocker(input: {
   stageId: string;
   runtime?: string;
   error: unknown;
-} | string): RunBlocker | undefined {
-  const normalized = typeof input === "string"
-    ? { stageId: "agent", runtime: "codex", error: input }
-    : input;
-  const message = combinedRuntimeOutput(normalized.error);
+}): RunBlocker | undefined {
+  const message = combinedRuntimeOutput(input.error);
   if (!message) {
     return undefined;
   }
   if (matchesCredentialFailure(message)) {
-    const runtime = normalized.runtime ? ` for ${normalized.runtime}` : "";
+    const runtime = input.runtime ? ` for ${input.runtime}` : "";
     return {
       reason: "agent_credentials_invalid",
-      stageId: normalized.stageId,
-      runtime: normalized.runtime,
+      stageId: input.stageId,
+      runtime: input.runtime,
       message: [
         `Agent credentials${runtime} were rejected.`,
         "Check the configured credential source and scopes, refresh or replace the credential, then resume the run.",
@@ -108,8 +104,8 @@ export function classifyAgentRuntimeBlocker(input: {
   if (matchesUsageLimit(message)) {
     return {
       reason: "agent_usage_limit",
-      stageId: normalized.stageId,
-      runtime: normalized.runtime,
+      stageId: input.stageId,
+      runtime: input.runtime,
       message,
       retryAfter: extractRetryAfter(message),
     };
@@ -117,8 +113,8 @@ export function classifyAgentRuntimeBlocker(input: {
   if (matchesRuntimeUnavailable(message)) {
     return {
       reason: "agent_runtime_unavailable",
-      stageId: normalized.stageId,
-      runtime: normalized.runtime,
+      stageId: input.stageId,
+      runtime: input.runtime,
       message,
     };
   }

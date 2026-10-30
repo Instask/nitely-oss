@@ -475,11 +475,12 @@ function compactKeptEvent(event: Record<string, unknown>): Record<string, unknow
   return undefined;
 }
 
-/** Return the most useful sanitized failure reason from Codex JSONL stdout. */
-export function describeCodexFailure(input: {
-  stdout: string;
-  stderr: string;
-}): string | undefined {
+/**
+ * The failure reason Codex reported on its JSON stream, sanitized again so an
+ * uncompacted capture is held to the same bound. A turn failure wins over a
+ * stream error, which wins over an error item; within a kind the last one wins.
+ */
+export function describeCodexFailure(input: { stdout: string }): string | undefined {
   let turnFailed: string | undefined;
   let error: string | undefined;
   let errorItem: string | undefined;
@@ -558,12 +559,7 @@ function compactItemWindows(type: string, head: string, tail: string): Record<st
  */
 export function createCodexExecCapture(
   options: { now?: () => number; onLine?: (line: string) => void } = {},
-): {
-  write(chunk: Buffer | string): void;
-  size(): number;
-  text(): string;
-  end(): { stdout: string; stderr: string };
-} {
+): { write(chunk: Buffer | string): void; size(): number; text(): string } {
   const now = options.now ?? Date.now;
   const decoder = new TextDecoder("utf-8");
   const out: string[] = [];
@@ -696,22 +692,6 @@ export function createCodexExecCapture(
         }
       }
       return out.join("");
-    },
-    end() {
-      const stdout = this.text()
-        .split("\n")
-        .map((line) => {
-          if (!line.trim()) return line;
-          try {
-            const event = JSON.parse(line) as Record<string, unknown>;
-            delete event.observedAt;
-            return JSON.stringify(event);
-          } catch {
-            return line;
-          }
-        })
-        .join("\n");
-      return { stdout, stderr: "" };
     },
   };
 }
