@@ -56,6 +56,16 @@ jobs:
           echo "NITELY_TEST_CODEX_BIN=$codex_bin" >> "$GITHUB_ENV"
           echo "NITELY_TEST_REQUIRE_CODEX=1" >> "$GITHUB_ENV"
 
+      # The Claude MCP regression uses the real CLI's local --version path and
+      # must fail when the pinned binary is absent rather than silently skip.
+      - name: Pinned Claude Code CLI
+        run: |
+          npm install --no-save --no-audit --no-fund --prefix "$RUNNER_TEMP/claude-code-cli" @anthropic-ai/claude-code@2.1.300
+          claude_bin="$RUNNER_TEMP/claude-code-cli/node_modules/.bin/claude"
+          "$claude_bin" --version
+          echo "NITELY_TEST_CLAUDE_BIN=$claude_bin" >> "$GITHUB_ENV"
+          echo "NITELY_TEST_REQUIRE_CLAUDE=1" >> "$GITHUB_ENV"
+
       - name: Tests
         run: pnpm run test:run
 

@@ -55,7 +55,7 @@ docker/runner/build.sh --tag nitely-runner:local --verify
 
 # agent variant: the same, plus the agent CLIs you name and pin
 docker/runner/build.sh --variant agent --tag nitely-runner-agent:local \
-  --agent-clis "@openai/codex@latest @anthropic-ai/claude-code@latest"
+  --agent-clis "@openai/codex@0.162.0 @anthropic-ai/claude-code@2.1.300"
 ```
 
 Each OCI run resolves the configured image tag to an immutable local image ID
@@ -141,6 +141,23 @@ on the same disk as the worktrees, and Nitely removes it with the container.
 Read-only isolated workspaces keep only the tmpfs. Verification also treats
 `ENOSPC` / `no space left on device` as an environment failure, so it is
 retried or escalated rather than sent back to the implementation.
+
+For no-model-call verification of the runner toolchain, install those exact
+versions and run the shared version contract against their explicit paths:
+
+```bash
+npm install --no-save --prefix /tmp/nitely-verification \
+  @openai/codex@0.162.0 @anthropic-ai/claude-code@2.1.300
+NITELY_TEST_CODEX_BIN=/tmp/nitely-verification/node_modules/.bin/codex \
+NITELY_TEST_CLAUDE_BIN=/tmp/nitely-verification/node_modules/.bin/claude \
+pnpm exec tsx -e 'import { verifyPinnedCli } from "./src/verification/toolchain.ts"; await verifyPinnedCli({ tool: "codex", executable: process.env.NITELY_TEST_CODEX_BIN! }); await verifyPinnedCli({ tool: "claude", executable: process.env.NITELY_TEST_CLAUDE_BIN! });'
+```
+
+The helper invokes only `--version`; missing binaries and version-contract
+mismatches are explicit environment errors. It makes no auth or model request.
+OCI verification keeps `/tmp` on tmpfs and uses the disk-backed `TMPDIR`
+scratch directory described above, so larger test suites do not depend on the
+small memory filesystem.
 
 Codex writes a per-thread rollout under `CODEX_HOME/sessions`, which Nitely
 reads after the attempt for per-model-call usage. Inside a container it is lost

@@ -42,6 +42,44 @@ export interface DiagnoseVerificationFailureInput {
   validReworkStages: ReadonlySet<string>;
 }
 
+export interface VerificationTestFailure {
+  testName: string;
+  error: {
+    code?: string;
+    name?: string;
+    syscall?: string;
+    message?: string;
+  };
+}
+
+export interface VerificationFailureClassificationSummary {
+  category: "environment" | "implementation";
+  requiresImplementationRework: boolean;
+}
+
+const VERIFICATION_ENVIRONMENT_CODES = new Set([
+  "VERIFICATION_CLI_MISSING",
+  "VERIFICATION_CLI_VERSION_MISMATCH",
+]);
+
+function isVerificationEnvironmentFailure(failure: VerificationTestFailure): boolean {
+  const error = failure.error;
+  if (VERIFICATION_ENVIRONMENT_CODES.has(error.code ?? "")) return true;
+  const text = `${error.name ?? ""} ${error.syscall ?? ""} ${error.message ?? ""}`;
+  // Limit ENOENT recognition to a spawned verification CLI. A missing module
+  // or fixture in a product test is still an implementation failure.
+  return error.code === "ENOENT" && /spawn\s+(?:codex|claude)(?:\s|$)/i.test(text);
+}
+
+export function classifyVerificationFailures(
+  failures: readonly VerificationTestFailure[],
+): VerificationFailureClassificationSummary {
+  const allEnvironment = failures.length > 0 && failures.every(isVerificationEnvironmentFailure);
+  return allEnvironment
+    ? { category: "environment", requiresImplementationRework: false }
+    : { category: "implementation", requiresImplementationRework: true };
+}
+
 const VERIFICATION_PATTERN =
   /\b(verify|verification|verified|test|tests|testing|e2e|end[-_ ]?to[-_ ]?end|playwright|cypress|vitest|jest|pytest|rspec|check|typecheck|tsc|lint|build|conformance|acceptance|qa|smoke)\b/i;
 
