@@ -36,7 +36,11 @@ import type {
   RunCommandOptions,
   WorkspaceHandle,
 } from "./types.js";
-import { createCodexExecCapture, readCodexExecActivity } from "./codex-activity.js";
+import {
+  createCodexExecCapture,
+  describeCodexFailure,
+  readCodexExecActivity,
+} from "./codex-activity.js";
 import { withCodexRolloutCalls } from "./codex-rollout.js";
 import {
   codexConfigOverrides,
@@ -683,6 +687,7 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
       id: "codex",
       effort: effortContractFor("codex"),
       networkAccess: "required",
+      describeFailure: ({ stdout, stderr }) => describeCodexFailure({ stdout, stderr }),
       // Codex reads skills, plugins, packages, and rules from $CODEX_HOME.
       // An isolated CODEX_HOME that holds only auth.json and config.toml keeps
       // login and model configuration while leaving every pack behind.
@@ -815,19 +820,25 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
 
 /** Formats a runtime's non-zero exit, with its explanation when it has one. */
 export function agentRuntimeExitMessage(input: {
-  runtime: AgentRuntimeLauncher;
-  launchRuntime: string;
+  runtime: AgentRuntimeLauncher | string;
+  launchRuntime?: string;
   exitCode: number;
   model?: string;
   stdout: string;
   stderr: string;
 }): string {
-  const base = `${input.launchRuntime} exited with code ${input.exitCode}`;
-  const explanation = input.runtime.describeFailure?.({
-    model: input.model,
-    stdout: input.stdout,
-    stderr: input.stderr,
-  });
+  const launchRuntime = input.launchRuntime ??
+    (typeof input.runtime === "string" ? input.runtime : input.runtime.id);
+  const base = `${launchRuntime} exited with code ${input.exitCode}`;
+  const explanation = typeof input.runtime === "string"
+    ? input.runtime === "codex"
+      ? describeCodexFailure({ stdout: input.stdout, stderr: input.stderr })
+      : undefined
+    : input.runtime.describeFailure?.({
+      model: input.model,
+      stdout: input.stdout,
+      stderr: input.stderr,
+    });
   return explanation ? `${base}: ${explanation}` : base;
 }
 
