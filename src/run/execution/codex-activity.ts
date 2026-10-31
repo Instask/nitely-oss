@@ -8,7 +8,7 @@ const ENVELOPE_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
 function sanitizeCodexErrorMessage(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const cleaned = (redactText(value) ?? "")
-    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f]+/g, " ")
     .trim();
   if (!cleaned) return undefined;
   return cleaned.length > MAX_ERROR_MESSAGE_CHARS

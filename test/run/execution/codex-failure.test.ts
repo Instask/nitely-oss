@@ -229,7 +229,7 @@ describe("provider error envelopes", () => {
     }
     expect(describeCodexFailure({
       stdout: stream([{ type: "error", message: "plain\ntext\u0007" }]),
-    })).toBe("plain text");
+    })).toBe("plain\ntext");
   });
 
   it("keeps failure-event precedence unchanged while unwrapping the selected reason", () => {
