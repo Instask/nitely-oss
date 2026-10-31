@@ -232,6 +232,12 @@ runtime registry 精确解析。当前支持：
 - `codex`：运行 `codex exec --sandbox <sandbox> --cd <worktree> -`，prompt
   通过 stdin 传入。`NITELY_CODEX_SANDBOX` 可覆盖 sandbox 值，legacy
   `NIGHTLY_CODEX_SANDBOX` 仍被接受。`NITELY_CODEX_COMMAND` 可覆盖命令名。
+  Codex 只能通过执行命令读取文件，所以 `commands.mode` 为 none 的 stage
+  读不到 worktree 里的任何文件。这样的 stage 如果写 worktree 或是 review
+  gate，预检会给出 `stage-cannot-read` 警告。内置的 Codex flow 给
+  `write-tests` 和 `review` 配了只读的 `allow-list`（`cat`、`sed -n`、`rg`、
+  `ls`、`git diff` 等）；`review` 仍是 `write` none，Codex 以 `read-only`
+  sandbox 运行。
 - `claude`：运行 `claude -p --output-format json`，prompt 通过 stdin 传入。
   只写 worktree 且 `commands.mode` 为 none 的 stage 会带
   `--permission-mode acceptEdits`；还可能跑命令的 stage 会带

@@ -462,10 +462,19 @@ describe("flowTemplates", () => {
       const stages = new Map(
         (document.spec?.stages ?? []).map((stage) => [stage.id, stage]),
       );
+      // write-tests may write only test/ and may run only read-only commands:
+      // a Codex stage with no commands cannot read the code it tests (#746).
       expect(stages.get("write-tests")?.capabilities, templateId).toMatchObject({
         write: { scope: "worktree", allow: ["test/"] },
-        commands: { mode: "none" },
+        commands: { mode: "allow-list", allow: expect.arrayContaining(["cat *", "rg *"]) },
       });
+      const writeTestsCommands = (stages.get("write-tests")?.capabilities as {
+        commands?: { allow?: string[] };
+      } | undefined)?.commands?.allow ?? [];
+      expect(
+        writeTestsCommands.filter((rule) => /^(?:pnpm|npm|npx|node|rm|mv|cp|tee|bash|sh)\b/.test(rule)),
+        templateId,
+      ).toEqual([]);
       expect(stages.get("implement")?.capabilities, templateId).toMatchObject({
         write: { scope: "worktree" },
         commands: { mode: "unrestricted" },
