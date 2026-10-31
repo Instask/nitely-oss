@@ -1593,13 +1593,16 @@ describe("loadFlow", () => {
       );
 
       const writeTests = stages.get("write-tests");
+      // Codex reads files only through commands, so its write-tests stage
+      // gets read-only commands; runtimes with native reads keep none (#746).
+      const shellReads = writeTests && "runtime" in writeTests && writeTests.runtime === "codex";
       expect(writeTests, file).toMatchObject({
         type: "agent",
         inputs: ["spec", "tech-design"],
         outputs: ["tests"],
         capabilities: {
           write: { scope: "worktree", allow: ["test/"] },
-          commands: { mode: "none" },
+          commands: { mode: shellReads ? "allow-list" : "none" },
         },
       });
 
@@ -1640,7 +1643,7 @@ describe("loadFlow", () => {
       }
 
       if (file.includes("plan-approve")) {
-        for (const id of ["draft-spec", "draft-tech-design", "review", "reflect"]) {
+        for (const id of ["draft-spec", "draft-tech-design", "reflect"]) {
           expect(stages.get(id), `${file}:${id}`).toMatchObject({
             capabilities: {
               write: { scope: "none" },
@@ -1648,6 +1651,14 @@ describe("loadFlow", () => {
             },
           });
         }
+        // The Codex review gate reads the change through read-only commands
+        // and still cannot write (#746).
+        expect(stages.get("review"), `${file}:review`).toMatchObject({
+          capabilities: {
+            write: { scope: "none" },
+            commands: { mode: "allow-list" },
+          },
+        });
       }
     }
   });
