@@ -31,6 +31,7 @@ import {
   buildEvidencePrunePlan,
 } from "../../src/evidence/retention.js";
 
+import type { NewRunEvent } from "../../src/events/types.js";
 async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(join(path, ".."), { recursive: true });
   await writeFile(path, JSON.stringify(value, null, 2), "utf8");
@@ -182,7 +183,7 @@ async function seedRun(repoPath: string, input: SeedRunInput): Promise<string> {
         payload: status === "blocked"
           ? { reason: input.blockerReason ?? "approval_required" }
           : {},
-      });
+      } as NewRunEvent);
       const terminalType = `run.${status}` as
         | "run.completed"
         | "run.failed"
@@ -201,7 +202,7 @@ async function seedRun(repoPath: string, input: SeedRunInput): Promise<string> {
               }
             : {}),
         },
-      });
+      } as NewRunEvent);
     }
   } finally {
     store.close();

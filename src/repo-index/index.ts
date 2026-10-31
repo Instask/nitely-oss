@@ -2,9 +2,9 @@ import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, extname, isAbsolute, join, posix, relative, resolve } from "node:path";
 
 import { evaluateLocalPath, loadContextPolicy } from "../context/policy.js";
-import { EventStore } from "../events/store.js";
 import { eventStorePath, projectRun } from "../run/project.js";
 
+import { openRunEventStore } from "../events/run-events.js";
 export const REPO_INDEX_VERSION = 1;
 export const REPO_INDEX_RELATIVE_PATH = ".nitely/repo-index.json";
 const MAX_INDEXED_FILE_BYTES = 512 * 1024;
@@ -298,7 +298,7 @@ async function historicalRunLinks(repoPath: string): Promise<Map<string, RepoInd
     return links;
   }
 
-  const store = new EventStore(eventStorePath(repoPath));
+  const store = openRunEventStore(repoPath);
   try {
     for (const runId of store.listRunIds().slice(0, 50)) {
       const projection = projectRun(store.list(runId));
@@ -541,7 +541,7 @@ export function recordRepoIndexQuery(input: {
   attempt: number;
   result: RepoIndexQueryResult;
 }): void {
-  const store = new EventStore(eventStorePath(resolve(input.repoPath)));
+  const store = openRunEventStore(resolve(input.repoPath));
   try {
     store.append({
       runId: input.runId,

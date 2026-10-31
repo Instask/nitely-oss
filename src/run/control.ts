@@ -3,7 +3,6 @@ import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { EventStore } from "../events/store.js";
 import {
   ResumeClaimStore,
   resumeClaimStorePath,
@@ -12,7 +11,7 @@ import { listUnifiedWorkItems } from "../work-items/access.js";
 import { reconcileTerminalWorkItemRun } from "./admission.js";
 import { RunAdmissionStore } from "./admission-store.js";
 import { resolveApproval } from "./approvals.js";
-import { eventStorePath, projectRun, type ProjectedApproval } from "./project.js";
+import { projectRun, type ProjectedApproval } from "./project.js";
 import type {
   RunCancellationControl,
   RunCancellationRequest,
@@ -20,6 +19,7 @@ import type {
 } from "./run-flow.js";
 import { exportRunTrace, otlpTraceConfigFromEnv } from "../telemetry/run-trace-otel.js";
 
+import { openRunEventStore } from "../events/run-events.js";
 /**
  * Raised when another owner already holds the Run continuation claim, so this
  * caller must not resume the Run.
@@ -160,7 +160,7 @@ export async function cancelRun(input: CancelRunInput): Promise<void> {
   // anything.
   const active = activeRuns.get(activeRunKey(input.repoPath, input.runId));
   const requestedAt = new Date().toISOString();
-  const store = new EventStore(eventStorePath(input.repoPath));
+  const store = openRunEventStore(input.repoPath);
   try {
     // BEGIN IMMEDIATE holds SQLite's write lock, so the status read and the
     // append are atomic against every other event writer: a run that
@@ -245,7 +245,7 @@ export async function cancelRun(input: CancelRunInput): Promise<void> {
     void exportRunTrace({
       runId,
       listEvents: () => {
-        const traceStore = new EventStore(eventStorePath(repoPath));
+        const traceStore = openRunEventStore(repoPath);
         try {
           return traceStore.list(runId);
         } finally {
@@ -304,7 +304,7 @@ export async function denyRunApproval(input: {
     decision: "denied",
     ...(input.actor ? { actor: input.actor } : {}),
   });
-  const events = new EventStore(eventStorePath(input.repoPath));
+  const events = openRunEventStore(input.repoPath);
   try {
     if (!TERMINAL_RUN_STATUSES.has(projectRun(events.list(input.runId)).status)) {
       events.append({

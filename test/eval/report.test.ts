@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { EventStore } from "../../src/events/store.js";
-import type { StoredRunEvent } from "../../src/events/types.js";
+import type { NewRunEvent, StoredRunEvent } from "../../src/events/types.js";
 import {
   evalManifestSha256,
   parseEvalCohortManifest,
@@ -766,7 +766,7 @@ describe("eval cohort reporting", () => {
           payload: type === "run.created"
             ? { evalReplayInvocationId: EVAL_INVOCATION_ID }
             : {},
-        });
+        } as NewRunEvent);
       }
       store.append({
         runId,

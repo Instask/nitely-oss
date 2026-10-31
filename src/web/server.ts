@@ -313,7 +313,7 @@ import {
   type ListRunsOptions,
   type WebRunSummary,
 } from "./runs.js";
-import { eventStorePath, projectRun } from "../run/project.js";
+import { projectRun } from "../run/project.js";
 import { UnsafeRunOwnedFileError } from "../run/owned-file.js";
 import {
   DEV_PR_WORK_ITEM_TYPE,
@@ -521,6 +521,7 @@ import {
 import { compareVisualArtifacts } from "../visual-diff/index.js";
 import type { VisualComparisonImageInput } from "../visual-diff/index.js";
 
+import { openRunEventStore } from "../events/run-events.js";
 const staticDir = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "..", "..", "src", "web", "static",
@@ -4729,7 +4730,7 @@ function appendRunEvent(
   repoPath: string,
   event: Parameters<EventStore["append"]>[0],
 ): void {
-  const store = new EventStore(eventStorePath(repoPath));
+  const store = openRunEventStore(repoPath);
   try {
     store.append(event);
   } finally {
@@ -4741,7 +4742,7 @@ function currentProjectedRunStatus(
   repoPath: string,
   runId: string,
 ): ReturnType<typeof projectRun>["status"] | undefined {
-  const store = new EventStore(eventStorePath(repoPath));
+  const store = openRunEventStore(repoPath);
   try {
     const events = store.list(runId);
     return events.length > 0 ? projectRun(events).status : undefined;
@@ -4751,7 +4752,7 @@ function currentProjectedRunStatus(
 }
 
 function runHasPinnedExternalKnowledge(repoPath: string, runId: string): boolean {
-  const store = new EventStore(eventStorePath(repoPath));
+  const store = openRunEventStore(repoPath);
   try {
     const value = projectRun(store.list(runId)).knowledgeSnapshots;
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -4769,7 +4770,7 @@ function pendingApprovalForRun(
   runId: string,
   approvalId?: string,
 ): ReturnType<typeof projectRun>["approvals"][number] | undefined {
-  const store = new EventStore(eventStorePath(repoPath));
+  const store = openRunEventStore(repoPath);
   try {
     const events = store.list(runId);
     if (events.length === 0) return undefined;
@@ -5129,7 +5130,7 @@ async function approvalNotificationStillCurrent(
   if (!isWorkflowApprovalNotificationType(notification.type)) return true;
   const approvalSource = parseApprovalNotificationSourceKey(notification.sourceKey);
   if (!approvalSource) return true;
-  const store = new EventStore(eventStorePath(repository.path));
+  const store = openRunEventStore(repository.path);
   try {
     const events = store.list(approvalSource.runId);
     if (events.length === 0) return true;
@@ -6132,7 +6133,7 @@ function recordWebResumeFailure(
   actor: string,
 ): void {
   try {
-    const store = new EventStore(eventStorePath(repoPath));
+    const store = openRunEventStore(repoPath);
     try {
       store.append({
         runId,
@@ -6155,7 +6156,7 @@ async function prepareWebRunResume(
   runId: string,
   requestingUser?: WebUserContext,
 ) {
-  const events = new EventStore(eventStorePath(repository.path));
+  const events = openRunEventStore(repository.path);
   const run = (() => { try { return projectRun(events.list(runId), { openAttemptStatus: "interrupted" }); } finally { events.close(); } })();
   if (run.status !== "blocked" && run.status !== "interrupted") {
     throw new WebInputError("only blocked or interrupted runs can be resumed");
@@ -6193,7 +6194,7 @@ export async function runWebUsageLimitRecovery(input: StartWebServerInput): Prom
     await mkdir(join(repository.path, ".nitely"), { recursive: true });
     const persisted = new Map(readSchedulerCooldowns(repository.path).map((entry) => [entry.runtime, new Date(entry.until)]));
     const now = new Date();
-    const events = new EventStore(eventStorePath(repository.path));
+    const events = openRunEventStore(repository.path);
     const candidates = (() => {
       try {
         return tasks.filter((task) => {
