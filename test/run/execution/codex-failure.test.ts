@@ -74,7 +74,7 @@ describe("describeCodexFailure", () => {
 });
 
 describe("Codex runtime exit message and blocker", () => {
-  it("names a model rejection and leaves it an ordinary failure", () => {
+  it("blocks as a model rejection", () => {
     const reason =
       "The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account.";
     const stdout = capturedStdout([
@@ -84,7 +84,7 @@ describe("Codex runtime exit message and blocker", () => {
       { type: "turn.failed", error: { message: reason } },
     ]);
     expect(codexExit(stdout)).toBe(`codex exited with code 1: ${reason}`);
-    expect(block(stdout)).toBeUndefined();
+    expect(block(stdout)).toMatchObject({ reason: "agent_runtime_unavailable", runtime: "codex" });
   });
 
   it("blocks on a usage limit with its retry time", () => {
@@ -117,7 +117,7 @@ describe("Codex runtime exit message and blocker", () => {
 });
 
 describe("provider error envelopes", () => {
-  it("unwraps the production Codex model rejection and leaves it an ordinary failure", () => {
+  it("unwraps the production Codex model rejection and blocks as a model rejection", () => {
     const message =
       "The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account.";
     const stdout = stream([
@@ -133,7 +133,7 @@ describe("provider error envelopes", () => {
     expect(describeCodexFailure({ stdout })).toBe(
       `model_not_found (400): ${message}`,
     );
-    expect(block(stdout)).toBeUndefined();
+    expect(block(stdout)).toMatchObject({ reason: "agent_runtime_unavailable", runtime: "codex" });
   });
 
   it("unwraps a usage-limit envelope and preserves its retry time for blocking", () => {

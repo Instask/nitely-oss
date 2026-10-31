@@ -234,4 +234,54 @@ describe("agent runtime blocker classification", () => {
       }),
     ).toBeUndefined();
   });
+
+  it("classifies a model_not_found provider error in the Error message with remediation guidance", () => {
+    const providerError = "codex exited with code 1: model_not_found (400): The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account.";
+    const blocker = classifyAgentRuntimeBlocker({
+      stageId: "write-tests",
+      runtime: "codex",
+      error: new Error(providerError),
+    });
+
+    expect(blocker).toEqual({
+      reason: "agent_runtime_unavailable",
+      stageId: "write-tests",
+      runtime: "codex",
+      message: `Model rejected for codex: change the stage model (or pass a model override) to one the configured credential can use, then resume the run. Provider error: ${providerError}`,
+    });
+  });
+
+  it("classifies a model that does not exist as a model rejection", () => {
+    expect(classifyAgentRuntimeBlocker({
+      stageId: "implement",
+      runtime: "codex",
+      error: new Error("The model 'gpt-x' does not exist or you do not have access to it."),
+    })).toMatchObject({ reason: "agent_runtime_unavailable" });
+  });
+
+  it("does not classify model rejection text found only in stdout", () => {
+    expect(classifyAgentRuntimeBlocker({
+      stageId: "implement",
+      runtime: "codex",
+      error: Object.assign(new Error("codex exited with code 1"), {
+        stdout: "model_not_found",
+      }),
+    })).toBeUndefined();
+  });
+
+  it("keeps credential failure precedence when the message also says model_not_found", () => {
+    expect(classifyAgentRuntimeBlocker({
+      stageId: "implement",
+      runtime: "codex",
+      error: new Error("401 Unauthorized: invalid access token; model_not_found"),
+    })).toMatchObject({ reason: "agent_credentials_invalid" });
+  });
+
+  it("keeps usage-limit classification and retry time", () => {
+    expect(classifyAgentRuntimeBlocker({
+      stageId: "implement",
+      runtime: "codex",
+      error: new Error("You've hit your usage limit. Try again at 3:05 PM."),
+    })).toMatchObject({ reason: "agent_usage_limit", retryAfter: "3:05 PM" });
+  });
 });

@@ -42,16 +42,17 @@ describe("loadFlow", () => {
 
     expect(stages.get("write-tests")).toMatchObject({
       runtime: "codex",
-      model: "gpt-5.3-codex-spark",
+      model: "gpt-6-luna",
     });
     expect(stages.get("implement")).toMatchObject({
       runtime: "codex",
-      model: "gpt-5.3-codex",
+      model: "gpt-6-luna",
     });
     expect(stages.get("review")).toMatchObject({
       runtime: "codex",
-      model: "gpt-5",
+      model: "gpt-6-luna",
     });
+    expect(stages.get("reflect")).not.toHaveProperty("model");
   });
 
   it("loads static size-tier flows with distinct topologies", async () => {
@@ -1768,9 +1769,9 @@ describe("loadFlow", () => {
     ]));
 
     const primaryModels = {
-      "write-tests": "gpt-5.3-codex-spark",
-      implement: "gpt-5.3-codex",
-      review: "gpt-5",
+      "write-tests": "gpt-6-luna",
+      implement: "gpt-6-luna",
+      review: "gpt-6-luna",
     };
 
     for (const file of bootstrapFlowFiles) {
