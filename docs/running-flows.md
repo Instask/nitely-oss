@@ -491,12 +491,9 @@ missing configuration names, and fallback/blocker events in the run evidence.
 
 ### Bootstrap model tiers
 
-The primary `flows/implement-spec-bootstrap.json` flow uses explicit model
-tiers: `gpt-5.3-codex-spark` for test authoring, `gpt-5.3-codex` for
-implementation, and `gpt-5` for review. This keeps cheaper work on the
-cheaper model and reserves the more expensive model for the quality-deciding
-review gate. The tier names are ordinary runtime/model pairs, not a new schema
-or automatic router.
+The primary `flows/implement-spec-bootstrap.json` flow uses `gpt-6-luna` for
+test authoring, implementation, and review. The model name is an ordinary
+runtime/model pair, not a new schema or automatic router.
 
 Provider variants may use the same convention with provider-supported model
 ids, for example cheap scan/write-tests, mid-tier implementation, and

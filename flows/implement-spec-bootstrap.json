@@ -25,7 +25,7 @@
         "id": "write-tests",
         "type": "agent",
         "runtime": "codex",
-        "model": "gpt-5.3-codex-spark",
+        "model": "gpt-6-luna",
         "capabilities": {
           "write": { "scope": "worktree", "allow": ["test/"] },
           "commands": { "mode": "allow-list", "allow": ["cat *", "head *", "tail *", "sed -n *", "rg *", "grep *", "ls", "ls *", "wc *", "pwd", "git diff*", "git log*", "git show*", "git status*"] }
@@ -39,7 +39,7 @@
         "id": "implement",
         "type": "agent",
         "runtime": "codex",
-        "model": "gpt-5.3-codex",
+        "model": "gpt-6-luna",
         "capabilities": {
           "write": { "scope": "worktree" },
           "commands": { "mode": "unrestricted" }
@@ -71,7 +71,7 @@
         "type": "gate",
         "mode": "review",
         "runtime": "codex",
-        "model": "gpt-5",
+        "model": "gpt-6-luna",
         "capabilities": {
           "write": { "scope": "none" },
           "commands": { "mode": "allow-list", "allow": ["cat *", "head *", "tail *", "sed -n *", "rg *", "grep *", "ls", "ls *", "wc *", "pwd", "git diff*", "git log*", "git show*", "git status*"] }

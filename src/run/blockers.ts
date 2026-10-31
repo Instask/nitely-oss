@@ -21,12 +21,17 @@ function stringField(value: unknown, key: string): string | undefined {
 
 function combinedRuntimeOutput(error: unknown): string {
   const parts = [
-    error instanceof Error ? error.message : undefined,
+    error instanceof Error ? error.message : typeof error === "string" ? error : undefined,
     stringField(error, "code"),
     stringField(error, "stdout"),
     stringField(error, "stderr"),
   ].filter((part): part is string => Boolean(part?.trim()));
   return parts.join("\n").trim();
+}
+
+function headlineOf(error: unknown): string {
+  if (typeof error === "string") return error;
+  return error instanceof Error ? error.message : "";
 }
 
 function matchesUsageLimit(text: string): boolean {
@@ -61,6 +66,12 @@ function matchesRuntimeUnavailable(text: string): boolean {
   if (/unable to start agent runtime/.test(lower)) return true;
   if (/command .+ was not found/.test(lower)) return true;
   return /\benoent\b/.test(lower);
+}
+
+function matchesModelRejection(headline: string): boolean {
+  const lower = headline.toLowerCase();
+  if (/\bmodel_not_found\b/.test(lower)) return true;
+  return /\bmodel\b[\s\S]{0,120}?\b(?:is not supported|does not exist)\b/.test(lower);
 }
 
 function extractRetryAfter(text: string): string | undefined {
@@ -108,6 +119,15 @@ export function classifyAgentRuntimeBlocker(input: {
       runtime: input.runtime,
       message,
       retryAfter: extractRetryAfter(message),
+    };
+  }
+  const headline = headlineOf(input.error).trim();
+  if (headline && matchesModelRejection(headline)) {
+    return {
+      reason: "agent_runtime_unavailable",
+      stageId: input.stageId,
+      runtime: input.runtime,
+      message: `Model rejected for ${input.runtime ?? "the agent runtime"}: change the stage model (or pass a model override) to one the configured credential can use, then resume the run. Provider error: ${headline}`,
     };
   }
   if (matchesRuntimeUnavailable(message)) {

@@ -47,10 +47,8 @@ Flow 使用 `apiVersion: "nitely.dev/v1alpha1"`，并声明一组 stages：
 
 ## Bootstrap model 分层
 
-主 `flows/implement-spec-bootstrap.json` 使用显式 model 分层：测试编写使用
-`gpt-5.3-codex-spark`，实现使用 `gpt-5.3-codex`，review gate 使用 `gpt-5`。
-这样把便宜工作留给低成本模型，把更贵的模型留给决定质量的 review gate。
-这只是普通的 runtime/model 配对，不会扩展 schema，也不会自动路由。
+主 `flows/implement-spec-bootstrap.json` 的测试编写、实现和 review gate
+均使用 `gpt-6-luna`。这只是普通的 runtime/model 配对，不会扩展 schema，也不会自动路由。
 
 其他 provider 的 flow 可以遵循同一约定，但必须使用该 provider 支持的 model id，
 并通过仓库的 runtime capability policy 校验；不要假设不同 provider 的名称可互换。
