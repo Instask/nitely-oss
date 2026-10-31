@@ -631,3 +631,79 @@ describe("preflight external inputs", () => {
     expect(report.issues.map((entry) => entry.code)).toContain("flow-invalid");
   });
 });
+
+describe("stages that cannot read", () => {
+  const inputs = { spec: { connector: "local-file" as const, uri: "spec.md" } };
+  const evaluate = async (stage: Record<string, unknown>) =>
+    await evaluateRunPreflight({
+      repoPath: await repoWithFlow(flow(stage)),
+      flowPath: "flows/preflight.json",
+      inputs,
+      providerStore: providerStore({ codex: true, anthropic: true }),
+    });
+  const blind = { write: { scope: "worktree", allow: ["test/"] }, commands: { mode: "none" } };
+
+  it("warns when a shell-reading runtime writes the worktree with every command forbidden", async () => {
+    const report = await evaluate({ runtime: "codex", capabilities: blind });
+    expect(report.status).toBe("WARN");
+    expect(report.issues).toEqual([
+      expect.objectContaining({
+        severity: "warning",
+        code: "stage-cannot-read",
+        stageId: "implement",
+        runtime: "codex",
+        message: expect.stringMatching(/writes files it cannot read/),
+      }),
+    ]);
+  });
+
+  it("warns for a review gate that cannot read the change", async () => {
+    const report = await evaluate({
+      type: "gate",
+      mode: "review",
+      runtime: "codex",
+      outputs: ["review"],
+      capabilities: { write: { scope: "none" }, commands: { mode: "none" } },
+    });
+    expect(report.issues).toEqual([
+      expect.objectContaining({
+        code: "stage-cannot-read",
+        message: expect.stringMatching(/reviews code it cannot read/),
+      }),
+    ]);
+  });
+
+  it("passes when read-only commands are allowed, the runtime reads natively, or the stage neither writes nor reviews", async () => {
+    const allowList = await evaluate({
+      runtime: "codex",
+      capabilities: { ...blind, commands: { mode: "allow-list", allow: ["cat *", "rg *"] } },
+    });
+    expect(allowList.issues).toEqual([]);
+
+    const native = await evaluate({ runtime: "claude", capabilities: blind });
+    expect(native.issues).toEqual([]);
+
+    const readsNothing = await evaluate({
+      runtime: "codex",
+      capabilities: { write: { scope: "none" }, commands: { mode: "none" } },
+    });
+    expect(readsNothing.issues).toEqual([]);
+
+    const declaredNoReads = await evaluate({
+      runtime: "codex",
+      capabilities: { ...blind, read: { scope: "none" } },
+    });
+    expect(declaredNoReads.issues).toEqual([]);
+  });
+
+  it("checks each runtime candidate on its own", async () => {
+    const report = await evaluate({
+      runtime: undefined,
+      runtimes: [{ runtime: "claude" }, { runtime: "codex" }],
+      capabilities: blind,
+    });
+    expect(report.issues).toEqual([
+      expect.objectContaining({ code: "stage-cannot-read", runtime: "codex" }),
+    ]);
+  });
+});

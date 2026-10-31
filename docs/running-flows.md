@@ -438,7 +438,12 @@ runtime registry. Supported runtimes are:
 - `codex`: runs `codex exec --sandbox <sandbox> --cd <worktree> -` and sends the
   prompt on stdin. `NITELY_CODEX_SANDBOX` overrides the sandbox value, with
   `NIGHTLY_CODEX_SANDBOX` accepted as a legacy fallback. `NITELY_CODEX_COMMAND`
-  can override the command name.
+  can override the command name. Codex reads files only by running commands,
+  so a stage with `commands.mode` none can read nothing in the worktree.
+  Preflight warns `stage-cannot-read` when such a stage writes the worktree or
+  is a review gate. The shipped Codex flows give `write-tests` and `review` a
+  read-only `allow-list` (`cat`, `sed -n`, `rg`, `ls`, `git diff`, ...);
+  `review` keeps `write` none, which runs Codex in its `read-only` sandbox.
 - `claude`: runs `claude -p --output-format json` and sends the prompt on
   stdin. Write-capable stages with `commands.mode` none pass
   `--permission-mode acceptEdits`. Stages that may also run commands pass

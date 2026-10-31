@@ -28,9 +28,9 @@
         "model": "gpt-5.3-codex-spark",
         "capabilities": {
           "write": { "scope": "worktree", "allow": ["test/"] },
-          "commands": { "mode": "none" }
+          "commands": { "mode": "allow-list", "allow": ["cat *", "head *", "tail *", "sed -n *", "rg *", "grep *", "ls", "ls *", "wc *", "pwd", "git diff*", "git log*", "git show*", "git status*"] }
         },
-        "prompt": "Write only the tests for the supplied Nitely feature specification and technical design. Add or extend test files so every acceptance scenario and functional requirement that can be asserted has a test naming the behavior it demands, and assert the demanded values rather than restating whatever the current code returns. Do not write or change production code, do not delete or weaken existing tests, and do not try to make the suite green: these tests are expected to fail until the implement stage lands. Produce a tests artifact listing each test file you touched, each test name you added, and the specification requirement it pins.",
+        "prompt": "Write only the tests for the supplied Nitely feature specification and technical design. Add or extend test files so every acceptance scenario and functional requirement that can be asserted has a test naming the behavior it demands, and assert the demanded values rather than restating whatever the current code returns. Do not write or change production code, do not delete or weaken existing tests, and do not try to make the suite green: these tests are expected to fail until the implement stage lands. Produce a tests artifact listing each test file you touched, each test name you added, and the specification requirement it pins. Read the existing tests and the production code they exercise before writing: extend existing test files in place, never rewrite a file or drop its existing cases, and call the APIs as they exist unless the technical design introduces a new one. Running commands is limited to reading files; do not run the test suite in this stage.",
         "inputs": ["spec", "tech-design"],
         "context": { "fullReadInputs": ["spec", "tech-design"] },
         "outputs": ["tests"]
@@ -74,9 +74,9 @@
         "model": "gpt-5",
         "capabilities": {
           "write": { "scope": "none" },
-          "commands": { "mode": "none" }
+          "commands": { "mode": "allow-list", "allow": ["cat *", "head *", "tail *", "sed -n *", "rg *", "grep *", "ls", "ls *", "wc *", "pwd", "git diff*", "git log*", "git show*", "git status*"] }
         },
-        "prompt": "Review the implementation against the specification and technical design. Check for missing tests, broken CLI contracts, unsafe filesystem behavior, weak event semantics, and incomplete documentation. If planning approval endpoints or src/work-items/planning.ts changed, verify deterministic invalid-transition tests cover the affected state-machine paths. Do not modify files during review. Write `Review verdict: pass` when there are no P0/P1/blocking findings. Write `Review verdict: fail` when any P0/P1/blocking issue exists, and list P0/P1 findings first. Compare the implementation against the tests artifact: treat a deleted, skipped, or weakened test from the write-tests stage as a blocking finding unless the implementation artifact justifies it under a `Test contract change` heading.",
+        "prompt": "Review the implementation against the specification and technical design. Check for missing tests, broken CLI contracts, unsafe filesystem behavior, weak event semantics, and incomplete documentation. If planning approval endpoints or src/work-items/planning.ts changed, verify deterministic invalid-transition tests cover the affected state-machine paths. Do not modify files during review. Write `Review verdict: pass` when there are no P0/P1/blocking findings. Write `Review verdict: fail` when any P0/P1/blocking issue exists, and list P0/P1 findings first. Compare the implementation against the tests artifact: treat a deleted, skipped, or weakened test from the write-tests stage as a blocking finding unless the implementation artifact justifies it under a `Test contract change` heading. Read the changed source and tests directly with the allowed read-only commands, and compare existing test files against the base (`git diff` when git metadata is available); do not rely only on the implementation summary.",
         "inputs": ["spec", "tech-design", "tests", "implementation", "test-report"],
         "outputs": ["review"]
       },

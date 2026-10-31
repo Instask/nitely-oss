@@ -208,6 +208,13 @@ export interface AgentRuntimeLauncher {
    * a recognisable cause, such as a rejected credential or unknown model.
    */
   describeFailure?(input: { model?: string; stdout: string; stderr: string }): string | undefined;
+  /**
+   * How the runtime reads repository files. `shell` runtimes read only by
+   * running commands, so a stage with `capabilities.commands.mode: none` can
+   * read nothing. `native` runtimes have file tools of their own. Absent when
+   * not established.
+   */
+  fileReads?: "native" | "shell";
   build(input: AgentRuntimeLaunchInput): AgentRuntimeLaunchSpec;
 }
 
@@ -687,6 +694,7 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
       id: "codex",
       effort: effortContractFor("codex"),
       networkAccess: "required",
+      fileReads: "shell",
       describeFailure: ({ stdout }) => describeCodexFailure({ stdout }),
       // Codex reads skills, plugins, packages, and rules from $CODEX_HOME.
       // An isolated CODEX_HOME that holds only auth.json and config.toml keeps
@@ -737,6 +745,7 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
       effort: effortContractFor("claude"),
       requiredEnv: [["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]],
       networkAccess: "required",
+      fileReads: "native",
       build: ({ model, nativeEffort, env, permissionMode, additionalDirectories }) => ({
         runtime: "claude",
         command: env.NITELY_CLAUDE_COMMAND ?? "claude",
@@ -778,6 +787,7 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
       effort: effortContractFor("openrouter"),
       requiredEnv: [[OPENROUTER_API_KEY_ENV]],
       networkAccess: "required",
+      fileReads: "native",
       validateModel: openRouterModelProblem,
       describeFailure: ({ model, stderr }) => describeOpenRouterFailure({ model, stderr }),
       build: ({ model, nativeEffort, env }) => ({
@@ -791,6 +801,7 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
       id: "pi",
       effort: effortContractFor("pi"),
       networkAccess: "required",
+      fileReads: "native",
       build: ({ model, nativeEffort, env }) => ({
         runtime: "pi",
         command: env.NITELY_PI_COMMAND ?? "pi",
@@ -806,6 +817,7 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
       effort: effortContractFor("together"),
       requiredEnv: [[TOGETHER_API_KEY_ENV]],
       networkAccess: "required",
+      fileReads: "native",
       validateModel: togetherModelProblem,
       describeFailure: ({ model, stderr }) => describeTogetherFailure({ model, stderr }),
       build: ({ model, nativeEffort, env }) => ({
