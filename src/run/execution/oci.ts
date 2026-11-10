@@ -1513,9 +1513,18 @@ export class OciExecutionBackend implements ExecutionBackend {
         // The container has no user config of its own to fall back on.
         allowConfigFallback: false,
         stageId: input.stage.id,
+        cwd: ws.path,
+        attemptDirectory: input.attemptDirectory,
       });
-      if (mcpServers.disable.length > 0 && runtime.mcpServerRestriction) {
-        runtimeArgs = runtime.mcpServerRestriction.disable(runtimeArgs, mcpServers.disable);
+      if (
+        runtime.mcpServerRestriction
+        && mcpServers.outcome
+        && mcpServers.outcome.enforcement !== "inherited"
+        && mcpServers.outcome.enforcement !== "unsupported"
+      ) {
+        runtimeArgs = mcpServers.applyArgs
+          ? mcpServers.applyArgs(runtimeArgs)
+          : runtime.mcpServerRestriction.disable(runtimeArgs, mcpServers.disable);
       }
       // Codex truncates each stored tool output to the stage's read budget.
       if (launch.runtime === "codex") {

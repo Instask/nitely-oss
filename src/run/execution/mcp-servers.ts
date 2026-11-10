@@ -426,3 +426,237 @@ export async function restrictCodexMcpServers(input: {
     },
   };
 }
+
+// ---- Claude Code -----------------------------------------------------------
+
+/**
+ * Claude Code loads MCP servers from several layers (user `~/.claude.json`,
+ * project `.mcp.json`, local project entries, plugins). `--strict-mcp-config`
+ * with `--mcp-config` replaces that set for one launch (Claude Code ≥ 2.1.x).
+ */
+
+export type ClaudeMcpServerDefinition = Record<string, unknown>;
+
+export interface ClaudeMcpConfigFile {
+  mcpServers: Record<string, ClaudeMcpServerDefinition>;
+}
+
+/** Shape of the `mcp_servers` field on Claude's stream-json `system/init` event. */
+export interface ClaudeInitMcpServer {
+  name: string;
+  status?: string;
+}
+
+/**
+ * Reads only each entry's `name` from a Claude stream-json `system/init` line.
+ * Returns undefined when no init event is present or `mcp_servers` is missing.
+ */
+export function parseClaudeInitMcpServers(stdout: string): ClaudeInitMcpServer[] | undefined {
+  for (const line of stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    let event: unknown;
+    try {
+      event = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (typeof event !== "object" || event === null) continue;
+    const record = event as { type?: unknown; subtype?: unknown; mcp_servers?: unknown };
+    if (record.type !== "system" || record.subtype !== "init") continue;
+    if (!Array.isArray(record.mcp_servers)) return undefined;
+    const servers: ClaudeInitMcpServer[] = [];
+    for (const entry of record.mcp_servers) {
+      if (typeof entry !== "object" || entry === null) return undefined;
+      const { name, status } = entry as { name?: unknown; status?: unknown };
+      if (typeof name !== "string") return undefined;
+      servers.push({
+        name,
+        ...(typeof status === "string" ? { status } : {}),
+      });
+    }
+    return servers;
+  }
+  return undefined;
+}
+
+/** Argv that produces a `system/init` event without needing a successful model call. */
+export function claudeMcpProbeArgs(configPath: string): string[] {
+  // `--mcp-config` is variadic, so another flag must follow the path or the
+  // prompt is read as a second config file.
+  return [
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--strict-mcp-config",
+    "--mcp-config",
+    configPath,
+    "--permission-prompts",
+    "none",
+    "nitely-mcp-probe",
+  ];
+}
+
+/** Launch argv with Claude's exclusive MCP config. */
+export function withClaudeStrictMcpConfig(
+  args: readonly string[],
+  configPath: string,
+): string[] {
+  // Place the restriction flags early so subcommands and trailing `-` prompts stay intact.
+  return ["--strict-mcp-config", "--mcp-config", configPath, ...args];
+}
+
+/**
+ * Picks declared server definitions out of already-loaded Claude config layers.
+ * Precedence matches Claude Code: local project entry, then project `.mcp.json`,
+ * then user scope. Definitions are returned for `--mcp-config`; callers must not
+ * log or persist them beyond the temp file the launch reads.
+ */
+export function selectClaudeMcpServers(input: {
+  declared: readonly string[];
+  /** Highest precedence first. */
+  layers: ReadonlyArray<Readonly<Record<string, ClaudeMcpServerDefinition>>>;
+}): {
+  selected: Record<string, ClaudeMcpServerDefinition>;
+  available: string[];
+  unconfigured: string[];
+} {
+  const available: string[] = [];
+  const seen = new Set<string>();
+  for (const layer of input.layers) {
+    for (const name of Object.keys(layer)) {
+      if (!seen.has(name)) {
+        seen.add(name);
+        available.push(name);
+      }
+    }
+  }
+  const selected: Record<string, ClaudeMcpServerDefinition> = {};
+  const unconfigured: string[] = [];
+  for (const name of input.declared) {
+    let found: ClaudeMcpServerDefinition | undefined;
+    for (const layer of input.layers) {
+      if (Object.prototype.hasOwnProperty.call(layer, name)) {
+        found = layer[name];
+        break;
+      }
+    }
+    if (found) selected[name] = found;
+    else unconfigured.push(name);
+  }
+  return { selected, available, unconfigured };
+}
+
+/** Builds the JSON document Claude accepts via `--mcp-config`. */
+export function claudeMcpConfigDocument(
+  servers: Record<string, ClaudeMcpServerDefinition>,
+): ClaudeMcpConfigFile {
+  return { mcpServers: { ...servers } };
+}
+
+/**
+ * Leaves exactly the declared MCP servers enabled for a Claude Code launch.
+ *
+ * Mechanism (Claude Code 2.1.x): write a temp `--mcp-config` that holds only the
+ * declared server definitions, pass `--strict-mcp-config` so every other layer
+ * is ignored, then confirm through a stream-json `system/init` probe (no
+ * successful model call required).
+ */
+export async function restrictClaudeMcpServers(input: {
+  request: Exclude<AgentMcpServersRequest, { mode: "inherited" }>;
+  stageId: string;
+  /** Runs the Claude CLI with the given argv and returns combined stdout. */
+  probe: (args: readonly string[]) => Promise<string>;
+  /** Write the exclusive MCP config JSON; returns an absolute path. */
+  writeConfig: (document: ClaudeMcpConfigFile) => Promise<string>;
+  /** Config layers, highest precedence first (local, project, user). */
+  layers: ReadonlyArray<Readonly<Record<string, ClaudeMcpServerDefinition>>>;
+}): Promise<{
+  disable: string[];
+  outcome: AgentMcpServersOutcome;
+  applyArgs: (args: readonly string[]) => string[];
+  configPath: string;
+}> {
+  const declared = input.request.declared;
+  const { selected, available, unconfigured } = selectClaudeMcpServers({
+    declared,
+    layers: input.layers,
+  });
+  const disabled = available.filter((name) => !declared.includes(name));
+  const document = claudeMcpConfigDocument(selected);
+  const configPath = await input.writeConfig(document);
+  const applyArgs = (args: readonly string[]) => withClaudeStrictMcpConfig(args, configPath);
+
+  const failClosed = (reason: string): never => {
+    throw new Error(
+      `stage ${input.stageId} requires only its declared MCP servers but ${reason}`,
+    );
+  };
+  const partial = (reason: string, enabled: string[]) => {
+    if (input.request.mode === "declared-required") failClosed(reason);
+    return {
+      disable: ["__claude_strict__"],
+      outcome: {
+        enforcement: "partial" as const,
+        enabled,
+        disabled,
+        ...(unconfigured.length > 0 ? { unconfigured } : {}),
+        reason,
+      },
+      applyArgs,
+      configPath,
+    };
+  };
+
+  let stdout: string;
+  try {
+    stdout = await input.probe(claudeMcpProbeArgs(configPath));
+  } catch (error) {
+    // A fake or missing API key still emits system/init before failing; Node's
+    // execFile attaches that stdout to the error. Prefer it over failing open.
+    const recovered =
+      error && typeof error === "object" && "stdout" in error && typeof (error as { stdout?: unknown }).stdout === "string"
+        ? (error as { stdout: string }).stdout
+        : "";
+    if (parseClaudeInitMcpServers(recovered)) {
+      stdout = recovered;
+    } else {
+      const message = error instanceof Error ? error.message.split("\n")[0]! : String(error);
+      return partial(`claude MCP probe failed: ${message}`, Object.keys(selected));
+    }
+  }
+  const listed = parseClaudeInitMcpServers(stdout);
+  if (!listed) {
+    return partial(
+      "claude did not emit a system/init mcp_servers list under --strict-mcp-config",
+      Object.keys(selected),
+    );
+  }
+  const listedNames = listed.map((server) => server.name);
+  const unexpected = listedNames.filter((name) => !declared.includes(name));
+  const missingSelected = Object.keys(selected).filter((name) => !listedNames.includes(name));
+  const reasons = [
+    ...(unexpected.length > 0
+      ? [`undeclared MCP server(s) ${unexpected.join(", ")} still appeared under --strict-mcp-config`]
+      : []),
+    ...(missingSelected.length > 0
+      ? [`declared MCP server(s) ${missingSelected.join(", ")} did not appear under --mcp-config`]
+      : []),
+  ];
+  if (reasons.length > 0) {
+    return partial(reasons.join("; "), listedNames);
+  }
+  return {
+    // Non-empty so backends that only call disable() when length > 0 still apply.
+    disable: ["__claude_strict__"],
+    outcome: {
+      enforcement: "enforced",
+      enabled: listedNames,
+      disabled,
+      ...(unconfigured.length > 0 ? { unconfigured } : {}),
+    },
+    applyArgs,
+    configPath,
+  };
+}
