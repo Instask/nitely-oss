@@ -174,9 +174,17 @@ Runtime support today:
   image is seen too. The container's `HOME` is an empty throwaway path, so
   usually nothing is configured and the restriction is enforced trivially; a
   declared server is then reported as unconfigured.
-- `claude`, `glm`, `grok`, and the Pi-based runtimes have no restriction
-  mechanism; they run unchanged under the default (`unsupported`) and fail
-  closed under `globalMcpServers: false`.
+- `claude` on both backends: Claude Code 2.1.x `--strict-mcp-config` together
+  with an `--mcp-config` file that holds only the stage's declared server
+  definitions (extracted from local/project/user layers; never logged). The
+  exclusive set is confirmed by a `claude -p --output-format stream-json`
+  probe that reads the `system/init` `mcp_servers` field — no successful model
+  call is required. An empty declaration is an empty `--mcp-config` plus
+  `--strict-mcp-config`. A committed project `.mcp.json` is ignored under the
+  flag, including in an OCI container whose `HOME` is empty.
+- `glm`, `grok`, and the Pi-based runtimes (`pi`, `openrouter`, `together`)
+  have no MCP support; they run unchanged under the default (`unsupported`,
+  reason "no MCP support") and fail closed under `globalMcpServers: false`.
 
 Each agent attempt emits a `stage.runtime.mcp-servers` event with an
 `enforcement` of `enforced`, `partial`, `unsupported`, or `inherited`, the
@@ -188,7 +196,11 @@ the same fields. Only `enforced` means the undeclared servers are confirmed off.
 
 The regression suite `test/run/execution/codex-mcp-servers.real.test.ts` runs
 the real Codex CLI against a trusted-project fixture; CI installs a pinned
-`@openai/codex` for it.
+`@openai/codex` for it. `test/run/execution/claude-mcp-servers.real.test.ts`
+runs the real Claude Code CLI the same way and must fail (not skip) when the
+binary is missing. CI should pin `@anthropic-ai/claude-code@2.1.263` (see
+`docs/ci/pinned-claude-cli.sh`); the workflow file itself is not changed in this
+PR because the installer token lacks `workflow` scope.
 
 `required_mcp_servers` keeps its admission role too: a declared server that
 maps to a provider still requires that provider to be configured before the

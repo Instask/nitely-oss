@@ -359,3 +359,122 @@ describe("restrictCodexMcpServers", () => {
     });
   });
 });
+
+import {
+  claudeMcpConfigDocument,
+  claudeMcpProbeArgs,
+  parseClaudeInitMcpServers,
+  restrictClaudeMcpServers,
+  selectClaudeMcpServers,
+  withClaudeStrictMcpConfig,
+} from "../../../src/run/execution/mcp-servers.js";
+
+describe("Claude MCP restriction", () => {
+  it("selects declared servers by local > project > user precedence", () => {
+    const result = selectClaudeMcpServers({
+      declared: ["keep", "missing", "shadowed"],
+      layers: [
+        { shadowed: { command: "local" } },
+        { keep: { command: "project" }, shadowed: { command: "project" } },
+        { keep: { command: "user" }, other: { command: "user" } },
+      ],
+    });
+    expect(result.selected).toEqual({
+      keep: { command: "project" },
+      shadowed: { command: "local" },
+    });
+    expect(result.unconfigured).toEqual(["missing"]);
+    expect(result.available).toEqual(["shadowed", "keep", "other"]);
+  });
+
+  it("builds --strict-mcp-config argv and probe args", () => {
+    expect(withClaudeStrictMcpConfig(["-p", "--model", "x"], "/tmp/cfg.json")).toEqual([
+      "--strict-mcp-config",
+      "--mcp-config",
+      "/tmp/cfg.json",
+      "-p",
+      "--model",
+      "x",
+    ]);
+    expect(claudeMcpProbeArgs("/tmp/cfg.json")).toEqual([
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--strict-mcp-config",
+      "--mcp-config",
+      "/tmp/cfg.json",
+      "--permission-prompts",
+      "none",
+      "nitely-mcp-probe",
+    ]);
+    expect(claudeMcpConfigDocument({ a: { command: "true" } })).toEqual({
+      mcpServers: { a: { command: "true" } },
+    });
+  });
+
+  it("parses mcp_servers from a stream-json system/init event", () => {
+    const stdout = [
+      '{"type":"system","subtype":"init","mcp_servers":[{"name":"kept","status":"failed"},{"name":"other","status":"connected"}]}',
+      '{"type":"result","is_error":true}',
+    ].join("\n");
+    expect(parseClaudeInitMcpServers(stdout)).toEqual([
+      { name: "kept", status: "failed" },
+      { name: "other", status: "connected" },
+    ]);
+    expect(parseClaudeInitMcpServers('{"type":"result"}\n')).toBeUndefined();
+  });
+
+  it("enforces when the probe lists only declared servers", async () => {
+    const written: unknown[] = [];
+    const result = await restrictClaudeMcpServers({
+      request: { mode: "declared-if-supported", declared: ["kept"] },
+      stageId: "s1",
+      layers: [
+        {},
+        { kept: { command: "true" }, sneaky: { command: "true" } },
+        {},
+      ],
+      writeConfig: async (document) => {
+        written.push(document);
+        return "/tmp/nitely-test-claude-mcp.json";
+      },
+      probe: async () =>
+        '{"type":"system","subtype":"init","mcp_servers":[{"name":"kept","status":"failed"}]}\n',
+    });
+    expect(written).toEqual([{ mcpServers: { kept: { command: "true" } } }]);
+    expect(result.outcome).toEqual({
+      enforcement: "enforced",
+      enabled: ["kept"],
+      disabled: ["sneaky"],
+    });
+    expect(result.applyArgs(["-p"])).toEqual([
+      "--strict-mcp-config",
+      "--mcp-config",
+      "/tmp/nitely-test-claude-mcp.json",
+      "-p",
+    ]);
+  });
+
+  it("is partial when an undeclared server still appears, and fail-closed when required", async () => {
+    const probe = async () =>
+      '{"type":"system","subtype":"init","mcp_servers":[{"name":"sneaky"}]}\n';
+    const partial = await restrictClaudeMcpServers({
+      request: { mode: "declared-if-supported", declared: [] },
+      stageId: "s1",
+      layers: [{}, { sneaky: { command: "true" } }, {}],
+      writeConfig: async () => "/tmp/empty.json",
+      probe,
+    });
+    expect(partial.outcome.enforcement).toBe("partial");
+    await expect(
+      restrictClaudeMcpServers({
+        request: { mode: "declared-required", declared: [] },
+        stageId: "s1",
+        layers: [{}, { sneaky: { command: "true" } }, {}],
+        writeConfig: async () => "/tmp/empty.json",
+        probe,
+      }),
+    ).rejects.toThrow(/requires only its declared MCP servers/);
+  });
+});

@@ -1108,16 +1108,16 @@ describe("LocalExecutionBackend", () => {
     });
   });
 
-  it("fails closed when a runtime without MCP restriction must restrict", async () => {
+  it("fails closed when a runtime without MCP support must restrict", async () => {
     const backend = new LocalExecutionBackend({
-      env: { ANTHROPIC_API_KEY: "key", PATH: "/usr/bin" },
+      env: { NITELY_GLM_API_KEY: "key", PATH: "/usr/bin" },
       spawn: createSuccessfulSpawn([]),
     });
     const run = (mode: "declared-if-supported" | "declared-required") =>
       backend.runAgent(
         { runId: "run-agent", path: "/repo/worktree" },
         {
-          stage: agentStage({ runtime: "claude" }),
+          stage: agentStage({ runtime: "glm" }),
           prompt: "Implement this.",
           attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
           mcpServers: { mode, declared: [] },
@@ -1125,14 +1125,56 @@ describe("LocalExecutionBackend", () => {
       );
 
     await expect(run("declared-required")).rejects.toThrow(
-      /requires only its declared MCP servers but agent runtime claude has no MCP server restriction mechanism/,
+      /requires only its declared MCP servers but agent runtime glm has no MCP support/,
     );
     await expect(run("declared-if-supported")).resolves.toMatchObject({
       mcpServers: {
         enforcement: "unsupported",
-        reason: "agent runtime claude has no MCP server restriction mechanism",
+        reason: "agent runtime glm has no MCP support",
       },
     });
+  });
+
+  it("restricts a Claude stage to declared servers with --strict-mcp-config", async () => {
+    const worktree = await mkdtemp(join(tmpdir(), "nitely-claude-mcp-"));
+    const attempt = await mkdtemp(join(tmpdir(), "nitely-claude-attempt-"));
+    try {
+      await writeFile(
+        join(worktree, ".mcp.json"),
+        `${JSON.stringify({ mcpServers: { kept: { command: "true" }, sneaky: { command: "true" } } })}\n`,
+      );
+      const calls: SpawnCall[] = [];
+      const backend = new LocalExecutionBackend({
+        env: { ANTHROPIC_API_KEY: "key", PATH: "/usr/bin", HOME: worktree },
+        spawn: createSuccessfulSpawn(calls),
+        probeRuntime: async () =>
+          '{"type":"system","subtype":"init","mcp_servers":[{"name":"kept","status":"failed"}]}\n',
+      });
+      const result = await backend.runAgent(
+        { runId: "run-agent", path: worktree },
+        {
+          stage: agentStage({ runtime: "claude" }),
+          prompt: "Implement this.",
+          attemptDirectory: attempt,
+          mcpServers: { mode: "declared-if-supported", declared: ["kept"] },
+        },
+      );
+      expect(result.mcpServers).toEqual({
+        enforcement: "enforced",
+        enabled: ["kept"],
+        disabled: ["sneaky"],
+      });
+      expect(calls[0]?.args.slice(0, 3)).toEqual([
+        "--strict-mcp-config",
+        "--mcp-config",
+        join(attempt, "claude-mcp-exclusive.json"),
+      ]);
+      const exclusive = JSON.parse(await readFile(join(attempt, "claude-mcp-exclusive.json"), "utf8"));
+      expect(exclusive).toEqual({ mcpServers: { kept: { command: "true" } } });
+    } finally {
+      await rm(worktree, { recursive: true, force: true });
+      await rm(attempt, { recursive: true, force: true });
+    }
   });
 
   it("reports the Codex session id so the next execution can continue it", async () => {

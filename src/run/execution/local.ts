@@ -43,12 +43,15 @@ import {
 } from "./codex-activity.js";
 import { withCodexRolloutCalls } from "./codex-rollout.js";
 import {
+  claudeMcpConfigDocument,
   codexConfigOverrides,
   codexConfiguredMcpServers,
   codexFeaturesListArgs,
   codexMcpListArgs,
+  restrictClaudeMcpServers,
   restrictCodexMcpServers,
   withCodexMcpServersDisabled,
+  type ClaudeMcpServerDefinition,
 } from "./mcp-servers.js";
 import { withCodexToolOutputLimit } from "./codex-tool-output.js";
 import {
@@ -167,8 +170,17 @@ export interface RuntimeMcpServerRestriction {
     probe: RuntimeProbe;
     env: RuntimeEnv;
     allowConfigFallback: boolean;
-  }): Promise<{ disable: string[]; outcome: AgentMcpServersOutcome }>;
-  /** Launch args with the named servers turned off. */
+    /** Worktree cwd; Claude reads project `.mcp.json` here. */
+    cwd?: string;
+    /** Directory for a temp exclusive MCP config (Claude). */
+    attemptDirectory?: string;
+  }): Promise<{
+    disable: string[];
+    outcome: AgentMcpServersOutcome;
+    /** When set, preferred over `disable()` for rewriting launch argv. */
+    applyArgs?: (args: readonly string[]) => string[];
+  }>;
+  /** Launch args with the named servers turned off (Codex-style). */
   disable(args: readonly string[], names: readonly string[]): string[];
 }
 
@@ -665,6 +677,87 @@ async function codexUserConfigServers(env: RuntimeEnv): Promise<string[]> {
   }
 }
 
+
+function claudeConfigDir(env: RuntimeEnv): string {
+  const configured = env.CLAUDE_CONFIG_DIR?.trim();
+  if (configured) return configured;
+  const home = env.HOME?.trim();
+  return home ? join(home, ".claude") : join(tmpdir(), "nitely-missing-claude-config");
+}
+
+function claudeUserJsonPath(env: RuntimeEnv): string {
+  // Claude Code stores user/local MCP entries in ~/.claude.json (alongside ~/.claude/).
+  const home = env.HOME?.trim();
+  return home ? join(home, ".claude.json") : join(tmpdir(), "nitely-missing-claude.json");
+}
+
+async function readJsonObject(path: string): Promise<Record<string, unknown> | undefined> {
+  try {
+    const raw = await readFile(path, "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function mcpServersFromObject(
+  value: unknown,
+): Record<string, ClaudeMcpServerDefinition> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  const out: Record<string, ClaudeMcpServerDefinition> = {};
+  for (const [name, def] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof def === "object" && def !== null && !Array.isArray(def)) {
+      out[name] = def as ClaudeMcpServerDefinition;
+    }
+  }
+  return out;
+}
+
+/**
+ * Claude MCP layers for a worktree, highest precedence first: local project
+ * entry in ~/.claude.json, project `.mcp.json`, then user-scope servers.
+ * Plugin servers are not extracted here; `--strict-mcp-config` drops them.
+ */
+async function claudeMcpConfigLayers(
+  env: RuntimeEnv,
+  cwd: string,
+): Promise<Record<string, ClaudeMcpServerDefinition>[]> {
+  const userJson = await readJsonObject(claudeUserJsonPath(env));
+  const local: Record<string, ClaudeMcpServerDefinition> = {};
+  const user: Record<string, ClaudeMcpServerDefinition> = {};
+  if (userJson) {
+    Object.assign(user, mcpServersFromObject(userJson.mcpServers));
+    const projects = userJson.projects;
+    if (typeof projects === "object" && projects !== null && !Array.isArray(projects)) {
+      const entry = (projects as Record<string, unknown>)[cwd];
+      if (typeof entry === "object" && entry !== null && !Array.isArray(entry)) {
+        Object.assign(local, mcpServersFromObject((entry as Record<string, unknown>).mcpServers));
+      }
+    }
+  }
+  const projectFile = await readJsonObject(join(cwd, ".mcp.json"));
+  const project = projectFile ? mcpServersFromObject(projectFile.mcpServers) : {};
+  return [local, project, user];
+}
+
+async function writeClaudeExclusiveMcpConfig(
+  directory: string | undefined,
+  document: ReturnType<typeof claudeMcpConfigDocument>,
+): Promise<string> {
+  const root = directory?.trim()
+    ? directory
+    : await mkdtemp(join(tmpdir(), "nitely-claude-mcp-"));
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const path = join(root, "claude-mcp-exclusive.json");
+  // Mode 0600: the file can carry server env/headers from the operator config.
+  await writeFile(path, `${JSON.stringify(document)}\n`, { mode: 0o600 });
+  return path;
+}
+
 class DefaultAgentRuntimeRegistry implements AgentRuntimeRegistry {
   private readonly runtimes: Map<string, AgentRuntimeLauncher>;
 
@@ -746,6 +839,26 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
       requiredEnv: [["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]],
       networkAccess: "required",
       fileReads: "native",
+      // Claude Code 2.1.x: --strict-mcp-config + --mcp-config holding only the
+      // stage's declared servers. Verified via stream-json system/init (no
+      // successful model call). Plugin and undeclared project/user servers drop.
+      mcpServerRestriction: {
+        restrict: async ({
+          request, stageId, probe, env, cwd, attemptDirectory,
+        }) => {
+          const worktree = cwd?.trim() || process.cwd();
+          const layers = await claudeMcpConfigLayers(env, worktree);
+          return restrictClaudeMcpServers({
+            request,
+            stageId,
+            layers,
+            probe,
+            writeConfig: (document) =>
+              writeClaudeExclusiveMcpConfig(attemptDirectory, document),
+          });
+        },
+        disable: (args, _names) => args as string[],
+      },
       build: ({ model, nativeEffort, env, permissionMode, additionalDirectories }) => ({
         runtime: "claude",
         command: env.NITELY_CLAUDE_COMMAND ?? "claude",
@@ -941,7 +1054,13 @@ export async function resolveMcpServerRestriction(input: {
   /** Whether the user config in `env` is the one the launch reads. */
   allowConfigFallback: boolean;
   stageId: string;
-}): Promise<{ disable: string[]; outcome?: AgentMcpServersOutcome }> {
+  cwd?: string;
+  attemptDirectory?: string;
+}): Promise<{
+  disable: string[];
+  outcome?: AgentMcpServersOutcome;
+  applyArgs?: (args: readonly string[]) => string[];
+}> {
   const request = input.request;
   // A caller that says nothing about MCP servers gets the previous behavior
   // and no claim in the result.
@@ -954,7 +1073,10 @@ export async function resolveMcpServerRestriction(input: {
   }
   const restriction = input.runtime.mcpServerRestriction;
   if (!restriction) {
-    const reason = `agent runtime ${input.runtime.id} has no MCP server restriction mechanism`;
+    const noMcp = ["glm", "grok", "pi", "openrouter", "together"].includes(input.runtime.id);
+    const reason = noMcp
+      ? `agent runtime ${input.runtime.id} has no MCP support`
+      : `agent runtime ${input.runtime.id} has no MCP server restriction mechanism`;
     if (request.mode === "declared-required") {
       throw new Error(
         `stage ${input.stageId} requires only its declared MCP servers but ${reason}`,
@@ -969,6 +1091,8 @@ export async function resolveMcpServerRestriction(input: {
     probe: input.probe,
     env: input.env,
     allowConfigFallback: input.allowConfigFallback,
+    cwd: input.cwd,
+    attemptDirectory: input.attemptDirectory,
   });
 }
 
@@ -1655,11 +1779,17 @@ export class LocalExecutionBackend implements ExecutionBackend {
       env: runtimeEnv,
       allowConfigFallback: true,
       stageId: input.stage.id,
+      cwd,
+      attemptDirectory: input.attemptDirectory,
     });
-    const restrictedLaunch = mcpServers.disable.length > 0 && runtime.mcpServerRestriction
+    const restrictedLaunch = runtime.mcpServerRestriction && mcpServers.outcome
+        && mcpServers.outcome.enforcement !== "inherited"
+        && mcpServers.outcome.enforcement !== "unsupported"
       ? {
         ...builtLaunch,
-        args: runtime.mcpServerRestriction.disable(builtLaunch.args, mcpServers.disable),
+        args: mcpServers.applyArgs
+          ? mcpServers.applyArgs(builtLaunch.args)
+          : runtime.mcpServerRestriction.disable(builtLaunch.args, mcpServers.disable),
       }
       : builtLaunch;
     // Codex truncates each stored tool output to the stage's read budget.
