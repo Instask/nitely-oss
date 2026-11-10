@@ -12,5 +12,9 @@ coverage/
 __pycache__/
 *.pyc
 
-# Agent working plans (superpowers skill); keep these out of the public repository.
+# Private per-issue notes. Specs, tech designs, and agent working plans belong
+# in jerryleooo/nitely under dev-notes/ (see that repo's AGENTS.md). Keep them
+# out of public PRs if they appear in a nitely-oss checkout.
+specs/
+docs/plans/
 docs/superpowers/
