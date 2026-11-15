@@ -95,6 +95,7 @@ import type { PlanningApprovalStatus } from "../work-items/planning.js";
 import { formatModelCallCurve } from "../telemetry/token-waste.js";
 import { WebInputError, WebNotFoundError } from "./errors.js";
 import { redactForWeb, redactUnknownForWeb } from "./redaction.js";
+import { isPathInside } from "../path-containment.js";
 
 export const WEB_RUN_STATUSES = [
   "completed",
@@ -3093,13 +3094,6 @@ function fallbackTimeline(
   });
 }
 
-function isPathInside(parent: string, candidate: string): boolean {
-  const relativePath = relative(parent, candidate);
-  return (
-    relativePath === "" ||
-    (!relativePath.startsWith("..") && !isAbsolute(relativePath))
-  );
-}
 
 function safeRunRelativePath(
   runDirectory: string,

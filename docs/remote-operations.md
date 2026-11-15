@@ -240,6 +240,38 @@ it belongs to leaves `running`, so `task start` works again. An API token needs
 `runs:start`. A cancel is refused with `409` while a resume of the same run is
 starting.
 
+Check provider keys after rotating one, or before resuming a run blocked on a
+rejected key:
+
+```bash
+nitely provider list --server http://192.0.2.10:4173
+nitely provider validate openrouter --server http://192.0.2.10:4173
+nitely provider validate openrouter --connection <connection-id> --json
+nitely provider validate github --allow-stored-only
+```
+
+`provider list` queries `GET /api/providers` and prints each provider's id,
+`configured`, `not-configured`, or `reconnect-required`, the connection a run
+would use, and the server's message. `provider validate` posts to
+`/api/providers/<id>/connections/<connection-id>/validate`, which is the
+Console's **Providers → Validate** button. Without `--connection` it validates
+the connection `provider list` reports. It prints one verdict:
+
+- `valid`: the provider accepted the key in a live check (`checked: "provider"`).
+- `unverified`: a usable credential is stored, but nothing asked the provider
+  (`checked: "stored"`). The server checks OpenRouter API keys live and only
+  stored state for every other provider, so a key revoked at the provider would
+  still reach this verdict.
+- `invalid`: the provider rejected the key, could not be reached, or the stored
+  credential needs reconnecting. The reason follows the verdict.
+
+It exits zero only for `valid`, or for `unverified` with `--allow-stored-only`.
+`--json` prints the server's `{ ok, checked, reason? }` unchanged, with the same
+exit code. Setting, clearing, or OAuth-connecting a key stays in the Web Console,
+so these commands never send or print a provider secret. An API token needs the
+high-impact `providers:validate` capability; validation acts on the token
+owner's own connections.
+
 Trigger one scheduler cycle on the remote Nitely server:
 
 ```bash

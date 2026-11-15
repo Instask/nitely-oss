@@ -4,7 +4,9 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createApiToken } from "../../src/web/api-tokens.js";
 import { startWebServer, type WebServer } from "../../src/web/server.js";
+import { createTokenOwner } from "../helpers/token-owner.js";
 
 const servers: WebServer[] = [];
 
@@ -202,6 +204,52 @@ describe("provider connections API", () => {
     const accepted = await json(await post(server, validatePath, {}));
     expect(accepted).toMatchObject({ ok: true, checked: "provider", connection: { id: saved.connection.id } });
     expect(accepted.connection.lastValidatedAt).toEqual(expect.any(String));
+  });
+
+  it("lets a providers:validate API token list and validate, but never set a key", async () => {
+    const repoPath = await createRepo();
+    const server = await start(repoPath, (async () => new Response("", { status: 401 })) as typeof fetch);
+    const owner = await createTokenOwner(repoPath);
+    const validator = await createApiToken(repoPath, {
+      name: "provider validator",
+      capabilities: ["providers:validate"],
+      ownerUserId: owner.id,
+      allowHighImpact: true,
+    });
+    const reader = await createApiToken(repoPath, {
+      name: "run reader",
+      capabilities: ["runs:read"],
+      ownerUserId: owner.id,
+    });
+    const asToken = (token: string, init: RequestInit = {}) => ({
+      ...init,
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    });
+
+    const setByToken = await fetch(
+      `${server.url}/api/providers/openrouter/connection`,
+      asToken(validator.token, {
+        method: "POST",
+        body: JSON.stringify({ value: "sk-or-v1-token-set-0123456789", authMethod: "api_key" }),
+      }),
+    );
+    expect(setByToken.status).toBe(403);
+    expect((await json(setByToken)).error.message).toBe("API tokens cannot access this endpoint");
+
+    expect((await fetch(`${server.url}/api/providers`, asToken(reader.token))).status).toBe(403);
+    const listed = await fetch(`${server.url}/api/providers`, asToken(validator.token));
+    expect(listed.status).toBe(200);
+    expect(JSON.stringify(await json(listed))).not.toContain("sk-or-v1");
+
+    const saved = await savedOpenRouterKey(server, "sk-or-v1-console-key-0123456789");
+    const statuses = await json(await fetch(`${server.url}/api/providers`, asToken(validator.token)));
+    const openrouter = statuses.providers.find((p: { id: string }) => p.id === "openrouter");
+    expect(openrouter.connectionId).toBe(saved.connection.id);
+    const validatePath = `/api/providers/openrouter/connections/${saved.connection.id}/validate`;
+    expect((await fetch(`${server.url}${validatePath}`, asToken(reader.token, { method: "POST", body: "{}" }))).status).toBe(403);
+    const validated = await fetch(`${server.url}${validatePath}`, asToken(validator.token, { method: "POST", body: "{}" }));
+    expect(validated.status).toBe(200);
+    expect(await json(validated)).toEqual({ ok: false, checked: "provider", reason: "rejected by OpenRouter (401)" });
   });
 
   async function savedOpenRouterKey(server: WebServer, value: string, connectionId?: string) {

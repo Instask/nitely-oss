@@ -60,7 +60,7 @@ nitely mcp token create \
 credentials the way that user's Web Console session does.
 
 The raw token is printed once. `tasks:write`, `runs:start`, `spec:approve`,
-`preview:control`, `preview:compare`, and `flows:manage` require `--allow-high-impact`;
+`preview:control`, `preview:compare`, `flows:manage`, and `providers:validate` require `--allow-high-impact`;
 read-only tokens do not. Supported capabilities:
 
 | Capability | Permitted MCP/API actions |
@@ -74,9 +74,11 @@ read-only tokens do not. Supported capabilities:
 | `preview:control` | start/stop/navigate/reload/click/type/scroll/capture screenshots in preview sessions |
 | `preview:compare` | attach preview screenshots to runs and create visual comparison artifacts |
 | `flows:manage` | create, update, enable/disable, reset, and delete Flows via `/api/flows*`, with the owner's repository and Flow permissions |
+| `providers:validate` | read provider status (`GET /api/providers`) and validate one of the owner's stored connections (`POST /api/providers/<id>/connections/<id>/validate`), which calls the provider with the stored key and records the result |
 
 Anything not explicitly granted is denied. In particular, a valid token cannot
-access provider credentials, user/session APIs, repository administration, or
+set, clear, read, or OAuth-connect provider credentials (`providers:validate`
+only checks a key already stored through the Console), user/session APIs, repository administration, or
 other JSON endpoints.
 
 List or revoke tokens without exposing their secret values:

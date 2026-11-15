@@ -2,7 +2,7 @@ import { normalizeRunOverrides, type RunOverrides } from "../flow/overrides.js";
 import type { Effort } from "../flow/schema.js";
 import { isEffort, type RuntimeEffortStatus } from "./execution/effort.js";
 import { readFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 import { EventStore } from "../events/store.js";
 import type { StoredRunEvent } from "../events/types.js";
@@ -42,6 +42,7 @@ import {
   isCodexSandboxMode,
   type RunSandboxPolicy,
 } from "./execution/sandbox.js";
+import { isPathInside } from "../path-containment.js";
 
 export type ProjectedRunStatus =
   | "created"
@@ -2862,13 +2863,6 @@ export function runDirectoryPath(repoPath: string, runId: string): string {
   return join(repoPath, ".nitely", "runs", runId);
 }
 
-function isPathInside(parent: string, candidate: string): boolean {
-  const relativePath = relative(parent, candidate);
-  return (
-    relativePath === "" ||
-    (!relativePath.startsWith("..") && !isAbsolute(relativePath))
-  );
-}
 
 function resolveAttemptDirectory(
   repoPath: string,

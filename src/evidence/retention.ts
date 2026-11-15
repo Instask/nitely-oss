@@ -5,14 +5,7 @@ import {
   realpath,
   rm,
 } from "node:fs/promises";
-import {
-  basename,
-  isAbsolute,
-  join,
-  relative,
-  resolve,
-  sep,
-} from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 
 import {
   isArtifactRegistryRemovingFilename,
@@ -48,6 +41,7 @@ import {
   loadEvidencePolicy,
   type LoadedEvidencePolicy,
 } from "./policy.js";
+import { isPathInside } from "../path-containment.js";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const SOURCE_DIRECTORIES = new Set(["inputs", "worktree"]);
@@ -107,14 +101,6 @@ export interface BuildEvidencePrunePlanInput {
   policy?: LoadedEvidencePolicy;
 }
 
-function isPathInside(parent: string, candidate: string): boolean {
-  const relativePath = relative(parent, candidate);
-  return !(
-    relativePath === ".." ||
-    relativePath.startsWith(`..${sep}`) ||
-    isAbsolute(relativePath)
-  );
-}
 
 async function pathExists(path: string): Promise<boolean> {
   try {

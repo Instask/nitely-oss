@@ -27,6 +27,7 @@ import {
   type EvidenceArtifactMetadata,
   type EvidenceRunRecord,
 } from "./catalog.js";
+import { isPathInside } from "../path-containment.js";
 
 const RAW_FILENAMES = new Set([
   "artifacts.json",
@@ -135,14 +136,6 @@ function mergeArtifactIntegrity(
   };
 }
 
-function isPathInside(parent: string, candidate: string): boolean {
-  const relativePath = relative(parent, candidate);
-  return !(
-    relativePath === ".." ||
-    relativePath.startsWith(`..${sep}`) ||
-    isAbsolute(relativePath)
-  );
-}
 
 function safeArtifact(artifact: EvidenceArtifactMetadata): SafeArtifactMetadata {
   const sha256 = artifact.sha256 && /^[a-f0-9]{64}$/i.test(artifact.sha256)

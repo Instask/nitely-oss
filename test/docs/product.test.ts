@@ -13,6 +13,20 @@ const constraints = [
 ];
 
 describe("product definition", () => {
+  it("documents gpt-6-luna for each bootstrap model tier in English and Chinese", async () => {
+    const [english, chinese] = await Promise.all([
+      readFile(join(repositoryRoot, "docs", "running-flows.md"), "utf8"),
+      readFile(join(repositoryRoot, "docs", "flow-format.zh-CN.md"), "utf8"),
+    ]);
+
+    const englishTier = english.split("### Bootstrap model tiers")[1]?.split("\n## ")[0] ?? "";
+    const chineseTier = chinese.split("## Bootstrap model 分层")[1]?.split("\n## ")[0] ?? "";
+    expect(englishTier).toContain("gpt-6-luna");
+    expect(englishTier).not.toMatch(/gpt-5(?:\.3-codex(?:-spark)?)?/);
+    expect(chineseTier).toContain("gpt-6-luna");
+    expect(chineseTier).not.toMatch(/gpt-5(?:\.3-codex(?:-spark)?)?/);
+  });
+
   it("states the four constraints on the front door and in the definition docs", async () => {
     const [readme, chineseReadme, product, chineseProduct, trust] =
       await Promise.all([

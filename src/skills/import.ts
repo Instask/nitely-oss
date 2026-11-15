@@ -10,9 +10,10 @@ import { tmpdir } from "node:os";
 import { ensureRunOwnedDirectory } from "../run/owned-file.js";
 import { withKnowledgeLease } from "../knowledge-repositories/lock.js";
 import { snapshotSkillPackage } from "./package.js";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
 import type { ValidatedSkillDirectory } from "./load.js";
+import { isPathInside } from "../path-containment.js";
 
 export interface ImportLocalSkillInput {
   sourcePath: string;
@@ -46,13 +47,6 @@ function toPosixPath(path: string): string {
   return path.split(sep).join("/");
 }
 
-function isPathInside(parent: string, candidate: string): boolean {
-  const relativePath = relative(parent, candidate);
-  return (
-    relativePath === "" ||
-    (!relativePath.startsWith("..") && !isAbsolute(relativePath))
-  );
-}
 
 function requirePathInside(parent: string, candidate: string, label: string): void {
   if (!isPathInside(resolve(parent), resolve(candidate))) {

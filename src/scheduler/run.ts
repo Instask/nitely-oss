@@ -55,10 +55,7 @@ import type {
 import type { SpecReadinessGateResult } from "../spec-artifacts/readiness.js";
 import type { StoredWorkItemRunStatePatch } from "../work-items/access.js";
 import type { ChangeRequestStatusFetcher } from "./completion.js";
-import {
-  ResumeClaimStore,
-  resumeClaimStorePath,
-} from "./resume-claim.js";
+import { claimRunContinuation } from "../run/control.js";
 import {
   cooldownUntilForRunInput,
   runtimeKey,
@@ -783,25 +780,11 @@ async function resumeDueUsageLimitRuns(input: {
   await mkdir(resolve(input.repoPath, ".nitely"), { recursive: true });
   let resumed = false;
   for (const staleCandidate of candidates) {
-    const claimStore = new ResumeClaimStore(
-      resumeClaimStorePath(input.repoPath),
+    const release = await claimRunContinuation(
+      input.repoPath,
+      staleCandidate.blocked.runId,
     );
-    const claimToken = randomUUID();
-    let claimed: boolean;
-    try {
-      claimed = claimStore.claim({
-        runId: staleCandidate.blocked.runId,
-        token: claimToken,
-        now: new Date(),
-      });
-    } catch (error) {
-      claimStore.close();
-      throw error;
-    }
-    if (!claimed) {
-      claimStore.close();
-      continue;
-    }
+    if (!release) continue;
     try {
       const currentTask = await getUnifiedWorkItem(
         input.repoPath,
@@ -875,11 +858,7 @@ async function resumeDueUsageLimitRuns(input: {
         });
       }
     } finally {
-      try {
-        claimStore.release(staleCandidate.blocked.runId, claimToken);
-      } finally {
-        claimStore.close();
-      }
+      release();
     }
   }
 
@@ -897,10 +876,9 @@ async function resumeStandaloneQuestionRuns(input: {
   const attached = new Set(input.tasks.map((task) => task.latestRunId));
   for (const runId of questionPolicyResumeRunIds(input.repoPath, input.now)) {
     if (attached.has(runId) || input.attempted.has(runId)) continue;
-    const claims = new ResumeClaimStore(resumeClaimStorePath(input.repoPath));
-    const token = randomUUID();
+    const release = await claimRunContinuation(input.repoPath, runId);
+    if (!release) continue;
     try {
-      if (!claims.claim({ runId, token, now: new Date() })) continue;
       const events = new EventStore(eventStorePath(input.repoPath));
       let due: boolean;
       try {
@@ -921,11 +899,7 @@ async function resumeStandaloneQuestionRuns(input: {
         terminalProjectionAfterRunnerError(input.repoPath, runId, error, afterSequence);
       }
     } finally {
-      try {
-        claims.release(runId, token);
-      } finally {
-        claims.close();
-      }
+      release();
     }
   }
 }

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { isAbsolute, relative, resolve } from "node:path";
+import { resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { EnvProviderConnectionStore } from "../providers/env-store.js";
@@ -36,6 +36,7 @@ import type {
   ScmRepository,
   UpdateRepositoryIssueCommentRequest,
 } from "./types.js";
+import { isPathInside } from "../path-containment.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -666,13 +667,6 @@ function assertResolvedTargetIsSameRepository(target: ChangeRequestTarget): void
   }
 }
 
-function isPathInside(parent: string, candidate: string): boolean {
-  const relativePath = relative(parent, candidate);
-  return (
-    relativePath === "" ||
-    (!relativePath.startsWith("..") && !isAbsolute(relativePath))
-  );
-}
 
 function parseWorktreeList(
   output: string,

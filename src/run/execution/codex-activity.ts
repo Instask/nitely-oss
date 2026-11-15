@@ -1,5 +1,45 @@
 import type { AgentRuntimeCall, AgentRuntimeUsage } from "./types.js";
 import { MAX_CALL_LOG_ENTRIES } from "./pi-json.js";
+import { redactText } from "../../context/redaction.js";
+
+const MAX_ERROR_MESSAGE_CHARS = 500;
+const ENVELOPE_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
+
+function sanitizeCodexErrorMessage(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const cleaned = (redactText(value) ?? "")
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f]+/g, " ")
+    .trim();
+  if (!cleaned) return undefined;
+  return cleaned.length > MAX_ERROR_MESSAGE_CHARS
+    ? `${cleaned.slice(0, MAX_ERROR_MESSAGE_CHARS)}…`
+    : cleaned;
+}
+
+function unwrapProviderErrorEnvelope(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{")) return text;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return text;
+  }
+  const envelope = record(parsed);
+  const error = record(envelope?.error);
+  const message = typeof error?.message === "string" ? error.message.trim() : "";
+  if (!envelope || !error || !message) return text;
+  const code = [error.code, error.type].find(
+    (value): value is string => typeof value === "string" && ENVELOPE_CODE.test(value),
+  );
+  const status = Number.isInteger(envelope.status) &&
+      (envelope.status as number) >= 100 && (envelope.status as number) <= 599
+    ? envelope.status as number
+    : undefined;
+  const label = code && status !== undefined ? `${code} (${status})`
+    : code ?? (status !== undefined ? String(status) : undefined);
+  return label ? `${label}: ${message}` : message;
+}
 
 /**
  * Read a `codex exec --json` stdout capture.
@@ -415,6 +455,9 @@ function compactItem(type: string, item: unknown): Record<string, unknown> {
   const server = source ? identifier(source.server) : undefined;
   const tool = source ? identifier(source.tool) : undefined;
   const status = source ? itemStatus(source.status) : undefined;
+  const message = itemType === "error"
+    ? sanitizeCodexErrorMessage(source?.message)
+    : undefined;
   return {
     type,
     item: {
@@ -423,6 +466,7 @@ function compactItem(type: string, item: unknown): Record<string, unknown> {
       ...(server ? { server } : {}),
       ...(tool ? { tool } : {}),
       ...(status ? { status } : {}),
+      ...(message ? { message } : {}),
     },
   };
 }
@@ -435,8 +479,16 @@ function compactKeptEvent(event: Record<string, unknown>): Record<string, unknow
       : undefined;
     return { type, ...(threadId ? { thread_id: threadId } : {}) };
   }
-  if (type === "turn.started" || type === "turn.failed" || type === "error") {
+  if (type === "turn.started") {
     return { type };
+  }
+  if (type === "error") {
+    const message = sanitizeCodexErrorMessage(event.message);
+    return { type, ...(message ? { message } : {}) };
+  }
+  if (type === "turn.failed") {
+    const message = sanitizeCodexErrorMessage(record(event.error)?.message);
+    return { type, ...(message ? { error: { message } } : {}) };
   }
   if (type === "turn.completed") {
     return { type, usage: pickUsage(event.usage) };
@@ -447,6 +499,50 @@ function compactKeptEvent(event: Record<string, unknown>): Record<string, unknow
   if (type === "item.updated") return undefined;
   if (typeof type === "string") return { type };
   return undefined;
+}
+
+/**
+ * The failure reason Codex reported on its JSON stream, sanitized again so an
+ * uncompacted capture is held to the same bound. A turn failure wins over a
+ * stream error, which wins over an error item; within a kind the last one wins.
+ */
+export function describeCodexFailure(input: { stdout: string }): string | undefined {
+  let turnFailed: string | undefined;
+  let error: string | undefined;
+  let errorItem: string | undefined;
+  for (const line of input.stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let event: Record<string, unknown> | undefined;
+    try {
+      event = record(JSON.parse(line));
+    } catch {
+      continue;
+    }
+    if (!event) continue;
+    if (event.type === "turn.failed") {
+      const raw = record(event.error)?.message;
+      const message = sanitizeCodexErrorMessage(
+        typeof raw === "string" ? unwrapProviderErrorEnvelope(raw) : raw,
+      );
+      if (message) turnFailed = message;
+    } else if (event.type === "error") {
+      const message = sanitizeCodexErrorMessage(
+        typeof event.message === "string"
+          ? unwrapProviderErrorEnvelope(event.message)
+          : event.message,
+      );
+      if (message) error = message;
+    } else if (event.type === "item.completed") {
+      const item = record(event.item);
+      if (item?.type === "error") {
+        const message = sanitizeCodexErrorMessage(
+          typeof item.message === "string" ? unwrapProviderErrorEnvelope(item.message) : item.message,
+        );
+        if (message) errorItem = message;
+      }
+    }
+  }
+  return turnFailed ?? error ?? errorItem;
 }
 
 function eventTypeOf(prefix: string): string | undefined {

@@ -1,7 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { relative, resolve } from "node:path";
 
 import { redactUnknown } from "./redaction.js";
+import { isPathInside } from "../path-containment.js";
 
 export interface ContextManifestEntry {
   id: string;
@@ -26,13 +27,6 @@ export interface ContextManifest {
   entries: ContextManifestEntry[];
 }
 
-function isPathInside(parent: string, candidate: string): boolean {
-  const relativePath = relative(parent, candidate);
-  return (
-    relativePath === "" ||
-    (!relativePath.startsWith("..") && !isAbsolute(relativePath))
-  );
-}
 
 export function runRelativePath(
   runDirectory: string,

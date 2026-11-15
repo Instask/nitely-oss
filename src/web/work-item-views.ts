@@ -1,4 +1,7 @@
-import { organizationSessionAccessAllowed } from "./session-policy.js";
+import {
+  organizationSessionAccessAllowed,
+  type OrganizationSessionAccess,
+} from "./session-policy.js";
 import { readFile, realpath } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 
@@ -12,7 +15,19 @@ import type { ResourceReference } from "../connectors/types.js";
 import type { WorkItemRecord } from "../work-items/types.js";
 import { WebNotFoundError } from "./errors.js";
 import { getRunDetail, listRuns, type WebRunSummary } from "./runs.js";
-import type { TaskRunSummary, WebAccessContext } from "./work-items.js";
+import type { PublicOrganizationMembership } from "./organizations.js";
+
+export interface TaskRunSummary extends WebRunSummary {
+  currentStage?: string;
+  recentLogSummary?: string;
+}
+
+export interface WebAccessContext extends OrganizationSessionAccess {
+  id: string;
+  role: "admin" | "user";
+  authMode: "local" | "required";
+  memberships?: PublicOrganizationMembership[];
+}
 
 export interface WorkItemArtifactGroup {
   type: string;

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 
 import {
   readArtifactRegistryWithPrivatePaths,
@@ -14,6 +14,7 @@ import type {
   PreviewScreenshotArtifact,
   PreviewSessionRecord,
 } from "./types.js";
+import { isPathInside } from "../path-containment.js";
 
 export interface PreviewScreenshotEvidenceAttachment {
   runId: string;
@@ -29,14 +30,6 @@ function portablePath(path: string): string {
   return path.split(sep).join("/");
 }
 
-function isPathInside(parent: string, candidate: string): boolean {
-  const relativePath = relative(parent, candidate);
-  return !(
-    relativePath === ".." ||
-    relativePath.startsWith(`..${sep}`) ||
-    isAbsolute(relativePath)
-  );
-}
 
 function safePreviewScreenshotPath(input: {
   repoPath: string;

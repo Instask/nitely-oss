@@ -24,9 +24,6 @@ import {
   externalKnowledgeAdmissionControls,
   runFlow as defaultRunFlow,
   resumeRun,
-  type RunCancellationControl,
-  type RunCancellationRequest,
-  type RunCancellationStage,
   type RunFlowDependencies,
   type RunFlowInput,
   type RunFlowResult,
@@ -136,7 +133,6 @@ import type {
 import { createRequire } from "node:module";
 
 import { EventStore } from "../events/store.js";
-import { exportRunTrace, otlpTraceConfigFromEnv } from "../telemetry/run-trace-otel.js";
 import { materializeScheduleNow } from "../schedules/materialize.js";
 import {
   createSchedule,
@@ -294,9 +290,12 @@ import {
   readSchedulerCooldowns,
   runtimeKey,
 } from "../scheduler/cooldown.js";
-import { ResumeClaimStore, resumeClaimStorePath } from "../scheduler/resume-claim.js";
 import {
+  cancelRun,
+  claimRunContinuation,
   denyRunApproval,
+  registerActiveRun,
+  RunCancellationRefusedError,
   RunContinuationClaimConflictError,
   withRunContinuationClaim,
 } from "../run/control.js";
@@ -4336,7 +4335,7 @@ async function runStoredWorkItem(
     throw runStartConflictError(admission);
   }
   const running = admission.workItem;
-  const cancellation = registerActiveRunCancellation({
+  const cancellation = registerActiveRun({
     repoPath,
     runId: admission.runId,
   });
@@ -4693,57 +4692,7 @@ function createAcceptedRunId(): string {
   return `${stamp}-${randomUUID().slice(0, 8)}`;
 }
 
-interface ActiveRunCancellationHandle {
-  repoPath: string;
-  runId: string;
-  controller: AbortController;
-  request?: RunCancellationRequest;
-  stage?: RunCancellationStage;
-  startedAt: string;
-}
-
-const activeRunCancellations = new Map<string, ActiveRunCancellationHandle>();
-
-function activeRunCancellationKey(repoPath: string, runId: string): string {
-  return `${resolve(repoPath)}\u0000${runId}`;
-}
-
-function registerActiveRunCancellation(input: {
-  repoPath: string;
-  runId: string;
-}): {
-  control: RunCancellationControl;
-  finish: () => void;
-} {
-  const handle: ActiveRunCancellationHandle = {
-    repoPath: resolve(input.repoPath),
-    runId: input.runId,
-    controller: new AbortController(),
-    startedAt: new Date().toISOString(),
-  };
-  activeRunCancellations.set(
-    activeRunCancellationKey(handle.repoPath, handle.runId),
-    handle,
-  );
-  return {
-    control: {
-      signal: handle.controller.signal,
-      getRequest: () => handle.request,
-      onStageChange: (stage) => {
-        handle.stage = stage;
-      },
-    },
-    finish: () => {
-      activeRunCancellations.delete(activeRunCancellationKey(handle.repoPath, handle.runId));
-    },
-  };
-}
-
-/**
- * Cancel a non-terminal run: signal its active process, if this server owns
- * one, record `run.cancelled` with the actor and reason, and settle the work
- * item it belongs to so the task leaves `running` and can start again.
- */
+/** Cancel a Run through Run control, reporting a refusal as invalid input. */
 async function cancelWebRun(input: {
   repository: WebRepository;
   runId: string;
@@ -4756,131 +4705,24 @@ async function cancelWebRun(input: {
   sourceKey?: string;
   taskId?: string;
 }): Promise<void> {
-  const subject = input.subject ?? "run";
-  // Look at the process this server runs for the run without signalling it:
-  // a cancel that is refused below must not abort anything.
-  const active = activeRunCancellations.get(
-    activeRunCancellationKey(input.repository.path, input.runId),
-  );
-  const requestedAt = new Date().toISOString();
-  const store = new EventStore(eventStorePath(input.repository.path));
   try {
-    // BEGIN IMMEDIATE holds SQLite's write lock, so the status read and the
-    // append are atomic against every other event writer: a run that
-    // completes, fails, blocks, or is cancelled concurrently is either seen
-    // here as terminal or writes its event after this one.
-    store.transaction(() => {
-      const events = store.list(input.runId);
-      if (events.length === 0) {
-        throw new WebInputError(`${subject} was not found`);
-      }
-      const status = projectRun(events, {
-        openAttemptStatus: "interrupted",
-      }).status;
-      if (
-        status === "completed" ||
-        status === "failed" ||
-        status === "cancelled"
-      ) {
-        throw new WebInputError(`${subject} is already ${status}`);
-      }
-      store.append({
-        runId: input.runId,
-        ...(active?.stage?.stageId ? { stageId: active.stage.stageId } : {}),
-        ...(active?.stage?.attempt !== undefined ? { attempt: active.stage.attempt } : {}),
-        type: "run.cancelled",
-        payload: {
-          actor: input.actor,
-          ...(input.notificationId ? { notificationId: input.notificationId } : {}),
-          ...(input.sourceKey ? { sourceKey: input.sourceKey } : {}),
-          reason: input.reason,
-          requestedAt,
-          cancelledAt: new Date().toISOString(),
-          source: input.source,
-          affectedStage: active?.stage?.stageId,
-          affectedAttempt: active?.stage?.attempt,
-          cleanup: active
-            ? {
-                result: "abort-signal-dispatched",
-                activeSince: active.startedAt,
-                terminateWithinMs: 10_000,
-              }
-            : {
-                result: "no-active-process",
-              },
-        },
-      });
+    await cancelRun({
+      repoPath: input.repository.path,
+      runId: input.runId,
+      actor: input.actor,
+      reason: input.reason,
+      source: input.source,
+      ...(input.subject ? { subject: input.subject } : {}),
+      ...(input.notificationId ? { notificationId: input.notificationId } : {}),
+      ...(input.sourceKey ? { sourceKey: input.sourceKey } : {}),
+      ...(input.taskId ? { workItemId: input.taskId } : {}),
     });
-  } finally {
-    store.close();
+  } catch (error) {
+    if (error instanceof RunCancellationRefusedError) {
+      throw new WebInputError(error.message);
+    }
+    throw error;
   }
-  // Only a recorded cancellation signals the process. The runner then stops
-  // at its next cancellation check and, seeing run.cancelled, writes no
-  // terminal event of its own.
-  requestActiveRunCancellation({
-    repoPath: input.repository.path,
-    runId: input.runId,
-    actor: input.actor,
-    reason: input.reason,
-    source: input.source,
-    ...(input.notificationId ? { notificationId: input.notificationId } : {}),
-    ...(input.sourceKey ? { sourceKey: input.sourceKey } : {}),
-  });
-  const taskId = input.taskId ??
-    (await listUnifiedWorkItems(input.repository.path)).find(
-      (item) => item.latestRunId === input.runId,
-    )?.id;
-  if (taskId) {
-    await settleOrUpdateUnifiedRun(input.repository.path, taskId, input.runId, {
-      status: "failed",
-    });
-  }
-  // An active run exports its trace when it returns; a stopped one has no
-  // runner left to do it. Not awaited: the cancel answers without waiting
-  // on the collector.
-  if (!active && otlpTraceConfigFromEnv()) {
-    const repoPath = input.repository.path;
-    const runId = input.runId;
-    void exportRunTrace({
-      runId,
-      listEvents: () => {
-        const traceStore = new EventStore(eventStorePath(repoPath));
-        try {
-          return traceStore.list(runId);
-        } finally {
-          traceStore.close();
-        }
-      },
-    });
-  }
-}
-
-function requestActiveRunCancellation(input: {
-  repoPath: string;
-  runId: string;
-  actor: string;
-  reason: string;
-  source: string;
-  notificationId?: string;
-  sourceKey?: string;
-}): ActiveRunCancellationHandle | undefined {
-  const handle = activeRunCancellations.get(
-    activeRunCancellationKey(input.repoPath, input.runId),
-  );
-  if (!handle) return undefined;
-  const request: RunCancellationRequest = {
-    actor: input.actor,
-    reason: input.reason,
-    requestedAt: new Date().toISOString(),
-    source: input.source,
-    ...(input.notificationId ? { notificationId: input.notificationId } : {}),
-    ...(input.sourceKey ? { sourceKey: input.sourceKey } : {}),
-  };
-  handle.request = request;
-  if (!handle.controller.signal.aborted) {
-    handle.controller.abort(request);
-  }
-  return handle;
 }
 
 function appendRunEvent(
@@ -5734,7 +5576,7 @@ async function applyWorkflowApprovalAction(input: {
   void (async () => {
     // Register before the runner starts so a cancel that lands mid-resume
     // can abort it.
-    const cancellation = registerActiveRunCancellation({
+    const cancellation = registerActiveRun({
       repoPath: input.repository.path,
       runId: input.approvalSource.runId,
     });
@@ -6107,7 +5949,7 @@ async function startConfirmedTaskReworkRun(input: {
     repoId: input.repository.id,
     branchName: admission.branchName,
   };
-  const cancellation = registerActiveRunCancellation({
+  const cancellation = registerActiveRun({
     repoPath: input.repository.path,
     runId: admission.runId,
   });
@@ -10692,7 +10534,7 @@ async function handleApiRequest(
       repoId: repository.id,
       branchName: admission.branchName,
     };
-    const cancellation = registerActiveRunCancellation({
+    const cancellation = registerActiveRun({
       repoPath: repository.path,
       runId: admission.runId,
     });
@@ -11187,16 +11029,10 @@ async function handleApiRequest(
     const repository = repositories.find((repo) => repo.path === run.repoPath)!;
     // The scheduler's durable claim fences a double submit and the usage-limit
     // recovery timer; the status check above happens before resume records anything.
-    await mkdir(join(repository.path, ".nitely"), { recursive: true });
-    const claimToken = randomUUID();
-    const withClaims = <T>(operation: (claims: ResumeClaimStore) => T): T => {
-      const claims = new ResumeClaimStore(resumeClaimStorePath(repository.path));
-      try { return operation(claims); } finally { claims.close(); }
-    };
-    if (!withClaims((claims) => claims.claim({ runId, token: claimToken, now: new Date() }))) {
+    const release = await claimRunContinuation(repository.path, runId);
+    if (!release) {
       throw new WebRunStartConflictError("run is already being resumed", runId);
     }
-    const release = () => { withClaims((claims) => claims.release(runId, claimToken)); };
     let prepared: Awaited<ReturnType<typeof prepareWebRunResume>>;
     try {
       // Re-validate under the claim: a resume that finished first leaves the run non-resumable.
@@ -11207,7 +11043,7 @@ async function handleApiRequest(
     }
     // Register before the runner starts so a cancel that lands mid-resume
     // can abort it.
-    const cancellation = registerActiveRunCancellation({ repoPath: repository.path, runId });
+    const cancellation = registerActiveRun({ repoPath: repository.path, runId });
     void (input.resumeRun ?? resumeRun)(prepared.resumeInput, {
       ...prepared.dependencies,
       cancellation: cancellation.control,

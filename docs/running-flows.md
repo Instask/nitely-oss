@@ -438,7 +438,12 @@ runtime registry. Supported runtimes are:
 - `codex`: runs `codex exec --sandbox <sandbox> --cd <worktree> -` and sends the
   prompt on stdin. `NITELY_CODEX_SANDBOX` overrides the sandbox value, with
   `NIGHTLY_CODEX_SANDBOX` accepted as a legacy fallback. `NITELY_CODEX_COMMAND`
-  can override the command name.
+  can override the command name. Codex reads files only by running commands,
+  so a stage with `commands.mode` none can read nothing in the worktree.
+  Preflight warns `stage-cannot-read` when such a stage writes the worktree or
+  is a review gate. The shipped Codex flows give `write-tests` and `review` a
+  read-only `allow-list` (`cat`, `sed -n`, `rg`, `ls`, `git diff`, ...);
+  `review` keeps `write` none, which runs Codex in its `read-only` sandbox.
 - `claude`: runs `claude -p --output-format json` and sends the prompt on
   stdin. Write-capable stages with `commands.mode` none pass
   `--permission-mode acceptEdits`. Stages that may also run commands pass
@@ -486,12 +491,9 @@ missing configuration names, and fallback/blocker events in the run evidence.
 
 ### Bootstrap model tiers
 
-The primary `flows/implement-spec-bootstrap.json` flow uses explicit model
-tiers: `gpt-5.3-codex-spark` for test authoring, `gpt-5.3-codex` for
-implementation, and `gpt-5` for review. This keeps cheaper work on the
-cheaper model and reserves the more expensive model for the quality-deciding
-review gate. The tier names are ordinary runtime/model pairs, not a new schema
-or automatic router.
+The primary `flows/implement-spec-bootstrap.json` flow uses `gpt-6-luna` for
+test authoring, implementation, and review. The model name is an ordinary
+runtime/model pair, not a new schema or automatic router.
 
 Provider variants may use the same convention with provider-supported model
 ids, for example cheap scan/write-tests, mid-tier implementation, and

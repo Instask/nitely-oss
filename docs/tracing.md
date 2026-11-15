@@ -103,7 +103,8 @@ Where the child spans come from:
   turn records are marked `cumulative`. Tool spans are the item type
   (`command_execution`, `file_change`, `mcp_tool_call`, `web_search`) and an
   error flag. Command lines, paths, and arguments are not recorded. Codex does
-  not emit per-model-call usage on this stream.
+  not emit per-model-call usage on this stream. Sanitized failure messages are
+  retained for Codex error events so non-zero exits can explain the cause.
 - **Codex rollout.** After the attempt ends, Nitely looks for the thread's
   rollout, `<CODEX_HOME>/sessions/YYYY/MM/DD/rollout-<timestamp>-<thread-id>.jsonl`,
   in the attempt's effective `CODEX_HOME`. Codex writes an
