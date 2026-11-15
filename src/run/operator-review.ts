@@ -17,11 +17,9 @@ import {
   redactText,
   redactUnknown,
 } from "../context/redaction.js";
-import { EventStore } from "../events/store.js";
 import { loadFlow, parseFlowDocument } from "../flow/load.js";
 import { outputContract, outputId } from "../flow/schema.js";
 import {
-  eventStorePath,
   projectRun,
   runDirectoryPath,
   validateRunId,
@@ -37,6 +35,7 @@ import {
   writeRunOwnedFileAtomically,
 } from "./owned-file.js";
 
+import { openRunEventStore } from "../events/run-events.js";
 const MAX_OPERATOR_REVIEW_CONTENT_LENGTH = 64 * 1024;
 
 export interface SubmitOperatorReviewInput {
@@ -134,7 +133,7 @@ export async function submitOperatorReview(
     );
   }
 
-  const store = new EventStore(eventStorePath(repoPath));
+  const store = openRunEventStore(repoPath);
   try {
     const events = store.list(input.runId);
     if (events.length === 0) throw new Error(`run not found: ${input.runId}`);

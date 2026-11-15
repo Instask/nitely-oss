@@ -476,7 +476,7 @@ describe("runFlow", () => {
             // records the run as completed.
             const store = new EventStore(join(repo, ".nitely", "events.db"));
             try {
-              store.append({ runId: "run-cancel-before-complete", type: "run.cancelled", payload: { actor: "operator", reason: "stop", source: "web" } });
+              store.append({ runId: "run-cancel-before-complete", type: "run.cancelled", payload: { actor: "operator", reason: "stop", source: "web", requestedAt: new Date().toISOString(), cancelledAt: new Date().toISOString() } });
             } finally { store.close(); }
             return result;
           };
@@ -508,7 +508,7 @@ describe("runFlow", () => {
       store.append({ runId: "run-cancelled-blocked", stageId: "implement", attempt: 1, type: "stage.started", payload: { runtime: "codex" } });
       store.append({ runId: "run-cancelled-blocked", stageId: "implement", attempt: 1, type: "stage.blocked", payload: { reason: "agent_auth" } });
       store.append({ runId: "run-cancelled-blocked", type: "run.blocked", payload: { reason: "agent_auth", stageId: "implement" } });
-      store.append({ runId: "run-cancelled-blocked", type: "run.cancelled", payload: { actor: "operator", reason: "stop", source: "web" } });
+      store.append({ runId: "run-cancelled-blocked", type: "run.cancelled", payload: { actor: "operator", reason: "stop", source: "web", requestedAt: new Date().toISOString(), cancelledAt: new Date().toISOString() } });
     } finally { store.close(); }
 
     await expect(resumeRun({ repoPath: repo, runId: "run-cancelled-blocked" })).rejects.toThrow(

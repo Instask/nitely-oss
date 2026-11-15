@@ -1,6 +1,5 @@
 import { resolve } from "node:path";
 
-import { EventStore } from "../events/store.js";
 import type { StoredRunEvent } from "../events/types.js";
 import type { AgentRuntimeCall } from "./execution/types.js";
 import {
@@ -14,11 +13,11 @@ import {
 } from "./codex-session-usage.js";
 import {
   billableRuntimeTokens,
-  eventStorePath,
   projectRun,
   type ProjectedRun,
 } from "./project.js";
 
+import { openRunEventStore } from "../events/run-events.js";
 export const EFFICIENCY_REPORT_SCHEMA = "nitely.efficiency-report.v1" as const;
 export const EFFICIENCY_RULE_VERSION = 1 as const;
 
@@ -646,7 +645,7 @@ export function diagnoseRun(input: {
 }
 
 export function diagnoseRepoRun(repoPath: string, runId: string): EfficiencyReport {
-  const store = new EventStore(eventStorePath(resolve(repoPath)));
+  const store = openRunEventStore(resolve(repoPath));
   try {
     const events = store.list(runId);
     if (events.length === 0) {

@@ -3,12 +3,12 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 
-import { EventStore } from "./events/store.js";
 import type { RunEventType } from "./events/types.js";
 import { eventStorePath } from "./run/project.js";
 import type { TaskSourceSnapshot } from "./work-items/adapters/dev-pr-store.js";
 import type { WorkItemRecord } from "./work-items/types.js";
 
+import { openRunEventStore } from "./events/run-events.js";
 export type FactoryCandidateStatus =
   | "candidate"
   | "evaluating"
@@ -237,10 +237,10 @@ function hasPrefix(value: string, prefixes: readonly string[]): boolean {
   return prefixes.some((prefix) => value === prefix || value.startsWith(prefix + "/"));
 }
 
-async function auditCandidate(repoPath: string, candidate: FactoryCandidate, type: RunEventType, payload: unknown): Promise<void> {
+async function auditCandidate(repoPath: string, candidate: FactoryCandidate, type: Extract<RunEventType, `factory.${string}`>, payload: unknown): Promise<void> {
   try {
     await mkdir(dirname(eventStorePath(repoPath)), { recursive: true });
-    const store = new EventStore(eventStorePath(repoPath));
+    const store = openRunEventStore(repoPath);
     try {
       store.append({ runId: candidate.id, type, payload });
     } finally {

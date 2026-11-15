@@ -1,13 +1,13 @@
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import { EventStore } from "../events/store.js";
 import {
   eventStorePath,
   projectRun,
   type ProjectedApproval,
 } from "./project.js";
 
+import { openRunEventStore } from "../events/run-events.js";
 export type ApprovalDecision = "approved" | "denied";
 
 export interface ResolveApprovalInput {
@@ -22,7 +22,7 @@ export async function listApprovals(
   repoPath: string,
   runId: string,
 ): Promise<ProjectedApproval[]> {
-  const store = new EventStore(eventStorePath(repoPath));
+  const store = openRunEventStore(repoPath);
   try {
     const events = store.list(runId);
     if (events.length === 0) {
@@ -38,7 +38,7 @@ export async function resolveApproval(
   input: ResolveApprovalInput,
 ): Promise<ProjectedApproval> {
   await mkdir(dirname(eventStorePath(input.repoPath)), { recursive: true });
-  const store = new EventStore(eventStorePath(input.repoPath));
+  const store = openRunEventStore(input.repoPath);
   try {
     const events = store.list(input.runId);
     if (events.length === 0) {

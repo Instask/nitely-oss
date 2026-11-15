@@ -19,7 +19,6 @@ import {
 import { changeMutationDomains, runGuardedMutation } from "../coordination/claims.js";
 import { redactText } from "../context/redaction.js";
 import { EventStore } from "../events/store.js";
-import { eventStorePath } from "../run/project.js";
 import { resolveRunFlowSource } from "../flows/catalog.js";
 import { runFlow, type RunFlowInput } from "../run/run-flow.js";
 import type { ResourceReference } from "../connectors/types.js";
@@ -31,6 +30,8 @@ import {
   type StoredCiRepairEvidence,
 } from "./store.js";
 
+import { openRunEventStore, openEventStoreAt } from "../events/run-events.js";
+import type { RunEventType } from "../events/types.js";
 const execFileAsync = promisify(execFile);
 
 function safeError(error: unknown): string {
@@ -92,7 +93,7 @@ function eventRunId(idempotencyKey: string): string {
 function appendEvent(
   eventStore: EventStore,
   idempotencyKey: string,
-  type: Parameters<EventStore["append"]>[0]["type"],
+  type: Extract<RunEventType, `ci-repair.${string}`>,
   payload: unknown,
 ): void {
   eventStore.append({ runId: eventRunId(idempotencyKey), type, payload });
@@ -145,7 +146,7 @@ export async function submitCiRepair(input: {
   const redacted = redactCiFailureObservation(input.observation, input.secrets ?? []);
   const localCheckCommands = await declaredCheckCommands(input.repoPath);
   const store = await openStore(input.repoPath);
-  const ownEventStore = input.eventStore ? undefined : new EventStore(ciRepairEventStorePath(input.repoPath));
+  const ownEventStore = input.eventStore ? undefined : openEventStoreAt(ciRepairEventStorePath(input.repoPath));
   const eventStore = input.eventStore ?? ownEventStore!;
   try {
     const claim = store.claim(initialCiRepairEvidence({ idempotencyKey, sourceIdentity, observation: redacted }));
@@ -359,7 +360,7 @@ export async function recordCiRepairDecision(input: {
   reason?: string;
 }): Promise<StoredCiRepairEvidence> {
   const store = await openStore(input.repoPath);
-  const eventStore = new EventStore(ciRepairEventStorePath(input.repoPath));
+  const eventStore = openEventStoreAt(ciRepairEventStorePath(input.repoPath));
   try {
     const evidence = store.get(input.idempotencyKey);
     if (!evidence) throw new Error(`CI repair not found: ${input.idempotencyKey}`);
@@ -470,7 +471,7 @@ export function defaultCiRepairDependencies(input: {
       } satisfies RunFlowInput);
       if (!result.updatedHeadSha) throw new Error("repair flow did not update the existing pull request");
       repairWorktreePath = result.worktreePath;
-      const events = new EventStore(eventStorePath(input.repoPath));
+      const events = openRunEventStore(input.repoPath);
       try {
         reviewGatePassed = events.list(result.runId).some((event) => {
           if (event.type !== "gate.completed" || event.stageId === undefined) return false;

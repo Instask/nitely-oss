@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { EventStore } from "../events/store.js";
 import {
   workItemCandidateVersionFingerprint,
   workItemDependencyEligibilityFingerprint,
@@ -24,9 +23,10 @@ import {
   type TaskSpecReadinessOverride,
 } from "../work-items/adapters/dev-pr-store.js";
 import { RunAdmissionStore, type StoredRunAdmission } from "./admission-store.js";
-import { eventStorePath, projectRun } from "./project.js";
+import { projectRun } from "./project.js";
 import type { RunFlowInput } from "./run-flow.js";
 
+import { openRunEventStore } from "../events/run-events.js";
 export interface WorkItemRunCandidate {
   workItem: WorkItemRecord;
   version: WorkItemCandidateVersion;
@@ -199,7 +199,7 @@ function ensureRunAdmitted(
   admission: StoredRunAdmission,
 ): void {
   store.withExclusive(() => {
-    const events = new EventStore(eventStorePath(repoPath));
+    const events = openRunEventStore(repoPath);
     try {
       if (
         events
@@ -236,7 +236,7 @@ function rejectClaimedAdmission(input: {
   );
   if (!rejected) return;
   try {
-    const events = new EventStore(eventStorePath(input.repoPath));
+    const events = openRunEventStore(input.repoPath);
     try {
       const runEvents = events.list(input.admission.runId);
       if (
@@ -780,7 +780,7 @@ export async function settleWorkItemRun(
 export async function reconcileTerminalWorkItemRun(
   input: ReconcileTerminalWorkItemRunInput,
 ): Promise<WorkItemRecord | undefined> {
-  const events = new EventStore(eventStorePath(input.repoPath));
+  const events = openRunEventStore(input.repoPath);
   const runEvents = (() => {
     try {
       return events.list(input.runId);

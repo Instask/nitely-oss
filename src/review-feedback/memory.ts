@@ -12,10 +12,10 @@ import {
   type NotificationDeliveryTarget,
 } from "../web/notification-delivery.js";
 import { ensureContextKnowledgeProposalNotification } from "../web/context-knowledge-notifications.js";
-import { EventStore } from "../events/store.js";
 import { eventStorePath } from "../run/project.js";
 import { recordAcceptedReviewFeedbackSkillPapercuts } from "../skill-improvement/runtime.js";
 
+import { openEventStoreAt } from "../events/run-events.js";
 export interface MaterializedFeedbackMemoryProposal {
   proposalIndex: number;
   entryId: string;
@@ -116,7 +116,7 @@ export async function materializeFeedbackMemoryProposals(input: {
   const triggeredRunId = input.feedback.lineage.triggeredRunId;
   const eventPath = eventStorePath(input.repoPath);
   if (triggeredRunId && existsSync(eventPath)) {
-    const eventStore = new EventStore(eventPath);
+    const eventStore = openEventStoreAt(eventPath);
     try {
       await recordAcceptedReviewFeedbackSkillPapercuts({
         repoPath: input.repoPath,
