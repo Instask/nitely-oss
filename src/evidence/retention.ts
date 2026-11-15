@@ -43,6 +43,7 @@ import {
 } from "./policy.js";
 import { isPathInside } from "../path-containment.js";
 
+import { openRunEventStore, openEventStoreAt } from "../events/run-events.js";
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const SOURCE_DIRECTORIES = new Set(["inputs", "worktree"]);
 
@@ -721,7 +722,7 @@ export async function buildEvidencePrunePlan(
   const recordedRunIds = new Set<string>();
   let store: EventStore | undefined;
   if (await pathExists(eventStorePath(repoPath))) {
-    store = new EventStore(eventStorePath(repoPath));
+    store = openRunEventStore(repoPath);
   }
   try {
     for (const run of records) {
@@ -929,7 +930,7 @@ async function deleteRunEvents(
 ): Promise<number> {
   const path = eventStorePath(repoPath);
   if (!await pathExists(path)) return 0;
-  const store = new EventStore(path);
+  const store = openEventStoreAt(path);
   try {
     const events = store.list(action.runId);
     if (events.length === 0) return 0;
@@ -962,7 +963,7 @@ async function currentEventProjectionNeedsRetryIndex(
   }
   const path = eventStorePath(repoPath);
   if (!await pathExists(path)) return false;
-  const store = new EventStore(path);
+  const store = openEventStoreAt(path);
   try {
     const events = store.list(runId);
     if (events.length === 0) return false;

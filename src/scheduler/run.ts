@@ -25,7 +25,6 @@ import type {
   RunFlowResult,
 } from "../run/run-flow.js";
 import {
-  eventStorePath,
   projectRun,
   type ProjectedRun,
 } from "../run/project.js";
@@ -67,6 +66,7 @@ import {
   schedulerLeaseStorePath,
 } from "./lease.js";
 
+import { openRunEventStore } from "../events/run-events.js";
 export interface SchedulerRunSummary {
   startedTaskIds: string[];
   completedTaskIds: string[];
@@ -495,7 +495,7 @@ function activeUsageLimitCooldowns(
   for (const cooldown of cooldownStore.list()) {
     cooldowns.set(runtimeKey(cooldown.runtime), new Date(cooldown.until));
   }
-  const eventStore = new EventStore(eventStorePath(repoPath));
+  const eventStore = openRunEventStore(repoPath);
   try {
     for (const task of tasks) {
       const events = task.latestRunId ? eventStore.list(task.latestRunId) : [];
@@ -599,7 +599,7 @@ function terminalProjectionAfterRunnerError(
   error: unknown,
   terminalAfterSequence?: number,
 ): ProjectedRun {
-  const eventStore = new EventStore(eventStorePath(repoPath));
+  const eventStore = openRunEventStore(repoPath);
   try {
     const events = eventStore.list(runId);
     const projection = projectRun(events);
@@ -632,7 +632,7 @@ function terminalProjectionAfterRunnerError(
 }
 
 function latestRunEventSequence(repoPath: string, runId: string): number {
-  const eventStore = new EventStore(eventStorePath(repoPath));
+  const eventStore = openRunEventStore(repoPath);
   try {
     return eventStore.latest(runId)?.sequence ?? 0;
   } finally {
@@ -753,7 +753,7 @@ async function resumeDueUsageLimitRuns(input: {
   executionBackend?: string;
   persistedCooldowns?: ReadonlyMap<string, Date>;
 }): Promise<boolean> {
-  const eventStore = new EventStore(eventStorePath(input.repoPath));
+  const eventStore = openRunEventStore(input.repoPath);
   const candidates = (() => {
     try {
       return input.tasks
@@ -790,7 +790,7 @@ async function resumeDueUsageLimitRuns(input: {
         input.repoPath,
         staleCandidate.task.id,
       );
-      const validationEvents = new EventStore(eventStorePath(input.repoPath));
+      const validationEvents = openRunEventStore(input.repoPath);
       const currentBlocked = (() => {
         try {
           return resumableBlockedRun({
@@ -879,7 +879,7 @@ async function resumeStandaloneQuestionRuns(input: {
     const release = await claimRunContinuation(input.repoPath, runId);
     if (!release) continue;
     try {
-      const events = new EventStore(eventStorePath(input.repoPath));
+      const events = openRunEventStore(input.repoPath);
       let due: boolean;
       try {
         due = questionPolicyResumeDue(projectRun(events.list(runId)), input.now);

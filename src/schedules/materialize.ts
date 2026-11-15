@@ -1,7 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import { EventStore } from "../events/store.js";
 import type { RunEventType } from "../events/types.js";
 import { upsertFactoryCandidate } from "../factory-queue.js";
 import { eventStorePath } from "../run/project.js";
@@ -20,6 +19,7 @@ import {
 import { nextTriggerOccurrence } from "./trigger.js";
 import type { ScheduleOccurrence, ScheduleRecord } from "./types.js";
 
+import { openRunEventStore } from "../events/run-events.js";
 export interface MaterializeDueSchedulesInput {
   repoPath: string;
   repoId?: string;
@@ -361,11 +361,11 @@ async function completeOccurrence(
 async function emitOccurrenceEvent(
   repoPath: string,
   occurrence: ScheduleOccurrence,
-  type: RunEventType,
+  type: Extract<RunEventType, `schedule.${string}`>,
 ): Promise<void> {
   try {
     await mkdir(dirname(eventStorePath(repoPath)), { recursive: true });
-    const store = new EventStore(eventStorePath(repoPath));
+    const store = openRunEventStore(repoPath);
     try {
       store.append({ runId: occurrence.id, type, payload: occurrence });
     } finally {

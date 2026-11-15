@@ -5,12 +5,12 @@ import { z } from "zod";
 import { redactText } from "../context/redaction.js";
 import { EventStore } from "../events/store.js";
 import {
-  eventStorePath,
   projectRun,
   type ProjectedOperatorQuestion,
 } from "./project.js";
 import { readRunOwnedFile } from "./owned-file.js";
 
+import { openRunEventStore } from "../events/run-events.js";
 const MAX_OPERATOR_QUESTION_BYTES = 64 * 1024;
 
 const operatorQuestionOptionSchema = z
@@ -121,7 +121,7 @@ export async function listQuestions(
   repoPath: string,
   runId: string,
 ): Promise<ProjectedOperatorQuestion[]> {
-  const store = new EventStore(eventStorePath(repoPath));
+  const store = openRunEventStore(repoPath);
   try {
     const events = store.list(runId);
     if (events.length === 0) throw new Error(`run not found: ${runId}`);
@@ -149,7 +149,7 @@ export async function answerQuestion(input: {
   }
   const redactedText = redactText(text);
 
-  const store = new EventStore(eventStorePath(input.repoPath));
+  const store = openRunEventStore(input.repoPath);
   try {
     return claimAndAnswerQuestion({
       store,
@@ -339,7 +339,7 @@ export function answerExpiredQuestions(input: {
   runIds?: readonly string[];
   now: Date;
 }): string[] {
-  const store = new EventStore(eventStorePath(input.repoPath));
+  const store = openRunEventStore(input.repoPath);
   const ready: string[] = [];
   try {
     for (const runId of input.runIds ?? store.listRunIds()) {
@@ -396,7 +396,7 @@ export function questionPolicyResumeDue(
 
 /** Includes answered policy blockers so recovery can retry after an interrupted sweep. */
 export function questionPolicyResumeRunIds(repoPath: string, now: Date): string[] {
-  const store = new EventStore(eventStorePath(repoPath));
+  const store = openRunEventStore(repoPath);
   try {
     return store.listRunIds().filter((runId) => questionPolicyResumeDue(projectRun(store.list(runId)), now));
   } finally {

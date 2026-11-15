@@ -43,6 +43,7 @@ import {
   type ReleaseDurabilityEvent,
 } from "./release-adapter-fixture.js";
 
+import type { NewRunEvent, RunEventType, StoredRunEvent } from "../../src/events/types.js";
 const execFileAsync = promisify(execFile);
 
 class ArtifactPublicationFaultStore extends EventStore {
@@ -56,9 +57,9 @@ class ArtifactPublicationFaultStore extends EventStore {
     super(path);
   }
 
-  override append(
-    event: Parameters<EventStore["append"]>[0],
-  ): ReturnType<EventStore["append"]> {
+  override append<T extends RunEventType>(
+    event: NewRunEvent<T>,
+  ): StoredRunEvent {
     if (
       this.failurePoint === "second-event" &&
       event.type === "artifact.published" &&
@@ -137,9 +138,9 @@ class SimulatedReleaseProcessCrashStore extends EventStore {
     throw new Error("simulated release process crash");
   }
 
-  override append(
-    event: Parameters<EventStore["append"]>[0],
-  ): ReturnType<EventStore["append"]> {
+  override append<T extends RunEventType>(
+    event: NewRunEvent<T>,
+  ): StoredRunEvent {
     if (this.crashed) throw new Error("simulated release process crash");
     return super.append(event);
   }
@@ -765,7 +766,7 @@ function appendTaskPlanTestEvent(input: {
       runId: input.runId,
       type: "task.plan.loop.continues",
       payload: input.payload,
-    });
+    } as NewRunEvent);
   } finally {
     store.close();
   }
@@ -4079,9 +4080,9 @@ describe("production release safety contract", () => {
       class RunRootReplacementStore extends EventStore {
         private replaced = false;
 
-        override append(
-          event: Parameters<EventStore["append"]>[0],
-        ): ReturnType<EventStore["append"]> {
+        override append<T extends RunEventType>(
+          event: NewRunEvent<T>,
+        ): StoredRunEvent {
           const stored = super.append(event);
           if (
             !this.replaced &&

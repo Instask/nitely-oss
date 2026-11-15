@@ -39,6 +39,7 @@ import {
 } from "./manifest.js";
 import { parseBaselineReproducibilityManifest } from "./reproducibility-schema.js";
 
+import { openEventStoreAt } from "../events/run-events.js";
 const execFileAsync = promisify(execFile);
 const MAX_BASELINE_REPRODUCIBILITY_BYTES = 1024 * 1024;
 const ORDINARY_MODEL_NONDETERMINISM =
@@ -1061,7 +1062,7 @@ export async function executeEvalReplay(
   const invocationId = randomUUID();
   const path = eventStorePath(refreshed.runInput.repoPath);
   const openEventStore = dependencies.openEventStore ??
-    ((storePath: string) => new EventStore(storePath));
+    ((storePath: string) => openEventStoreAt(storePath));
   await mkdir(dirname(path), { recursive: true });
   const admissionStore = openEventStore(path);
   try {

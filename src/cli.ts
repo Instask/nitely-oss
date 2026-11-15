@@ -41,7 +41,6 @@ import {
   type KnowledgeRepositoryCliService,
 } from "./knowledge-repositories/cli.js";
 import {
-  eventStorePath,
   getProjectedRun,
   formatAttemptInputBreakdown,
   formatRuntimeUsageTotal,
@@ -68,7 +67,6 @@ import {
   type RecordRollbackDecisionResult,
   type ApplyRollbackDecisionResult,
 } from "./run/rollback.js";
-import { EventStore } from "./events/store.js";
 import {
   listApprovals,
   resolveApproval,
@@ -215,6 +213,7 @@ import {
   requestDeviceAuthorization,
 } from "./cli/auth-device.js";
 
+import { openRunEventStore } from "./events/run-events.js";
 export interface CliDependencies {
   runFlow?: (input: RunFlowInput) => Promise<RunFlowResult>;
   resumeRun?: (input: ResumeRunInput) => Promise<RunFlowResult>;
@@ -287,7 +286,7 @@ function tryBuildRunTrace(
   runId: string,
 ): ReturnType<typeof buildRunTrace> | undefined {
   try {
-    const store = new EventStore(eventStorePath(repoPath));
+    const store = openRunEventStore(repoPath);
     try {
       const events = store.list(runId);
       return events.length > 0 ? buildRunTrace(events) : undefined;
@@ -2556,7 +2555,7 @@ const CLI_COMMANDS: NitelyCliCommand[] = [
             store.close();
           }
         }
-        const eventStore = new EventStore(eventStorePath(repoPath));
+        const eventStore = openRunEventStore(repoPath);
         try {
         if (action === "propose") {
           if (!problem || !minimalDiff || !expectedBehavior) {
