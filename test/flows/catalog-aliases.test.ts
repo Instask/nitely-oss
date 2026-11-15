@@ -63,7 +63,7 @@ describe("deprecated bootstrap variant aliases", () => {
       overrides: { ...source.overrides, runtime: "mock", model: "chosen-model", effort: "high" },
     });
     expect(effective.spec.stages.find((stage) => stage.id === "implement")).toMatchObject({ runtime: "mock", model: "chosen-model", effort: "high" });
-    expect(flow.spec.stages.find((stage) => stage.id === "implement")).toMatchObject({ runtime: "codex", model: "gpt-5.3-codex" });
+    expect(flow.spec.stages.find((stage) => stage.id === "implement")).toMatchObject({ runtime: "codex", model: "gpt-6-luna" });
   });
 
   it("preserves customized legacy rows as independent flows across seed upgrades", async () => {

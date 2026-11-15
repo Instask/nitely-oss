@@ -3365,6 +3365,91 @@ describe("runFlow", () => {
     ]);
   });
 
+  it("falls through a rejected model to the next runtime candidate", async () => {
+    const repo = await createRepo();
+    const flowPath = join(repo, "flows", "model-rejection-fallback.json");
+    await writeJson(flowPath, {
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "model-rejection-fallback" },
+      spec: { stages: [{
+        id: "implement",
+        type: "agent",
+        runtimes: [
+          { runtime: "codex", model: "bad" },
+          { runtime: "codex", model: "gpt-6-luna" },
+        ],
+        prompt: "Implement the change.",
+        inputs: [],
+        outputs: ["implementation"],
+      }] },
+    });
+    const models: string[] = [];
+
+    await runFlow(
+      { flowPath, repoPath: repo, inputs: {} },
+      {
+        createRunId: () => "run-model-rejection-fallback",
+        backend: backendWithAgent(repo, async (_workspace, { stage, attemptDirectory }) => {
+          models.push(stage.model ?? "");
+          if (stage.model === "bad") throw new Error("model_not_found: The model is not supported.");
+          await writeFile(join(attemptDirectory, "implementation.md"), "implemented\n", "utf8");
+          return { stdout: "ok\n", stderr: "" };
+        }),
+      },
+    );
+
+    expect(models).toEqual(["bad", "gpt-6-luna"]);
+    const store = new EventStore(join(repo, ".nitely", "events.db"));
+    const events = store.list("run-model-rejection-fallback");
+    const projection = projectRun(events);
+    store.close();
+    expect(events.map((event) => event.type)).toContain("stage.runtime.fallback");
+    expect(projection.stages[0]?.attempts).toEqual([
+      expect.objectContaining({ attempt: 1, status: "blocked", runtimeCandidateIndex: 0, runtimeCandidateCount: 2 }),
+      expect.objectContaining({ attempt: 2, status: "completed", runtimeCandidateIndex: 1, runtimeCandidateCount: 2 }),
+    ]);
+  });
+
+  it("blocks after one attempt when the only model candidate is rejected", async () => {
+    const repo = await createRepo();
+    const flowPath = join(repo, "flows", "model-rejection-single-candidate.json");
+    await writeJson(flowPath, {
+      apiVersion: "nitely.dev/v1alpha1",
+      kind: "Flow",
+      metadata: { name: "model-rejection-single-candidate" },
+      spec: { stages: [{
+        id: "implement",
+        type: "agent",
+        runtimes: [{ runtime: "codex", model: "bad" }],
+        prompt: "Implement the change.",
+        inputs: [],
+        outputs: ["implementation"],
+      }] },
+    });
+    let attempts = 0;
+
+    await expect(runFlow(
+      { flowPath, repoPath: repo, inputs: {} },
+      {
+        createRunId: () => "run-model-rejection-single-candidate",
+        backend: backendWithAgent(repo, async () => {
+          attempts += 1;
+          throw new Error("model_not_found: The model is not supported.");
+        }),
+      },
+    )).rejects.toThrow(/run blocked by agent_runtime_unavailable on stage implement/);
+
+    expect(attempts).toBe(1);
+    const store = new EventStore(join(repo, ".nitely", "events.db"));
+    const events = store.list("run-model-rejection-single-candidate");
+    const projection = projectRun(events);
+    store.close();
+    expect(events.map((event) => event.type)).not.toContain("stage.retrying");
+    expect(projection.status).toBe("blocked");
+    expect(projection.stages[0]?.attempts).toHaveLength(1);
+  });
+
   it("records output-contract failures on the selected agent runtime candidate after fallback", async () => {
     const repo = await createRepo();
     const flowPath = join(repo, "flows", "runtime-fallback-agent-output-failure.json");

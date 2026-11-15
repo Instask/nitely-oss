@@ -60,6 +60,7 @@ export interface RunPreflightIssue {
     | "runtime-unchecked"
     | "runtime-model-unsupported"
     | "runtime-effort-unsupported"
+    | "stage-cannot-read"
     | "provider-unchecked"
     | "missing-skill"
     | "output-directory-unwritable";
@@ -312,7 +313,45 @@ function runtimeModelIssues(
   return issues;
 }
 
-function hasRuntimeCandidates(
+/**
+ * A stage that writes the worktree or reviews a change has to read the code it
+ * works on. On a runtime that reads files only by running commands, a
+ * `commands.mode: none` policy leaves it nothing to read, whatever
+ * `read.scope` says, so it writes and judges blind.
+ */
+export function stageReadIssues(
+  stage: Extract<Stage, { type: "agent" }> | Extract<Stage, { type: "gate"; mode: "review" }>,
+  candidates: RuntimeCandidate[],
+): RunPreflightIssue[] {
+  const capabilities = "capabilities" in stage ? stage.capabilities : undefined;
+  if (!capabilities || capabilities.commands.mode !== "none") return [];
+  if (capabilities.read.scope === "none") return [];
+  const writes = capabilities.write.scope === "worktree";
+  const reviews = stage.type === "gate";
+  if (!writes && !reviews) return [];
+  const issues: RunPreflightIssue[] = [];
+  for (const candidate of candidates) {
+    let fileReads: "native" | "shell" | undefined;
+    try {
+      fileReads = runtimeRegistry.resolve(candidate.runtime).fileReads;
+    } catch {
+      continue;
+    }
+    if (fileReads !== "shell") continue;
+    issues.push(issue(
+      "warning",
+      "stage-cannot-read",
+      `stage ${stage.id}: runtime ${candidate.runtime} reads files only by running commands, and capabilities.commands.mode none forbids every command, so this stage ${
+        writes ? "writes files it cannot read" : "reviews code it cannot read"
+      }`,
+      'Allow read-only commands, for example capabilities.commands { "mode": "allow-list", "allow": ["cat *", "sed -n *", "rg *", "ls *"] }, or run the stage on a runtime with native file reads.',
+      { stageId: stage.id, runtime: candidate.runtime },
+    ));
+  }
+  return issues;
+}
+
+export function hasRuntimeCandidates(
   stage: Stage,
 ): stage is Extract<Stage, { type: "agent" }> | Extract<Stage, { type: "gate"; mode: "review" }> {
   return stage.type === "agent" || stage.type === "judge" || (stage.type === "gate" && stage.mode === "review");
@@ -569,6 +608,7 @@ async function stageIssues(input: {
     if (!hasRuntimeCandidates(stage)) continue;
     const candidates = stageRuntimeCandidates(stage);
     issues.push(...runtimeModelIssues(stage.id, candidates));
+    issues.push(...stageReadIssues(stage, candidates));
     const mapped = candidates
       .map((candidate) => ({
         runtime: candidate.runtime,

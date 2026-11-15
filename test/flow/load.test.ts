@@ -42,16 +42,17 @@ describe("loadFlow", () => {
 
     expect(stages.get("write-tests")).toMatchObject({
       runtime: "codex",
-      model: "gpt-5.3-codex-spark",
+      model: "gpt-6-luna",
     });
     expect(stages.get("implement")).toMatchObject({
       runtime: "codex",
-      model: "gpt-5.3-codex",
+      model: "gpt-6-luna",
     });
     expect(stages.get("review")).toMatchObject({
       runtime: "codex",
-      model: "gpt-5",
+      model: "gpt-6-luna",
     });
+    expect(stages.get("reflect")).not.toHaveProperty("model");
   });
 
   it("loads static size-tier flows with distinct topologies", async () => {
@@ -1593,13 +1594,16 @@ describe("loadFlow", () => {
       );
 
       const writeTests = stages.get("write-tests");
+      // Codex reads files only through commands, so its write-tests stage
+      // gets read-only commands; runtimes with native reads keep none (#746).
+      const shellReads = writeTests && "runtime" in writeTests && writeTests.runtime === "codex";
       expect(writeTests, file).toMatchObject({
         type: "agent",
         inputs: ["spec", "tech-design"],
         outputs: ["tests"],
         capabilities: {
           write: { scope: "worktree", allow: ["test/"] },
-          commands: { mode: "none" },
+          commands: { mode: shellReads ? "allow-list" : "none" },
         },
       });
 
@@ -1640,7 +1644,7 @@ describe("loadFlow", () => {
       }
 
       if (file.includes("plan-approve")) {
-        for (const id of ["draft-spec", "draft-tech-design", "review", "reflect"]) {
+        for (const id of ["draft-spec", "draft-tech-design", "reflect"]) {
           expect(stages.get(id), `${file}:${id}`).toMatchObject({
             capabilities: {
               write: { scope: "none" },
@@ -1648,6 +1652,14 @@ describe("loadFlow", () => {
             },
           });
         }
+        // The Codex review gate reads the change through read-only commands
+        // and still cannot write (#746).
+        expect(stages.get("review"), `${file}:review`).toMatchObject({
+          capabilities: {
+            write: { scope: "none" },
+            commands: { mode: "allow-list" },
+          },
+        });
       }
     }
   });
@@ -1757,9 +1769,9 @@ describe("loadFlow", () => {
     ]));
 
     const primaryModels = {
-      "write-tests": "gpt-5.3-codex-spark",
-      implement: "gpt-5.3-codex",
-      review: "gpt-5",
+      "write-tests": "gpt-6-luna",
+      implement: "gpt-6-luna",
+      review: "gpt-6-luna",
     };
 
     for (const file of bootstrapFlowFiles) {

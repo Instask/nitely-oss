@@ -97,7 +97,7 @@ export const PROVIDER_COMPATIBILITY_MATRIX: ProviderCompatibilityMatrix = {
         cost: "unknown",
         usageReference: "codex.exec.turn.completed.usage",
       },
-      capabilities: { sessionReuse: true, failureExplanation: false, modelValidation: false },
+      capabilities: { sessionReuse: true, failureExplanation: true, modelValidation: false },
       status: "contract-tested",
       degradation: BLOCK_ON_PROVIDER_FAILURE,
     },
