@@ -7,19 +7,33 @@ import {
   ResumeClaimStore,
   resumeClaimStorePath,
 } from "../scheduler/resume-claim.js";
-import { listUnifiedWorkItems } from "../work-items/access.js";
-import { reconcileTerminalWorkItemRun } from "./admission.js";
+import {
+  getUnifiedWorkItem,
+  listUnifiedWorkItems,
+  updateWorkItemRunState,
+} from "../work-items/access.js";
+import {
+  reconcileTerminalWorkItemRun,
+  settleWorkItemRun,
+} from "./admission.js";
 import { RunAdmissionStore } from "./admission-store.js";
 import { resolveApproval } from "./approvals.js";
-import { projectRun, type ProjectedApproval } from "./project.js";
+import {
+  projectRun,
+  type ProjectedApproval,
+  type ProjectedRun,
+  type ProjectedRunStatus,
+} from "./project.js";
 import type {
   RunCancellationControl,
   RunCancellationRequest,
   RunCancellationStage,
+  RunFlowInput,
+  RunFlowResult,
 } from "./run-flow.js";
 import { exportRunTrace, otlpTraceConfigFromEnv } from "../telemetry/run-trace-otel.js";
 
-import { openRunEventStore } from "../events/run-events.js";
+import { openRunEventStore, type EventStore } from "../events/run-events.js";
 /**
  * Raised when another owner already holds the Run continuation claim, so this
  * caller must not resume the Run.
@@ -278,13 +292,334 @@ export async function workItemIdForRun(
   return workItems.find((item) => item.latestRunId === runId)?.id;
 }
 
-const TERMINAL_RUN_STATUSES = new Set([
+const TERMINAL_RUN_STATUSES = new Set<ProjectedRunStatus>([
   "completed",
   "failed",
   "blocked",
   "interrupted",
   "cancelled",
 ]);
+
+/**
+ * Whether no runner is going to write another lifecycle event for a Run in
+ * this status without an explicit resume.
+ */
+export function isSettledRunStatus(status: ProjectedRunStatus | undefined): boolean {
+  return status !== undefined && TERMINAL_RUN_STATUSES.has(status);
+}
+
+/** The Run's projected status, or undefined when it has no events. */
+export function runStatus(
+  repoPath: string,
+  runId: string,
+): ProjectedRunStatus | undefined {
+  const store = openRunEventStore(repoPath);
+  try {
+    const events = store.list(runId);
+    return events.length > 0 ? projectRun(events).status : undefined;
+  } finally {
+    store.close();
+  }
+}
+
+/** Raised when a Run cannot be resumed from its current status. */
+export class RunResumeRefusedError extends Error {
+  constructor(message = "only blocked or interrupted runs can be resumed") {
+    super(message);
+    this.name = "RunResumeRefusedError";
+  }
+}
+
+/** Whether a Run in this status may be resumed. */
+export function isResumableRunStatus(status: string | undefined): boolean {
+  return status === "blocked" || status === "interrupted";
+}
+
+/**
+ * The Run's projection, treating an attempt with no runner as interrupted.
+ * Refuses with `RunResumeRefusedError` unless the Run may be resumed.
+ */
+export function requireResumableRun(repoPath: string, runId: string): ProjectedRun {
+  const store = openRunEventStore(repoPath);
+  let run: ProjectedRun;
+  try {
+    run = projectRun(store.list(runId), { openAttemptStatus: "interrupted" });
+  } finally {
+    store.close();
+  }
+  if (!isResumableRunStatus(run.status)) {
+    throw new RunResumeRefusedError();
+  }
+  return run;
+}
+
+function appendRunCreated(
+  store: EventStore,
+  input: {
+    repoPath: string;
+    runId: string;
+    branchName: string;
+    runInput: RunFlowInput & { workItemId: string };
+  },
+): void {
+  const { runInput } = input;
+  store.append({
+    runId: input.runId,
+    type: "run.created",
+    payload: {
+      flowPath: runInput.flowPath,
+      repoPath: input.repoPath,
+      repoId: runInput.repoId,
+      repoName: runInput.repoName,
+      inputs: runInput.inputs,
+      configuration: runInput.configuration,
+      overrides: runInput.overrides,
+      aliasOf: runInput.aliasOf,
+      providerConnections: runInput.providerConnections,
+      branchName: input.branchName,
+      workItemId: runInput.workItemId,
+      workItemType: runInput.workItemType,
+      ownerId: runInput.ownerId,
+      organizationId: runInput.organizationId,
+      planningApproval: runInput.planningApproval,
+      runEligibilityOverride: runInput.runEligibilityOverride,
+    },
+  });
+}
+
+/**
+ * Record a completed runner result unless the Run is already settled. A runner
+ * normally records its own outcome; this covers runners (injected or older)
+ * that return without one, recording `run.created` first when the Run has no
+ * events and belongs to a Work item. Checked and appended in one write
+ * transaction, so a concurrent cancel is never followed by `run.completed`.
+ */
+export function recordRunnerCompletion(input: {
+  repoPath: string;
+  result: RunFlowResult;
+  runInput?: RunFlowInput;
+}): void {
+  const { result, runInput } = input;
+  const store = openRunEventStore(input.repoPath);
+  try {
+    store.transaction(() => {
+      const events = store.list(result.runId);
+      if (events.length > 0 && isSettledRunStatus(projectRun(events).status)) return;
+      if (events.length === 0 && runInput?.workItemId) {
+        appendRunCreated(store, {
+          repoPath: input.repoPath,
+          runId: result.runId,
+          branchName: result.branchName,
+          runInput: { ...runInput, workItemId: runInput.workItemId },
+        });
+      }
+      store.append({
+        runId: result.runId,
+        type: "run.completed",
+        payload: {
+          changeRequestUrl: result.changeRequestUrl,
+          changeRequest: result.changeRequest,
+        },
+      });
+    });
+  } finally {
+    store.close();
+  }
+}
+
+const TERMINAL_RUN_EVENT_TYPES = new Set([
+  "run.completed",
+  "run.failed",
+  "run.blocked",
+  "run.cancelled",
+]);
+
+/** The sequence of the Run's latest event, or 0 when it has none. */
+export function latestRunEventSequence(repoPath: string, runId: string): number {
+  const store = openRunEventStore(repoPath);
+  try {
+    return store.latest(runId)?.sequence ?? 0;
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * Record a runner error as `run.failed` unless the runner already settled the
+ * Run. By default a Run in a settled status is left alone. A caller resuming a
+ * Run that was already blocked passes `afterSequence`, the latest sequence
+ * before it started, so only a terminal event the runner wrote since counts.
+ * Returns the Run's projection afterwards.
+ */
+export function recordRunnerFailure(input: {
+  repoPath: string;
+  runId: string;
+  error: unknown;
+  afterSequence?: number;
+}): ProjectedRun {
+  const store = openRunEventStore(input.repoPath);
+  try {
+    return store.transaction(() => {
+      const events = store.list(input.runId);
+      const settled = input.afterSequence === undefined
+        ? events.length > 0 && isSettledRunStatus(projectRun(events).status)
+        : events.some(
+            (event) =>
+              event.sequence > input.afterSequence! &&
+              TERMINAL_RUN_EVENT_TYPES.has(event.type),
+          );
+      if (!settled) {
+        store.append({
+          runId: input.runId,
+          type: "run.failed",
+          payload: {
+            error: input.error instanceof Error ? input.error.message : String(input.error),
+          },
+        });
+      }
+      // Either way the Run now has events: the settled one, or run.failed.
+      return projectRun(settled ? events : store.list(input.runId));
+    });
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * Settle a Work item's Run as completed or failed. A Run that predates the
+ * admission ledger is settled by updating the Work item directly, but only
+ * while it is still the Work item's latest Run. Returns whether the Work item
+ * still belongs to this Run.
+ */
+export async function settleRunWorkItem(input: {
+  repoPath: string;
+  workItemId: string;
+  runId: string;
+  status: "completed" | "failed";
+  changeRequestUrl?: string;
+}): Promise<boolean> {
+  const result = await settleWorkItemRun({
+    repoPath: input.repoPath,
+    workItemId: input.workItemId,
+    runId: input.runId,
+    status: input.status,
+    ...(input.changeRequestUrl ? { changeRequestUrl: input.changeRequestUrl } : {}),
+  });
+  if (result.settled) return true;
+  if (
+    result.reason !== "not-admitted" ||
+    result.workItem.latestRunId !== input.runId
+  ) {
+    return false;
+  }
+  await updateWorkItemRunState(
+    input.repoPath,
+    input.workItemId,
+    {
+      status: input.status,
+      latestRunId: input.runId,
+      ...(input.changeRequestUrl ? { changeRequestUrl: input.changeRequestUrl } : {}),
+    },
+    result.storeKind,
+  );
+  return true;
+}
+
+/**
+ * Settle an admitted Run whose runner threw: record the failure unless the
+ * runner already settled the Run, then settle its Work item. A blocked Run
+ * keeps its Work item, which waits on the blocker.
+ */
+export async function settleAdmittedRunAfterRunnerError(input: {
+  repoPath: string;
+  workItemId: string;
+  runId: string;
+  error: unknown;
+}): Promise<"blocked" | "completed" | "failed"> {
+  recordRunnerFailure(input);
+  const projectedStatus = runStatus(input.repoPath, input.runId);
+  if (projectedStatus === "blocked") {
+    return "blocked";
+  }
+  const status = projectedStatus === "completed" ? "completed" : "failed";
+  await settleWorkItemRun({
+    repoPath: input.repoPath,
+    workItemId: input.workItemId,
+    runId: input.runId,
+    status,
+  });
+  return status;
+}
+
+/**
+ * Settle a resumed Run whose runner threw. Returns whether the Work item still
+ * belongs to this Run, so the caller knows whether to tell anyone about it.
+ */
+export async function settleResumedRunAfterError(input: {
+  repoPath: string;
+  workItemId: string;
+  runId: string;
+  error: unknown;
+}): Promise<boolean> {
+  recordRunnerFailure(input);
+  if (runStatus(input.repoPath, input.runId) === "blocked") {
+    return (await getUnifiedWorkItem(input.repoPath, input.workItemId)).latestRunId ===
+      input.runId;
+  }
+  return await settleRunWorkItem({
+    repoPath: input.repoPath,
+    workItemId: input.workItemId,
+    runId: input.runId,
+    status: "failed",
+  });
+}
+
+/**
+ * Settle the Work item of a Run whose resume returned. The runner recorded the
+ * Run's outcome; this lets the Work item follow it.
+ */
+export async function settleResumedRun(input: {
+  repoPath: string;
+  runId: string;
+}): Promise<void> {
+  const workItemId = await workItemIdForRun(input.repoPath, input.runId);
+  if (workItemId) {
+    await reconcileTerminalWorkItemRun({
+      repoPath: input.repoPath,
+      workItemId,
+      runId: input.runId,
+    });
+  }
+}
+
+/**
+ * Record why a requested resume did not happen. A resume refused or stopped
+ * because the Run was cancelled is not recorded: the cancellation explains it.
+ * Returns whether a failure was recorded.
+ */
+export function recordRunResumeFailure(input: {
+  repoPath: string;
+  runId: string;
+  message: string;
+  actor: string;
+  source: string;
+}): boolean {
+  const store = openRunEventStore(input.repoPath);
+  try {
+    return store.transaction(() => {
+      const events = store.list(input.runId);
+      if (events.length > 0 && projectRun(events).status === "cancelled") return false;
+      store.append({
+        runId: input.runId,
+        type: "run.resume.failed",
+        payload: { message: input.message, actor: input.actor, source: input.source },
+      });
+      return true;
+    });
+  } finally {
+    store.close();
+  }
+}
 
 /**
  * Deny a pending approval and settle its Run: a denied approval fails the Run,
@@ -304,18 +639,11 @@ export async function denyRunApproval(input: {
     decision: "denied",
     ...(input.actor ? { actor: input.actor } : {}),
   });
-  const events = openRunEventStore(input.repoPath);
-  try {
-    if (!TERMINAL_RUN_STATUSES.has(projectRun(events.list(input.runId)).status)) {
-      events.append({
-        runId: input.runId,
-        type: "run.failed",
-        payload: { error: `approval ${input.approvalId} denied` },
-      });
-    }
-  } finally {
-    events.close();
-  }
+  recordRunnerFailure({
+    repoPath: input.repoPath,
+    runId: input.runId,
+    error: `approval ${input.approvalId} denied`,
+  });
   const workItemId =
     input.workItemId ?? (await workItemIdForRun(input.repoPath, input.runId));
   if (workItemId) {
@@ -326,4 +654,29 @@ export async function denyRunApproval(input: {
     });
   }
   return approval;
+}
+
+/**
+ * Decide a pending approval. Approving records the decision; the Run continues
+ * when it is next resumed. Denying is terminal: it fails the Run and settles
+ * its Work item.
+ */
+export async function decideRunApproval(input: {
+  repoPath: string;
+  runId: string;
+  approvalId: string;
+  decision: "approved" | "denied";
+  actor?: string;
+  workItemId?: string;
+}): Promise<ProjectedApproval> {
+  if (input.decision === "denied") {
+    return await denyRunApproval(input);
+  }
+  return await resolveApproval({
+    repoPath: input.repoPath,
+    runId: input.runId,
+    approvalId: input.approvalId,
+    decision: "approved",
+    ...(input.actor ? { actor: input.actor } : {}),
+  });
 }
