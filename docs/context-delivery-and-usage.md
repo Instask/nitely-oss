@@ -197,10 +197,11 @@ the same fields. Only `enforced` means the undeclared servers are confirmed off.
 The regression suite `test/run/execution/codex-mcp-servers.real.test.ts` runs
 the real Codex CLI against a trusted-project fixture; CI installs a pinned
 `@openai/codex` for it. `test/run/execution/claude-mcp-servers.real.test.ts`
-runs the real Claude Code CLI the same way and must fail (not skip) when the
-binary is missing. CI should pin `@anthropic-ai/claude-code@2.1.263` (see
-`docs/ci/pinned-claude-cli.sh`); the workflow file itself is not changed in this
-PR because the installer token lacks `workflow` scope.
+runs the real Claude Code CLI the same way. It skips when `claude` is not
+installed, and fails instead of skipping when `NITELY_TEST_REQUIRE_CLAUDE=1`.
+The Typecheck job installs the pinned `@anthropic-ai/claude-code@2.1.263`
+from `docs/ci/pinned-claude-cli.sh` and sets that flag, so the assertion still
+runs there.
 
 `required_mcp_servers` keeps its admission role too: a declared server that
 maps to a provider still requires that provider to be configured before the

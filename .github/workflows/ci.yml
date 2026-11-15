@@ -56,6 +56,16 @@ jobs:
           echo "NITELY_TEST_CODEX_BIN=$codex_bin" >> "$GITHUB_ENV"
           echo "NITELY_TEST_REQUIRE_CODEX=1" >> "$GITHUB_ENV"
 
+      # The Claude MCP restriction test runs the real CLI. A generic runner
+      # does not have it, so the suite skips unless this pin is present.
+      # NITELY_TEST_REQUIRE_CLAUDE makes a missing pin fail, not skip.
+      - name: Pinned Claude Code CLI
+        run: |
+          claude_bin="$(bash docs/ci/pinned-claude-cli.sh)"
+          "$claude_bin" --version
+          echo "NITELY_TEST_CLAUDE_BIN=$claude_bin" >> "$GITHUB_ENV"
+          echo "NITELY_TEST_REQUIRE_CLAUDE=1" >> "$GITHUB_ENV"
+
       - name: Tests
         run: pnpm run test:run
 
