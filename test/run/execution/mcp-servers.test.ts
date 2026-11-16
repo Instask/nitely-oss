@@ -364,6 +364,7 @@ import {
   claudeMcpConfigDocument,
   claudeMcpProbeArgs,
   parseClaudeInitMcpServers,
+  prepareClaudeExclusiveMcpArgs,
   restrictClaudeMcpServers,
   selectClaudeMcpServers,
   withClaudeStrictMcpConfig,
@@ -411,6 +412,36 @@ describe("Claude MCP restriction", () => {
     expect(claudeMcpConfigDocument({ a: { command: "true" } })).toEqual({
       mcpServers: { a: { command: "true" } },
     });
+  });
+
+  it("rewrites only the exclusive config path to the container mount", () => {
+    const host = "/tmp/nitely-claude-mcp-abc/config.json";
+    const prepared = prepareClaudeExclusiveMcpArgs([
+      "--strict-mcp-config",
+      "--mcp-config",
+      host,
+      "-p",
+    ]);
+    expect(prepared.args).toEqual([
+      "--strict-mcp-config",
+      "--mcp-config",
+      "/nitely/claude-mcp/config.json",
+      "-p",
+    ]);
+    expect(prepared.mountArgs).toEqual([
+      "--mount",
+      "type=bind,src=/tmp/nitely-claude-mcp-abc,dst=/nitely/claude-mcp,readonly",
+    ]);
+    expect(prepared.args.join(" ")).not.toContain(host);
+    expect(
+      prepareClaudeExclusiveMcpArgs(["--mcp-config", "/repo/.mcp.json"]).mountArgs,
+    ).toEqual([]);
+    expect(() =>
+      prepareClaudeExclusiveMcpArgs([
+        "--mcp-config",
+        "/tmp/nitely-claude-mcp-a,b/config.json",
+      ]),
+    ).toThrow(/cannot be bind-mounted/);
   });
 
   it("parses mcp_servers from a stream-json system/init event", () => {

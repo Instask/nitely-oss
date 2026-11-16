@@ -177,9 +177,14 @@ Runtime support today:
 - `claude` on both backends: Claude Code 2.1.x `--strict-mcp-config` together
   with an `--mcp-config` file that holds only the stage's declared server
   definitions (extracted from local/project/user layers; never logged). The
-  exclusive set is confirmed by a `claude -p --output-format stream-json`
-  probe that reads the `system/init` `mcp_servers` field — no successful model
-  call is required. An empty declaration is an empty `--mcp-config` plus
+  file is mode 0600 in a mode 0700 directory under the system temp directory,
+  not under the run directory. It stays only while the probe and the Claude
+  process run, and it is removed on success, timeout, cancellation, and
+  failure. OCI bind-mounts that directory read-only at
+  `/nitely/claude-mcp` and does not record the host path. The exclusive
+  set is confirmed by a `claude -p --output-format stream-json` probe that
+  reads the `system/init` `mcp_servers` field — no successful model call is
+  required. An empty declaration is an empty `--mcp-config` plus
   `--strict-mcp-config`. A committed project `.mcp.json` is ignored under the
   flag, including in an OCI container whose `HOME` is empty.
 - `glm`, `grok`, and the Pi-based runtimes (`pi`, `openrouter`, `together`)

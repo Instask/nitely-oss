@@ -1,4 +1,13 @@
+import { dirname, sep } from "node:path";
+
 import type { AgentMcpServersOutcome, AgentMcpServersRequest } from "./types.js";
+
+/**
+ * Container path of the exclusive Claude MCP config. The host file is mounted
+ * here. This is not under `/tmp`: that path is a small tmpfs, and it is not
+ * the attempt directory mounted at `/nitely/output`.
+ */
+export const CLAUDE_EXCLUSIVE_MCP_CONTAINER_DIR = "/nitely/claude-mcp";
 
 /**
  * Codex splits a `-c` key path on every dot and fails its bootstrap when an
@@ -505,6 +514,39 @@ export function withClaudeStrictMcpConfig(
 ): string[] {
   // Place the restriction flags early so subcommands and trailing `-` prompts stay intact.
   return ["--strict-mcp-config", "--mcp-config", configPath, ...args];
+}
+
+function isClaudeExclusiveMcpFile(file: string): boolean {
+  return file.includes(`${sep}nitely-claude-mcp-`) && file.endsWith(`${sep}config.json`);
+}
+
+/**
+ * Rewrites a host exclusive-config path to the container mount point and
+ * returns the read-only bind mount. Other `--mcp-config` values are left
+ * alone. Callers must not log the host path or the file contents.
+ */
+export function prepareClaudeExclusiveMcpArgs(args: readonly string[]): {
+  args: string[];
+  mountArgs: string[];
+} {
+  const index = args.indexOf("--mcp-config");
+  const hostFile = index >= 0 ? args[index + 1] : undefined;
+  if (!hostFile || !isClaudeExclusiveMcpFile(hostFile)) {
+    return { args: [...args], mountArgs: [] };
+  }
+  const hostDir = dirname(hostFile);
+  if (hostDir.includes(",")) {
+    throw new Error("Claude exclusive MCP directory cannot be bind-mounted");
+  }
+  const rewritten = [...args];
+  rewritten[index + 1] = `${CLAUDE_EXCLUSIVE_MCP_CONTAINER_DIR}/config.json`;
+  return {
+    args: rewritten,
+    mountArgs: [
+      "--mount",
+      `type=bind,src=${hostDir},dst=${CLAUDE_EXCLUSIVE_MCP_CONTAINER_DIR},readonly`,
+    ],
+  };
 }
 
 /**
