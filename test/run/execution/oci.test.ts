@@ -5,12 +5,13 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -100,6 +101,24 @@ function offlineTogetherRegistry(): AgentRuntimeRegistry {
         throw new Error(`unsupported agent runtime: ${candidate}`);
       }
       return together;
+    },
+  };
+}
+
+function offlineClaudeRegistry(): AgentRuntimeRegistry {
+  const claude = createDefaultAgentRuntimeRegistry().resolve("claude");
+  const runtime: AgentRuntimeLauncher = {
+    ...claude,
+    networkAccess: "none",
+    requiredEnv: undefined,
+  };
+  return {
+    supportedIds: () => ["claude"],
+    resolve: (candidate) => {
+      if (candidate !== "claude") {
+        throw new Error(`unsupported agent runtime: ${candidate}`);
+      }
+      return runtime;
     },
   };
 }
@@ -2243,6 +2262,141 @@ describe("OciExecutionBackend", () => {
       "/workspace",
       "-",
     ]);
+  });
+
+  it("bind-mounts the Claude exclusive MCP config outside the attempt and removes it", async () => {
+    const fixture = await createFixture();
+    const secret = "claude-mcp-secret-token";
+    const seen = new Set(await readdir(tmpdir()));
+    await writeFile(
+      join(fixture.worktree, ".mcp.json"),
+      `${JSON.stringify({
+        mcpServers: {
+          kept: { command: "true", env: { API_TOKEN: secret } },
+          sneaky: { command: "true", env: { API_TOKEN: secret } },
+        },
+      })}\n`,
+    );
+    const calls: SandboxProcessInput[] = [];
+    let hostFile = "";
+    const runner = successfulRunner(calls);
+    const init = '{"type":"system","subtype":"init","mcp_servers":[{"name":"kept","status":"failed"}]}\n';
+    const backend = new OciExecutionBackend({
+      image: "nitely-runner:test",
+      env: {},
+      processRunner: async (input) => {
+        if (input.args.includes("nitely-mcp-probe")) {
+          const configFlag = input.args.indexOf("--mcp-config");
+          expect(input.args[configFlag + 1]).toBe("/nitely/claude-mcp/config.json");
+          const mount = input.args.find((arg) => arg.includes("dst=/nitely/claude-mcp"));
+          expect(mount).toMatch(/^type=bind,src=.+,dst=\/nitely\/claude-mcp,readonly$/);
+          const source = mount?.match(/src=([^,]+)/)?.[1] ?? "";
+          hostFile = join(source, "config.json");
+          expect(hostFile.includes(`${"nitely-claude-mcp-"}`)).toBe(true);
+          expect(hostFile.startsWith(fixture.attempt)).toBe(false);
+          expect(statSync(hostFile).mode & 0o777).toBe(0o600);
+          expect(statSync(source).mode & 0o777).toBe(0o700);
+          expect(readFileSync(hostFile, "utf8")).toContain(secret);
+          expect(input.args.join("\n")).not.toContain(secret);
+          expect(input.args.join("\n")).not.toContain(hostFile);
+          calls.push(input);
+          return { stdout: init, stderr: "", exitCode: 0 };
+        }
+        return runner(input);
+      },
+      containerName: () => "nitely-claude-mcp",
+      runtimeRegistry: offlineClaudeRegistry(),
+    });
+
+    const result = await backend.runAgent(
+      { runId: "claude-mcp", path: fixture.worktree },
+      {
+        stage: {
+          ...agentStage(sandboxCapabilities({ allowedRuntimes: ["claude"] })),
+          runtime: "claude",
+        },
+        prompt: "Implement.",
+        attemptDirectory: fixture.attempt,
+        mcpServers: { mode: "declared-required", declared: ["kept"] },
+      },
+    );
+
+    expect(result.mcpServers).toEqual({
+      enforcement: "enforced",
+      enabled: ["kept"],
+      disabled: ["sneaky"],
+    });
+    const launch = calls.filter((call) => call.args[0] === "run").at(-1);
+    expect(launch?.args[launch.args.indexOf("--mcp-config") + 1]).toBe("/nitely/claude-mcp/config.json");
+    expect(launch?.args.some((arg) => arg.endsWith("dst=/nitely/claude-mcp,readonly"))).toBe(true);
+    expect(launch?.args.join("\n")).not.toContain(secret);
+    expect(launch?.args.join("\n")).not.toContain(hostFile);
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(JSON.stringify(result)).not.toContain("nitely-claude-mcp-");
+    await expect(access(hostFile)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(access(dirname(hostFile))).rejects.toMatchObject({ code: "ENOENT" });
+    const leaked = (await readdir(tmpdir())).filter(
+      (name) => name.startsWith("nitely-claude-mcp-")
+        && !name.startsWith("nitely-claude-mcp-real-")
+        && !seen.has(name),
+    );
+    expect(leaked).toEqual([]);
+    const persisted = await readdir(fixture.attempt);
+    expect(persisted.join("\n")).not.toContain("config.json");
+    expect(persisted.join("\n")).not.toContain(secret);
+  });
+
+  it("removes the exclusive Claude MCP config when the OCI probe fails", async () => {
+    const fixture = await createFixture();
+    const secret = "claude-mcp-secret-token";
+    await writeFile(
+      join(fixture.worktree, ".mcp.json"),
+      `${JSON.stringify({ mcpServers: { kept: { command: "true", env: { API_TOKEN: secret } } } })}\n`,
+    );
+    const calls: SandboxProcessInput[] = [];
+    let hostFile = "";
+    const runner = successfulRunner(calls);
+    const backend = new OciExecutionBackend({
+      image: "nitely-runner:test",
+      env: {},
+      processRunner: async (input) => {
+        if (input.args.includes("nitely-mcp-probe")) {
+          const mount = input.args.find((arg) => arg.includes("dst=/nitely/claude-mcp"));
+          const source = mount?.match(/src=([^,]+)/)?.[1] ?? "";
+          hostFile = join(source, "config.json");
+          calls.push(input);
+          return { stdout: "", stderr: "probe failed", exitCode: 1 };
+        }
+        return runner(input);
+      },
+      containerName: () => "nitely-claude-mcp-fail",
+      runtimeRegistry: offlineClaudeRegistry(),
+    });
+
+    let caught: Error | undefined;
+    try {
+      await backend.runAgent(
+        { runId: "claude-mcp-fail", path: fixture.worktree },
+        {
+          stage: {
+            ...agentStage(sandboxCapabilities({ allowedRuntimes: ["claude"] })),
+            runtime: "claude",
+          },
+          prompt: "Implement.",
+          attemptDirectory: fixture.attempt,
+          mcpServers: { mode: "declared-required", declared: ["kept"] },
+        },
+      );
+    } catch (error) {
+      caught = error as Error;
+    }
+    expect(caught?.message).toMatch(/MCP probe exited with code 1/);
+    expect(caught?.message).not.toContain(secret);
+    expect(caught?.message).not.toContain(hostFile);
+    expect(calls.some((call) => call.args[0] === "run" && !call.args.includes("nitely-mcp-probe"))).toBe(false);
+    await expect(access(hostFile)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(access(dirname(hostFile))).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await readdir(fixture.attempt)).join("\n")).not.toContain(secret);
   });
 
   it("caps stored Codex tool output inside the sandbox to the stage read budget", async () => {

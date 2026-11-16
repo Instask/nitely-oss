@@ -43,12 +43,15 @@ import {
 } from "./codex-activity.js";
 import { withCodexRolloutCalls } from "./codex-rollout.js";
 import {
+  claudeMcpConfigDocument,
   codexConfigOverrides,
   codexConfiguredMcpServers,
   codexFeaturesListArgs,
   codexMcpListArgs,
+  restrictClaudeMcpServers,
   restrictCodexMcpServers,
   withCodexMcpServersDisabled,
+  type ClaudeMcpServerDefinition,
 } from "./mcp-servers.js";
 import { withCodexToolOutputLimit } from "./codex-tool-output.js";
 import {
@@ -167,8 +170,19 @@ export interface RuntimeMcpServerRestriction {
     probe: RuntimeProbe;
     env: RuntimeEnv;
     allowConfigFallback: boolean;
-  }): Promise<{ disable: string[]; outcome: AgentMcpServersOutcome }>;
-  /** Launch args with the named servers turned off. */
+    /** Worktree cwd; Claude reads project `.mcp.json` here. */
+    cwd?: string;
+    /** Unused for the exclusive config. That file must not enter the run directory. */
+    attemptDirectory?: string;
+  }): Promise<{
+    disable: string[];
+    outcome: AgentMcpServersOutcome;
+    /** When set, preferred over `disable()` for rewriting launch argv. */
+    applyArgs?: (args: readonly string[]) => string[];
+    /** Removes the exclusive config directory. Safe to call more than once. */
+    cleanup?: () => Promise<void>;
+  }>;
+  /** Launch args with the named servers turned off (Codex-style). */
   disable(args: readonly string[], names: readonly string[]): string[];
 }
 
@@ -665,6 +679,99 @@ async function codexUserConfigServers(env: RuntimeEnv): Promise<string[]> {
   }
 }
 
+
+function claudeConfigDir(env: RuntimeEnv): string {
+  const configured = env.CLAUDE_CONFIG_DIR?.trim();
+  if (configured) return configured;
+  const home = env.HOME?.trim();
+  return home ? join(home, ".claude") : join(tmpdir(), "nitely-missing-claude-config");
+}
+
+function claudeUserJsonPath(env: RuntimeEnv): string {
+  // Claude Code stores user/local MCP entries in ~/.claude.json (alongside ~/.claude/).
+  const home = env.HOME?.trim();
+  return home ? join(home, ".claude.json") : join(tmpdir(), "nitely-missing-claude.json");
+}
+
+async function readJsonObject(path: string): Promise<Record<string, unknown> | undefined> {
+  try {
+    const raw = await readFile(path, "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function mcpServersFromObject(
+  value: unknown,
+): Record<string, ClaudeMcpServerDefinition> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  const out: Record<string, ClaudeMcpServerDefinition> = {};
+  for (const [name, def] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof def === "object" && def !== null && !Array.isArray(def)) {
+      out[name] = def as ClaudeMcpServerDefinition;
+    }
+  }
+  return out;
+}
+
+/**
+ * Claude MCP layers for a worktree, highest precedence first: local project
+ * entry in ~/.claude.json, project `.mcp.json`, then user-scope servers.
+ * Plugin servers are not extracted here; `--strict-mcp-config` drops them.
+ */
+async function claudeMcpConfigLayers(
+  env: RuntimeEnv,
+  cwd: string,
+): Promise<Record<string, ClaudeMcpServerDefinition>[]> {
+  const userJson = await readJsonObject(claudeUserJsonPath(env));
+  const local: Record<string, ClaudeMcpServerDefinition> = {};
+  const user: Record<string, ClaudeMcpServerDefinition> = {};
+  if (userJson) {
+    Object.assign(user, mcpServersFromObject(userJson.mcpServers));
+    const projects = userJson.projects;
+    if (typeof projects === "object" && projects !== null && !Array.isArray(projects)) {
+      const entry = (projects as Record<string, unknown>)[cwd];
+      if (typeof entry === "object" && entry !== null && !Array.isArray(entry)) {
+        Object.assign(local, mcpServersFromObject((entry as Record<string, unknown>).mcpServers));
+      }
+    }
+  }
+  const projectFile = await readJsonObject(join(cwd, ".mcp.json"));
+  const project = projectFile ? mcpServersFromObject(projectFile.mcpServers) : {};
+  return [local, project, user];
+}
+
+/**
+ * Writes the exclusive Claude MCP config outside any run directory. The file
+ * holds server env and headers copied from the operator's Claude config, so it
+ * stays in a 0700 temp directory and the caller removes that directory when
+ * the probe and the spawned CLI have finished.
+ */
+async function createClaudeExclusiveMcpConfig(
+  document: ReturnType<typeof claudeMcpConfigDocument>,
+): Promise<{ path: string; cleanup: () => Promise<void> }> {
+  const directory = await mkdtemp(join(tmpdir(), "nitely-claude-mcp-"));
+  // mkdtemp applies the process umask, so set the mode explicitly.
+  await chmod(directory, 0o700);
+  const path = join(directory, "config.json");
+  await writeFile(path, `${JSON.stringify(document)}\n`, { mode: 0o600 });
+  await chmod(path, 0o600);
+  let removed = false;
+  return {
+    path,
+    cleanup: async () => {
+      if (removed) return;
+      await rm(directory, { recursive: true, force: true });
+      removed = true;
+    },
+  };
+}
+
 class DefaultAgentRuntimeRegistry implements AgentRuntimeRegistry {
   private readonly runtimes: Map<string, AgentRuntimeLauncher>;
 
@@ -746,6 +853,36 @@ export function createDefaultAgentRuntimeRegistry(): AgentRuntimeRegistry {
       requiredEnv: [["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]],
       networkAccess: "required",
       fileReads: "native",
+      // Claude Code 2.1.x: --strict-mcp-config + --mcp-config holding only the
+      // stage's declared servers. Verified via stream-json system/init (no
+      // successful model call). Plugin and undeclared project/user servers drop.
+      mcpServerRestriction: {
+        restrict: async ({
+          request, stageId, probe, env, cwd,
+        }) => {
+          const worktree = cwd?.trim() || process.cwd();
+          const layers = await claudeMcpConfigLayers(env, worktree);
+          let cleanup: (() => Promise<void>) | undefined;
+          try {
+            const result = await restrictClaudeMcpServers({
+              request,
+              stageId,
+              layers,
+              probe,
+              writeConfig: async (document) => {
+                const written = await createClaudeExclusiveMcpConfig(document);
+                cleanup = written.cleanup;
+                return written.path;
+              },
+            });
+            return cleanup ? { ...result, cleanup } : result;
+          } catch (error) {
+            await cleanup?.();
+            throw error;
+          }
+        },
+        disable: (args, _names) => args as string[],
+      },
       build: ({ model, nativeEffort, env, permissionMode, additionalDirectories }) => ({
         runtime: "claude",
         command: env.NITELY_CLAUDE_COMMAND ?? "claude",
@@ -941,7 +1078,14 @@ export async function resolveMcpServerRestriction(input: {
   /** Whether the user config in `env` is the one the launch reads. */
   allowConfigFallback: boolean;
   stageId: string;
-}): Promise<{ disable: string[]; outcome?: AgentMcpServersOutcome }> {
+  cwd?: string;
+  attemptDirectory?: string;
+}): Promise<{
+  disable: string[];
+  outcome?: AgentMcpServersOutcome;
+  applyArgs?: (args: readonly string[]) => string[];
+  cleanup?: () => Promise<void>;
+}> {
   const request = input.request;
   // A caller that says nothing about MCP servers gets the previous behavior
   // and no claim in the result.
@@ -954,7 +1098,10 @@ export async function resolveMcpServerRestriction(input: {
   }
   const restriction = input.runtime.mcpServerRestriction;
   if (!restriction) {
-    const reason = `agent runtime ${input.runtime.id} has no MCP server restriction mechanism`;
+    const noMcp = ["glm", "grok", "pi", "openrouter", "together"].includes(input.runtime.id);
+    const reason = noMcp
+      ? `agent runtime ${input.runtime.id} has no MCP support`
+      : `agent runtime ${input.runtime.id} has no MCP server restriction mechanism`;
     if (request.mode === "declared-required") {
       throw new Error(
         `stage ${input.stageId} requires only its declared MCP servers but ${reason}`,
@@ -969,6 +1116,8 @@ export async function resolveMcpServerRestriction(input: {
     probe: input.probe,
     env: input.env,
     allowConfigFallback: input.allowConfigFallback,
+    cwd: input.cwd,
+    attemptDirectory: input.attemptDirectory,
   });
 }
 
@@ -1655,11 +1804,17 @@ export class LocalExecutionBackend implements ExecutionBackend {
       env: runtimeEnv,
       allowConfigFallback: true,
       stageId: input.stage.id,
+      cwd,
+      attemptDirectory: input.attemptDirectory,
     });
-    const restrictedLaunch = mcpServers.disable.length > 0 && runtime.mcpServerRestriction
+    const restrictedLaunch = runtime.mcpServerRestriction && mcpServers.outcome
+        && mcpServers.outcome.enforcement !== "inherited"
+        && mcpServers.outcome.enforcement !== "unsupported"
       ? {
         ...builtLaunch,
-        args: runtime.mcpServerRestriction.disable(builtLaunch.args, mcpServers.disable),
+        args: mcpServers.applyArgs
+          ? mcpServers.applyArgs(builtLaunch.args)
+          : runtime.mcpServerRestriction.disable(builtLaunch.args, mcpServers.disable),
       }
       : builtLaunch;
     // Codex truncates each stored tool output to the stage's read budget.
@@ -1688,249 +1843,254 @@ export class LocalExecutionBackend implements ExecutionBackend {
       command: launch.command,
       args: launch.args,
     });
-    if (input.signal?.aborted) {
-      throw Object.assign(new Error(`${cancellationMessage("agent", input.signal)} before start`), {
-        stdout: "",
-        stderr: `${cancellationMessage("agent", input.signal)} before start\n`,
-        cancelled: true,
-        termination: {
-          ...createTerminationResult(
-            "cancelled",
-            input.cancellationGraceMs ?? PROCESS_TERMINATION_GRACE_MS,
-          ),
-          exitedAt: new Date().toISOString(),
-        },
-      });
-    }
-    // Codex writes a rollout per thread under its CODEX_HOME; after the attempt
-    // it gives the per-model-call usage that codex exec --json leaves out.
-    const rollout = launch.runtime === "codex"
-      ? { codexHome: codexHome(runtimeEnv), attemptStartedAtMs: Date.now() }
-      : undefined;
-    return await withCodexRolloutCalls(new Promise<AgentResult>((resolvePromise, reject) => {
-      let timedOut = false;
-      let cancelled = false;
-      let settled = false;
-      let termination: ProcessTerminationResult | undefined;
-      let timeout: NodeJS.Timeout | undefined;
-      let forceKillTimeout: NodeJS.Timeout | undefined;
-      const shouldDetach = input.timeoutMs !== undefined || input.signal !== undefined;
-      const child = this.spawnAgent(processLaunch.command, processLaunch.args, {
-        cwd,
-        stdio: ["pipe", "pipe", "pipe"],
-        detached: shouldDetach,
-        env: runtimeEnv,
-      });
-      const stdout: Buffer[] = [];
-      const stderr: Buffer[] = [];
-      const logWriters = createStreamingAttemptLogWriters(input.attemptDirectory);
-      // Pi runs in JSON mode: its stdout is an event stream, not the answer.
-      // The stream stays out of the logs; the final answer is written once
-      // the process ends, so stdout.log reads as it did in text mode.
-      const piJson = isPiJsonRuntime(launch.runtime);
-      // Bounded: Pi streams per-token and per-tool-snapshot records.
-      const piCapture = piJson ? createPiJsonCapture({ captureContent: captureCallContent() }) : undefined;
-      // Codex command results are one JSON line each. Keep turn usage and tool
-      // identity while the line arrives, instead of buffering the command output.
-      const codexCapture = launch.runtime === "codex"
-        ? createCodexExecCapture({
-          onLine: (line) => {
-            const text = `${line}\n`;
-            process.stdout.write(text);
-            logWriters.writeStdout(text);
+    try {
+      if (input.signal?.aborted) {
+        throw Object.assign(new Error(`${cancellationMessage("agent", input.signal)} before start`), {
+          stdout: "",
+          stderr: `${cancellationMessage("agent", input.signal)} before start\n`,
+          cancelled: true,
+          termination: {
+            ...createTerminationResult(
+              "cancelled",
+              input.cancellationGraceMs ?? PROCESS_TERMINATION_GRACE_MS,
+            ),
+            exitedAt: new Date().toISOString(),
           },
-        })
+        });
+      }
+      // Codex writes a rollout per thread under its CODEX_HOME; after the attempt
+      // it gives the per-model-call usage that codex exec --json leaves out.
+      const rollout = launch.runtime === "codex"
+        ? { codexHome: codexHome(runtimeEnv), attemptStartedAtMs: Date.now() }
         : undefined;
-      let piTextWritten = false;
-      const clearTimers = () => {
-        if (timeout) clearTimeout(timeout);
-        if (forceKillTimeout) clearTimeout(forceKillTimeout);
-        input.signal?.removeEventListener("abort", abortAgent);
-      };
-      const killChild = (signal: NodeJS.Signals) => {
-        if (child.pid && shouldDetach) {
-          try {
-            process.kill(-child.pid, signal);
-            return;
-          } catch {
-            // Fall back to killing the runtime process below.
-          }
-        }
-        child.kill?.(signal);
-      };
-      child.stdout?.on("data", (chunk: Buffer) => {
-        if (piCapture) {
-          piCapture.write(chunk);
-          return;
-        }
-        if (codexCapture) {
-          codexCapture.write(chunk);
-          return;
-        }
-        stdout.push(chunk);
-        process.stdout.write(chunk);
-        logWriters.writeStdout(chunk);
-      });
-      child.stderr?.on("data", (chunk: Buffer) => {
-        stderr.push(chunk);
-        process.stderr.write(chunk);
-        logWriters.writeStderr(chunk);
-      });
-      const piResult = () =>
-        piJson
-          ? normalizePiJsonResult({
-            runtime: launch.runtime,
-            stdout: piCapture?.text() ?? "",
-            stderr: Buffer.concat(stderr).toString("utf8"),
-            exitCode: 0,
-            ...(input.stage.model ? { model: input.stage.model } : {}),
-            ...(captureCallContent() ? { captureContent: true } : {}),
+      return await withCodexRolloutCalls(new Promise<AgentResult>((resolvePromise, reject) => {
+        let timedOut = false;
+        let cancelled = false;
+        let settled = false;
+        let termination: ProcessTerminationResult | undefined;
+        let timeout: NodeJS.Timeout | undefined;
+        let forceKillTimeout: NodeJS.Timeout | undefined;
+        const shouldDetach = input.timeoutMs !== undefined || input.signal !== undefined;
+        const child = this.spawnAgent(processLaunch.command, processLaunch.args, {
+          cwd,
+          stdio: ["pipe", "pipe", "pipe"],
+          detached: shouldDetach,
+          env: runtimeEnv,
+        });
+        const stdout: Buffer[] = [];
+        const stderr: Buffer[] = [];
+        const logWriters = createStreamingAttemptLogWriters(input.attemptDirectory);
+        // Pi runs in JSON mode: its stdout is an event stream, not the answer.
+        // The stream stays out of the logs; the final answer is written once
+        // the process ends, so stdout.log reads as it did in text mode.
+        const piJson = isPiJsonRuntime(launch.runtime);
+        // Bounded: Pi streams per-token and per-tool-snapshot records.
+        const piCapture = piJson ? createPiJsonCapture({ captureContent: captureCallContent() }) : undefined;
+        // Codex command results are one JSON line each. Keep turn usage and tool
+        // identity while the line arrives, instead of buffering the command output.
+        const codexCapture = launch.runtime === "codex"
+          ? createCodexExecCapture({
+            onLine: (line) => {
+              const text = `${line}\n`;
+              process.stdout.write(text);
+              logWriters.writeStdout(text);
+            },
           })
           : undefined;
-      const capturedResult = (): AgentResult => {
-        const pi = piResult();
-        const capturedStdout = pi?.stdout ?? codexCapture?.text() ?? Buffer.concat(stdout).toString("utf8");
-        if (pi && !piTextWritten) {
-          piTextWritten = true;
-          if (pi.stdout) {
-            process.stdout.write(pi.stdout);
-            logWriters.writeStdout(pi.stdout);
-          }
-        }
-        const usage = pi ? pi.usage : parseRuntimeUsage(launch.runtime, capturedStdout);
-        // A resumed session keeps its id; a cold one reports whatever the
-        // runtime just started, so the next execution can continue it.
-        const sessionId =
-          runtime.sessionReuse?.parseSessionId(capturedStdout) ??
-          sessionOutcome.sessionId;
-        return {
-          stdout: capturedStdout,
-          stderr: pi?.stderr ?? Buffer.concat(stderr).toString("utf8"),
-          ...(usage ? { usage } : {}),
-          ...(globalSkills.outcome ? { globalSkills: globalSkills.outcome } : {}),
-          ...(mcpServers.outcome ? { mcpServers: mcpServers.outcome } : {}),
-          ...(input.session !== undefined || sessionId !== undefined
-            ? {
-              session: {
-                ...sessionOutcome,
-                ...(sessionId ? { sessionId } : {}),
-              },
-            }
-            : {}),
+        let piTextWritten = false;
+        const clearTimers = () => {
+          if (timeout) clearTimeout(timeout);
+          if (forceKillTimeout) clearTimeout(forceKillTimeout);
+          input.signal?.removeEventListener("abort", abortAgent);
         };
-      };
-      const settle = (action: () => void) => {
-        void logWriters.close().finally(action);
-      };
-      const terminationError = (message: string) =>
-        Object.assign(new Error(message), capturedResult(), {
-          ...(cancelled ? { cancelled: true } : {}),
-          ...(timedOut ? { timedOut: true } : {}),
-          ...(termination ? { termination } : {}),
-        });
-      const terminate = (reason: ProcessTerminationResult["reason"]) => {
-        if (termination) return;
-        const graceMs = input.cancellationGraceMs ?? PROCESS_TERMINATION_GRACE_MS;
-        termination = createTerminationResult(reason, graceMs);
-        if (reason === "timeout") {
-          timedOut = true;
-          const message = `agent session timed out after ${input.timeoutMs}ms\n`;
-          stderr.push(Buffer.from(message, "utf8"));
-          logWriters.writeStderr(message);
-        } else {
-          cancelled = true;
-          const message = `${cancellationMessage("agent", input.signal)}\n`;
-          stderr.push(Buffer.from(message, "utf8"));
-          logWriters.writeStderr(message);
-        }
-        killChild(termination.signal);
-        forceKillTimeout = setTimeout(() => {
-          if (termination) {
-            termination.forceKillSent = true;
+        const killChild = (signal: NodeJS.Signals) => {
+          if (child.pid && shouldDetach) {
+            try {
+              process.kill(-child.pid, signal);
+              return;
+            } catch {
+              // Fall back to killing the runtime process below.
+            }
           }
-          killChild("SIGKILL");
-        }, graceMs);
-      };
-      const abortAgent = () => terminate("cancelled");
-      child.stdin.on("error", (error: NodeJS.ErrnoException) => {
-        if (error.code === "EPIPE" || error.code === "ERR_STREAM_DESTROYED") {
-          return;
-        }
-        reject(error);
-      });
-      child.stdin.end(
-        launch.promptDelivery === "stdin" ? input.prompt : undefined,
-      );
-      child.on("error", (error) => {
-        if (settled) return;
-        settled = true;
-        clearTimers();
-        if (error.code === "ENOENT") {
-          settle(() =>
-            reject(Object.assign(
-              new Error(
-                `unable to start agent runtime ${launch.runtime}: command ${processLaunch.command} was not found`,
-              ),
-              capturedResult(),
-            )),
-          );
-          return;
-        }
-        settle(() => reject(Object.assign(error, capturedResult())));
-      });
-      if (input.timeoutMs !== undefined) {
-        timeout = setTimeout(() => {
-          terminate("timeout");
-        }, input.timeoutMs);
-      }
-      input.signal?.addEventListener("abort", abortAgent, { once: true });
-      child.on("close", (code) => {
-        if (settled) return;
-        settled = true;
-        clearTimers();
-        if (termination) {
-          termination.exitedAt = new Date().toISOString();
-        }
-        if (cancelled) {
-          settle(() =>
-            reject(terminationError(cancellationMessage("agent", input.signal))),
-          );
-          return;
-        }
-        if (timedOut) {
-          settle(() =>
-            reject(
-              terminationError(
-                `agent session timed out after ${input.timeoutMs}ms`,
-              ),
-            ),
-          );
-          return;
-        }
-        const result = capturedResult();
-        const envelopeError = launch.runtime === "claude"
-          ? claudeErrorResultMessage(result.stdout ?? "")
-          : undefined;
-        // Text mode exits 1 when Pi's final message is an error; JSON mode
-        // exits 0, so the stream decides.
-        const piFailed = piJson && piResult()?.exitCode !== 0;
-        if (code === 0 && envelopeError === undefined && !piFailed) {
-          settle(() => resolvePromise(result));
-          return;
-        }
-        const message = code === 0 && envelopeError !== undefined
-          ? `${launch.runtime} reported an error: ${envelopeError}`
-          : agentRuntimeExitMessage({
-            runtime,
-            launchRuntime: launch.runtime,
-            exitCode: code === 0 ? 1 : code ?? 1,
-            model: input.stage.model,
-            stdout: result.stdout ?? "",
-            stderr: result.stderr ?? "",
+          child.kill?.(signal);
+        };
+        child.stdout?.on("data", (chunk: Buffer) => {
+          if (piCapture) {
+            piCapture.write(chunk);
+            return;
+          }
+          if (codexCapture) {
+            codexCapture.write(chunk);
+            return;
+          }
+          stdout.push(chunk);
+          process.stdout.write(chunk);
+          logWriters.writeStdout(chunk);
+        });
+        child.stderr?.on("data", (chunk: Buffer) => {
+          stderr.push(chunk);
+          process.stderr.write(chunk);
+          logWriters.writeStderr(chunk);
+        });
+        const piResult = () =>
+          piJson
+            ? normalizePiJsonResult({
+              runtime: launch.runtime,
+              stdout: piCapture?.text() ?? "",
+              stderr: Buffer.concat(stderr).toString("utf8"),
+              exitCode: 0,
+              ...(input.stage.model ? { model: input.stage.model } : {}),
+              ...(captureCallContent() ? { captureContent: true } : {}),
+            })
+            : undefined;
+        const capturedResult = (): AgentResult => {
+          const pi = piResult();
+          const capturedStdout = pi?.stdout ?? codexCapture?.text() ?? Buffer.concat(stdout).toString("utf8");
+          if (pi && !piTextWritten) {
+            piTextWritten = true;
+            if (pi.stdout) {
+              process.stdout.write(pi.stdout);
+              logWriters.writeStdout(pi.stdout);
+            }
+          }
+          const usage = pi ? pi.usage : parseRuntimeUsage(launch.runtime, capturedStdout);
+          // A resumed session keeps its id; a cold one reports whatever the
+          // runtime just started, so the next execution can continue it.
+          const sessionId =
+            runtime.sessionReuse?.parseSessionId(capturedStdout) ??
+            sessionOutcome.sessionId;
+          return {
+            stdout: capturedStdout,
+            stderr: pi?.stderr ?? Buffer.concat(stderr).toString("utf8"),
+            ...(usage ? { usage } : {}),
+            ...(globalSkills.outcome ? { globalSkills: globalSkills.outcome } : {}),
+            ...(mcpServers.outcome ? { mcpServers: mcpServers.outcome } : {}),
+            ...(input.session !== undefined || sessionId !== undefined
+              ? {
+                session: {
+                  ...sessionOutcome,
+                  ...(sessionId ? { sessionId } : {}),
+                },
+              }
+              : {}),
+          };
+        };
+        const settle = (action: () => void) => {
+          void logWriters.close().finally(action);
+        };
+        const terminationError = (message: string) =>
+          Object.assign(new Error(message), capturedResult(), {
+            ...(cancelled ? { cancelled: true } : {}),
+            ...(timedOut ? { timedOut: true } : {}),
+            ...(termination ? { termination } : {}),
           });
-        settle(() => reject(Object.assign(new Error(message), result)));
-      });
-    }), rollout);
+        const terminate = (reason: ProcessTerminationResult["reason"]) => {
+          if (termination) return;
+          const graceMs = input.cancellationGraceMs ?? PROCESS_TERMINATION_GRACE_MS;
+          termination = createTerminationResult(reason, graceMs);
+          if (reason === "timeout") {
+            timedOut = true;
+            const message = `agent session timed out after ${input.timeoutMs}ms\n`;
+            stderr.push(Buffer.from(message, "utf8"));
+            logWriters.writeStderr(message);
+          } else {
+            cancelled = true;
+            const message = `${cancellationMessage("agent", input.signal)}\n`;
+            stderr.push(Buffer.from(message, "utf8"));
+            logWriters.writeStderr(message);
+          }
+          killChild(termination.signal);
+          forceKillTimeout = setTimeout(() => {
+            if (termination) {
+              termination.forceKillSent = true;
+            }
+            killChild("SIGKILL");
+          }, graceMs);
+        };
+        const abortAgent = () => terminate("cancelled");
+        child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+          if (error.code === "EPIPE" || error.code === "ERR_STREAM_DESTROYED") {
+            return;
+          }
+          reject(error);
+        });
+        child.stdin.end(
+          launch.promptDelivery === "stdin" ? input.prompt : undefined,
+        );
+        child.on("error", (error) => {
+          if (settled) return;
+          settled = true;
+          clearTimers();
+          if (error.code === "ENOENT") {
+            settle(() =>
+              reject(Object.assign(
+                new Error(
+                  `unable to start agent runtime ${launch.runtime}: command ${processLaunch.command} was not found`,
+                ),
+                capturedResult(),
+              )),
+            );
+            return;
+          }
+          settle(() => reject(Object.assign(error, capturedResult())));
+        });
+        if (input.timeoutMs !== undefined) {
+          timeout = setTimeout(() => {
+            terminate("timeout");
+          }, input.timeoutMs);
+        }
+        input.signal?.addEventListener("abort", abortAgent, { once: true });
+        child.on("close", (code) => {
+          if (settled) return;
+          settled = true;
+          clearTimers();
+          if (termination) {
+            termination.exitedAt = new Date().toISOString();
+          }
+          if (cancelled) {
+            settle(() =>
+              reject(terminationError(cancellationMessage("agent", input.signal))),
+            );
+            return;
+          }
+          if (timedOut) {
+            settle(() =>
+              reject(
+                terminationError(
+                  `agent session timed out after ${input.timeoutMs}ms`,
+                ),
+              ),
+            );
+            return;
+          }
+          const result = capturedResult();
+          const envelopeError = launch.runtime === "claude"
+            ? claudeErrorResultMessage(result.stdout ?? "")
+            : undefined;
+          // Text mode exits 1 when Pi's final message is an error; JSON mode
+          // exits 0, so the stream decides.
+          const piFailed = piJson && piResult()?.exitCode !== 0;
+          if (code === 0 && envelopeError === undefined && !piFailed) {
+            settle(() => resolvePromise(result));
+            return;
+          }
+          const message = code === 0 && envelopeError !== undefined
+            ? `${launch.runtime} reported an error: ${envelopeError}`
+            : agentRuntimeExitMessage({
+              runtime,
+              launchRuntime: launch.runtime,
+              exitCode: code === 0 ? 1 : code ?? 1,
+              model: input.stage.model,
+              stdout: result.stdout ?? "",
+              stderr: result.stderr ?? "",
+            });
+          settle(() => reject(Object.assign(new Error(message), result)));
+        });
+      }), rollout);
+    } finally {
+      // The config holds MCP credentials and must not survive the CLI.
+      await mcpServers.cleanup?.();
+    }
   }
 
   async preflightAgentRuntime(

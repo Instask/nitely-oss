@@ -1,4 +1,5 @@
 import {
+  access,
   chmod,
   mkdir,
   mkdtemp,
@@ -9,8 +10,9 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
@@ -1108,16 +1110,16 @@ describe("LocalExecutionBackend", () => {
     });
   });
 
-  it("fails closed when a runtime without MCP restriction must restrict", async () => {
+  it("fails closed when a runtime without MCP support must restrict", async () => {
     const backend = new LocalExecutionBackend({
-      env: { ANTHROPIC_API_KEY: "key", PATH: "/usr/bin" },
+      env: { NITELY_GLM_API_KEY: "key", PATH: "/usr/bin" },
       spawn: createSuccessfulSpawn([]),
     });
     const run = (mode: "declared-if-supported" | "declared-required") =>
       backend.runAgent(
         { runId: "run-agent", path: "/repo/worktree" },
         {
-          stage: agentStage({ runtime: "claude" }),
+          stage: agentStage({ runtime: "glm" }),
           prompt: "Implement this.",
           attemptDirectory: "/repo/.nitely/runs/run-agent/stages/agent/1",
           mcpServers: { mode, declared: [] },
@@ -1125,14 +1127,151 @@ describe("LocalExecutionBackend", () => {
       );
 
     await expect(run("declared-required")).rejects.toThrow(
-      /requires only its declared MCP servers but agent runtime claude has no MCP server restriction mechanism/,
+      /requires only its declared MCP servers but agent runtime glm has no MCP support/,
     );
     await expect(run("declared-if-supported")).resolves.toMatchObject({
       mcpServers: {
         enforcement: "unsupported",
-        reason: "agent runtime claude has no MCP server restriction mechanism",
+        reason: "agent runtime glm has no MCP support",
       },
     });
+  });
+
+  it("restricts a Claude stage to declared servers with --strict-mcp-config", async () => {
+    const worktree = await mkdtemp(join(tmpdir(), "nitely-claude-project-"));
+    const attempt = await mkdtemp(join(tmpdir(), "nitely-claude-attempt-"));
+    const secret = "claude-mcp-secret-token";
+    let configPath = "";
+    try {
+      await writeFile(
+        join(worktree, ".mcp.json"),
+        `${JSON.stringify({
+          mcpServers: {
+            kept: { command: "true", env: { API_TOKEN: secret } },
+            sneaky: { command: "true", env: { API_TOKEN: secret } },
+          },
+        })}\n`,
+      );
+      const calls: SpawnCall[] = [];
+      const backend = new LocalExecutionBackend({
+        env: { ANTHROPIC_API_KEY: "key", PATH: "/usr/bin", HOME: worktree },
+        spawn: (command, args, options) => {
+          const index = args.indexOf("--mcp-config");
+          configPath = args[index + 1] ?? "";
+          expect(configPath.includes(`${"nitely-claude-mcp-"}`)).toBe(true);
+          expect(configPath.startsWith(attempt)).toBe(false);
+          expect(statSync(configPath).mode & 0o777).toBe(0o600);
+          expect(statSync(dirname(configPath)).mode & 0o777).toBe(0o700);
+          expect(readFileSync(configPath, "utf8")).toContain(secret);
+          return createSuccessfulSpawn(calls)(command, args, options);
+        },
+        probeRuntime: async () =>
+          '{"type":"system","subtype":"init","mcp_servers":[{"name":"kept","status":"failed"}]}\n',
+      });
+      const result = await backend.runAgent(
+        { runId: "run-agent", path: worktree },
+        {
+          stage: agentStage({ runtime: "claude" }),
+          prompt: "Implement this.",
+          attemptDirectory: attempt,
+          mcpServers: { mode: "declared-if-supported", declared: ["kept"] },
+        },
+      );
+      expect(result.mcpServers).toEqual({
+        enforcement: "enforced",
+        enabled: ["kept"],
+        disabled: ["sneaky"],
+      });
+      expect(calls[0]?.args.slice(0, 2)).toEqual(["--strict-mcp-config", "--mcp-config"]);
+      expect(JSON.stringify(result)).not.toContain(secret);
+      expect(calls[0]?.args.join(" ")).not.toContain(secret);
+      await expect(access(configPath)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(access(dirname(configPath))).rejects.toMatchObject({ code: "ENOENT" });
+      const persisted = await readdir(attempt);
+      expect(persisted.join("\n")).not.toContain("config.json");
+      expect(persisted.join("\n")).not.toContain("claude-mcp");
+      for (const name of persisted) {
+        expect(await readFile(join(attempt, name), "utf8")).not.toContain(secret);
+      }
+    } finally {
+      await rm(worktree, { recursive: true, force: true });
+      await rm(attempt, { recursive: true, force: true });
+    }
+  });
+
+  it("removes the exclusive Claude MCP config when the launch fails or is cancelled", async () => {
+    const worktree = await mkdtemp(join(tmpdir(), "nitely-claude-project-"));
+    const attempt = await mkdtemp(join(tmpdir(), "nitely-claude-attempt-"));
+    const seen = new Set(await readdir(tmpdir()));
+    try {
+      await writeFile(
+        join(worktree, ".mcp.json"),
+        `${JSON.stringify({ mcpServers: { kept: { command: "true", env: { API_TOKEN: "claude-mcp-secret-token" } } } })}\n`,
+      );
+      const failing = new LocalExecutionBackend({
+        env: { ANTHROPIC_API_KEY: "key", PATH: "/usr/bin", HOME: worktree },
+        spawn: () => {
+          const child = new EventEmitter() as EventEmitter & { stdin: Writable };
+          child.stdin = new Writable({
+            write(_chunk, _encoding, callback) {
+              callback();
+            },
+            final(callback) {
+              queueMicrotask(() => child.emit("close", 1));
+              callback();
+            },
+          });
+          return child;
+        },
+        probeRuntime: async () =>
+          '{"type":"system","subtype":"init","mcp_servers":[{"name":"kept","status":"failed"}]}\n',
+      });
+      await expect(
+        failing.runAgent(
+          { runId: "run-agent", path: worktree },
+          {
+            stage: agentStage({ runtime: "claude" }),
+            prompt: "Implement this.",
+            attemptDirectory: attempt,
+            mcpServers: { mode: "declared-if-supported", declared: ["kept"] },
+          },
+        ),
+      ).rejects.toThrow(/exited with code 1/);
+
+      const signal = new AbortController();
+      signal.abort();
+      const cancelled = new LocalExecutionBackend({
+        env: { ANTHROPIC_API_KEY: "key", PATH: "/usr/bin", HOME: worktree },
+        spawn: () => {
+          throw new Error("spawn should not run after cancellation");
+        },
+        probeRuntime: async () =>
+          '{"type":"system","subtype":"init","mcp_servers":[{"name":"kept","status":"failed"}]}\n',
+      });
+      await expect(
+        cancelled.runAgent(
+          { runId: "run-agent", path: worktree },
+          {
+            stage: agentStage({ runtime: "claude" }),
+            prompt: "Implement this.",
+            attemptDirectory: attempt,
+            signal: signal.signal,
+            mcpServers: { mode: "declared-required", declared: ["kept"] },
+          },
+        ),
+      ).rejects.toThrow(/before start/);
+
+      const leaked = (await readdir(tmpdir())).filter(
+        (name) => name.startsWith("nitely-claude-mcp-")
+          && !name.startsWith("nitely-claude-mcp-real-")
+          && !seen.has(name),
+      );
+      expect(leaked).toEqual([]);
+      expect((await readdir(attempt)).join("\n")).not.toContain("claude-mcp-secret-token");
+    } finally {
+      await rm(worktree, { recursive: true, force: true });
+      await rm(attempt, { recursive: true, force: true });
+    }
   });
 
   it("reports the Codex session id so the next execution can continue it", async () => {

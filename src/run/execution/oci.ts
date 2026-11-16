@@ -30,6 +30,7 @@ import {
 } from "./local.js";
 import { createCodexExecCapture } from "./codex-activity.js";
 import { withCodexToolOutputLimit } from "./codex-tool-output.js";
+import { prepareClaudeExclusiveMcpArgs } from "./mcp-servers.js";
 import { applyCodexRolloutCalls } from "./codex-rollout.js";
 import {
   captureCallContent,
@@ -400,6 +401,13 @@ function assertDockerMountPath(path: string): void {
   if (path.includes(",")) {
     throw new Error(`OCI bind mount path cannot contain a comma: ${path}`);
   }
+}
+
+/** Inserts docker arguments immediately before the image name. */
+function insertBeforeImage(dockerArgs: string[], image: string, extra: readonly string[]): void {
+  if (extra.length === 0) return;
+  const imageIndex = dockerArgs.indexOf(image);
+  dockerArgs.splice(imageIndex < 0 ? dockerArgs.length : imageIndex, 0, ...extra);
 }
 
 function localDockerEndpoint(env: RuntimeEnv): {
@@ -1501,11 +1509,18 @@ export class OciExecutionBackend implements ExecutionBackend {
             input.visibleInputPaths ?? [],
             secretNames,
           );
-          probePlan.launch.args.splice(-3, 3, launch.command, ...args);
+          const preparedProbe = prepareClaudeExclusiveMcpArgs(args);
+          probePlan.launch.args.splice(-3, 3, launch.command, ...preparedProbe.args);
+          insertBeforeImage(
+            probePlan.launch.args,
+            this.resolvedImage ?? this.image,
+            preparedProbe.mountArgs,
+          );
           probePlan.launch.stdin = undefined;
           const probed = await this.executePlan(probePlan);
           if (probed.exitCode !== 0) {
-            throw new Error(`${launch.command} ${args.join(" ")} exited with code ${probed.exitCode}`);
+            // The probe argv contains the exclusive config path. Leave it out.
+            throw new Error(`${launch.command} MCP probe exited with code ${probed.exitCode}`);
           }
           return probed.stdout;
         },
@@ -1513,9 +1528,22 @@ export class OciExecutionBackend implements ExecutionBackend {
         // The container has no user config of its own to fall back on.
         allowConfigFallback: false,
         stageId: input.stage.id,
+        cwd: ws.path,
+        attemptDirectory: input.attemptDirectory,
       });
-      if (mcpServers.disable.length > 0 && runtime.mcpServerRestriction) {
-        runtimeArgs = runtime.mcpServerRestriction.disable(runtimeArgs, mcpServers.disable);
+      let exclusiveMcpMount: string[] = [];
+      if (
+        runtime.mcpServerRestriction
+        && mcpServers.outcome
+        && mcpServers.outcome.enforcement !== "inherited"
+        && mcpServers.outcome.enforcement !== "unsupported"
+      ) {
+        runtimeArgs = mcpServers.applyArgs
+          ? mcpServers.applyArgs(runtimeArgs)
+          : runtime.mcpServerRestriction.disable(runtimeArgs, mcpServers.disable);
+        const preparedLaunch = prepareClaudeExclusiveMcpArgs(runtimeArgs);
+        runtimeArgs = preparedLaunch.args;
+        exclusiveMcpMount = preparedLaunch.mountArgs;
       }
       // Codex truncates each stored tool output to the stage's read budget.
       if (launch.runtime === "codex") {
@@ -1530,6 +1558,11 @@ export class OciExecutionBackend implements ExecutionBackend {
         plan.launch.args.splice(imageIndex, 0, "--env", "IS_SANDBOX=1");
       }
       plan.launch.args.splice(-3, 3, launch.command, ...runtimeArgs);
+      insertBeforeImage(
+        plan.launch.args,
+        this.resolvedImage ?? this.image,
+        exclusiveMcpMount,
+      );
       if (launch.promptDelivery === "stdin") {
         plan.launch.stdin = preparedPrompt;
         // Without --interactive the engine closes the workload's stdin and the
@@ -1632,6 +1665,7 @@ export class OciExecutionBackend implements ExecutionBackend {
       if (mediatorDir) {
         await rm(mediatorDir, { recursive: true, force: true }).catch(() => undefined);
       }
+      await mcpServers?.cleanup?.();
     }
   }
 
